@@ -1,12 +1,20 @@
-Walkie-Talkie Screen Text Tracker
+# Walkie-Talkie Screen Text Tracker (MSI GenAI Edition)
 
-📋 Project Overview
+📋 **Project Overview**
 
-A computer vision system that detects walkie-talkies, tracks them in real-time, and extracts text/numeric information from their screens using OCR. The system is designed to monitor multiple walkie-talkie devices simultaneously and read their display information.
+A computer vision system that detects walkie-talkies, tracks them in real-time, and extracts text/numeric information from their screens. This updated version integrates **MSI GenAI** for advanced text extraction, multilingual support, and automated UI defect detection, while falling back to local OCR engines (like Tesseract or EasyOCR) if offline. The system is designed to monitor multiple walkie-talkie devices simultaneously and read their display information.
 
-🏗️ Project Structure
+✨ **Key Features**
+* **GenAI-Powered OCR:** Extracts complex, multilingual text and provides English translations.
+* **Automated Defect Detection:** Automatically flags UI issues such as misalignments, text overlaps (bridge errors), and upside-down text.
+* **GUI Launcher:** Includes a Tkinter-based user interface to easily configure device profiles, camera inputs, and output paths.
+* **Live Camera Tuning:** Adjust Brightness, Sharpness, and Focus dynamically via an on-screen overlay.
+* **Dual Capture Methods:** Seamlessly switch between OpenCV and FFmpeg camera backends.
+* **Unicode Rendering:** Renders complex scripts (Hangul, CJK, Arabic, Cyrillic) flawlessly on the preview using Pillow.
 
-```
+🏗️ **Project Structure**
+
+```text
 walkie-tracker/
 ├── data/
 │   ├── raw_images/          # Raw photos of walkie-talkies
@@ -14,30 +22,32 @@ walkie-tracker/
 │   ├── train/images/labels  # Training dataset
 │   ├── val/images/labels    # Validation dataset
 │   └── dataset.yaml         # Dataset configuration
-├── src/s
-│   ├── main.py              # Main application
-│   ├── detector.py          # YOLO-based walkie-talkie detector
+├── src/
+│   ├── main_msi_genai.py    # Primary GenAI application & GUI Launcher
+│   ├── fast_detector.py     # YOLOv8 walkie-talkie detection
+│   ├── msi_genai_ocr.py     # MSI GenAI integration module
+│   ├── simple_ocr.py        # Fallback local OCR (Tesseract/EasyOCR)
 │   ├── train_detector.py    # Model training script
 │   ├── annotation_tool.py   # Image annotation tool
-│   ├── tracker.py           # Device tracking and re-identification
-│   ├── ocr_processor.py     # OCR engine for screen text extraction
-│   ├── ui.py               # User interface components
+│   └── tracker.py           # Device tracking and re-identification
 ├── configs/
-│   └── settings.yaml       # Configuration file
+│   ├── settings.yaml        # Configuration file
+│   └── device_profiles.json # Saved device naming profiles
 ├── scripts/
-│   ├── split_data.py       # Dataset splitting utility
-│   └── capture_variations.py # Data collection script
-├── models/                 # Trained model storage
-├── runs/                  # Training runs and logs
-├── requirements.txt       # Python dependencies
-└── .vscode/              # VS Code configuration
-```
+│   ├── split_data.py        # Dataset splitting utility
+│   ├── capture_variations.py# Data collection script
+│   └── augment_train.py     # Data augmentation script
+├── models/                  # Trained model storage
+├── output/                  # Saved session captures and JSON logs
+├── runs/                    # Training runs and logs
+├── requirements.txt         # Python dependencies
+├── .env                     # MSI GenAI API Credentials (Required)
+└── .vscode/                 # VS Code configuration            # MSI GenAI API Credentials (Required)
 
 🚀 Quick Start
 
 1. Environment Setup
 
-```bash
 # Clone or create project directory
 cd walkie-tracker
 
@@ -53,11 +63,18 @@ source devenv/bin/activate
 # Clear pip cache and install dependencies
 pip cache purge
 pip install -r requirements.txt
-```
 
-2. Data Collection & Model Training Pipeline
+2. MSI GenAI Configuration (.env)
 
-```bash
+To use the GenAI text extraction, you must create a .env file in the root directory with your API credentials:
+
+MSI_HOST=your_msi_host_url
+MSI_API_KEY=your_api_key
+MSI_USER_ID=your_user_id
+MSI_DATASTORE_ID=your_datastore_id
+
+3. Data Collection & Model Training Pipeline
+
 # Step 1: Collect images of walkie-talkies (interactive)
 python scripts/capture_variations.py
 
@@ -67,19 +84,22 @@ python src/annotation_tool.py
 # Step 3: Split data into training/validation sets (80/20 ratio)
 python scripts/split_data.py
 
-# Step 4:  augmented copies(brightness up/down,contrast,clahe,blur,noise)
+# Step 4: Create augmented copies (brightness up/down, contrast, clahe, blur, noise)
 python scripts/augment_train.py
 
 # Step 5: Train the detection model
 python src/train_detector.py
-```
 
-3. Run the Application
+4. Run the Application
 
-```bash
-# Start the walkie-talkie tracker
-python src/main_msi_genai.py
-```
+# 1. GUI Launcher Mode (Recommended for easy setup)
+python main_msi_genai.py --gui
+
+# 2. Standard CLI Mode
+python main_msi_genai.py
+
+# 3. Automated Single Capture (Useful for automated testing)
+python main_msi_genai.py --once --warmup-sec 2.0
 
 ⚙️ Configuration
 
@@ -87,7 +107,6 @@ Screen Region Coordinates
 
 For accurate OCR, adjust the screen region in configs/settings.yaml:
 
-```yaml
 screen:
   roi_offsets:
     walkie_talkie:
@@ -95,7 +114,6 @@ screen:
       y1: 0.55  # Top offset (55% from top)
       x2: 0.90  # Right offset (90% from left)
       y2: 0.70  # Bottom offset (70% from top)
-```
 
 Training Parameters
 
@@ -111,35 +129,55 @@ training:
 
 🎮 Application Controls
 
-When running main.py:
+When the camera preview window is active, use the following hotkeys:
 
-· SPACE: Pause/Resume tracking
-· M: Toggle device mapping mode
-· D: Toggle debug mode
-· T: Test detection on current frame
-· S: Save screenshot
-· Q: Quit application
+SPACE: Capture the current frame and extract text using MSI GenAI (or fallback OCR).
+C: Switch camera capture method (OpenCV ↔ FFmpeg).
+T: Toggle the Camera Settings Overlay (Adjust Brightness, Sharpness, Focus using your mouse).
++ / =: Zoom In.
+- / _: Zoom Out.
+Z: Reset Zoom.
+X: Exit the application.
+
+📁 Output Format
+
+When you save a result (by pressing S after a capture), the system creates a structured folder in the output/ directory:
+
+output/session_YYYYMMDD_HHMMSS/
+├── raw_capture.jpg           # The original unedited frame
+├── annotated_result.jpg      # Image with bounding boxes, text, and error warnings
+├── session_summary.json      # JSON log of all devices detected and text extracted
+└── device_1/                 # Subfolder for each detected device
+    ├── device_info.json      # Specific device OCR text and error flags
+    ├── screen_roi.jpg        # Cropped image of the screen
+    └── sent_to_genai.jpg     # The exact crop sent to the GenAI API
+
 
 🔧 Troubleshooting
 
 Common Issues
 
-1. Camera not detected
-   · Check camera ID in configs/settings.yaml (default: 1)
-   · Try camera IDs 0, 1, or 2
-2. Poor OCR results
-   · Ensure good lighting on walkie-talkie screen
-   · Adjust screen region coordinates
-   · Try different OCR engines in configuration
-3. Model not detecting walkie-talkies
-   · Retrain with more diverse images
-   · Adjust confidence threshold in detector.py
+Camera not detected
+· Check camera ID in configs/settings.yaml (default: 1)
+· Try camera IDs 0, 1, or 2
+· Press C in the app to switch from OpenCV to the FFmpeg backend.
+
+Poor OCR results
+· Ensure good lighting on walkie-talkie screen
+· Adjust screen region coordinates
+· Try different OCR engines in configuration
+
+Model not detecting walkie-talkies
+· Retrain with more diverse images
+· Adjust confidence threshold in settings.yaml
+
+API_ERROR / CONNECTION ERROR
+· Ensure your .env variables are correctly configured and that your network allows connections to the MSI host.
 
 Complete Reset
 
 To start fresh with new data:
 
-```bash
 # Delete all collected data and trained models
 # 1. Remove data folders
 rm -rf data/annotated data/raw_images data/train data/val
@@ -152,7 +190,6 @@ rm -rf runs/
 
 # 4. Optional: Remove downloaded model
 rm -f yolov8n.pt
-```
 
 📊 Dataset Information
 
@@ -185,9 +222,10 @@ Classes:
 
 The system supports multiple OCR engines (configure in settings.yaml):
 
-1. Tesseract (Recommended for digital displays)
-2. EasyOCR
-3. PaddleOCR
+MSI GenAI (Primary engine for complex, multilingual text and translation)
+Tesseract (Recommended offline fallback for digital displays)
+EasyOCR
+PaddleOCR
 
 🖥️ Development
 
@@ -202,47 +240,28 @@ The project includes VS Code settings for:
 
 Testing
 
-```bash
 # Quick training test (30 epochs)
 python src/train_detector.py --quick
 
 # Test with specific configuration
 python src/main_msi_genai.py --config configs/settings.yaml --camera 0
-```
-
-📁 File Descriptions
-
-Core Application Files
-
-· src/main_msi_genai.py - Main application entry point
-· src/fast_detector.py - Walkie-talkie detection using YOLOv8
-· src/simple_ocr.py - Text extraction from screens
-
-Training Pipeline
-
-· src/train_detector.py - Model training with YOLOv8
-· src/annotation_tool.py - Interactive annotation tool
-· scripts/split_data.py - Dataset splitting utility
-
-Configuration
-
-· configs/settings.yaml - All system parameters
-· data/dataset.yaml - Dataset configuration for YOLO
 
 📈 Performance Tips
 
-1. For better detection:
-   · Collect diverse images (different angles, lighting)
-   · Include multiple walkie-talkies in training data
-   · Annotate both walkie-talkie and screen separately
-2. For better OCR:
-   · Ensure screen is clearly visible
-   · Use good lighting conditions
-   · Adjust screen region coordinates for your device model
-3. For real-time performance:
-   · Use GPU if available (set device: "cuda")
-   · Reduce frame resolution if needed
-   · Adjust frame_skip in settings
+For better detection:
+· Collect diverse images (different angles, lighting)
+· Include multiple walkie-talkies in training data
+· Annotate both walkie-talkie and screen separately
+
+For better OCR:
+· Ensure screen is clearly visible
+· Use good lighting conditions
+· Adjust screen region coordinates for your device model
+
+For real-time performance:
+· Use GPU if available (set device: "cuda")
+· Reduce frame resolution if needed
+· Adjust frame_skip in settings
 
 🤝 Contributing
 
