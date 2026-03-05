@@ -131,13 +131,13 @@ training:
 
 When the camera preview window is active, use the following hotkeys:
 
- SPACE: Capture the current frame and extract text using MSI GenAI (or fallback OCR).
- C: Switch camera capture method (OpenCV ↔ FFmpeg).
- T: Toggle the Camera Settings Overlay (Adjust Brightness, Sharpness, Focus using your mouse).
- + / =: Zoom In.
- - / _: Zoom Out.
- Z: Reset Zoom.
- X: Exit the application.
+ “SPACE”: Capture the current frame and extract text using MSI GenAI (or fallback OCR).
+ “C”: Switch camera capture method (OpenCV ↔ FFmpeg).
+ “T”: Toggle the Camera Settings Overlay (Adjust Brightness, Sharpness, Focus using your mouse).
+“+” : Zoom In.
+ “-” : Zoom Out.
+ “Z”: Reset Zoom.
+“ X”: Exit the application.
 
 📁 Output Format
 
@@ -178,17 +178,17 @@ Complete Reset
 
 To start fresh with new data:
 
-# Delete all collected data and trained models
-# 1. Remove data folders
+Delete all collected data and trained models
+1. Remove data folders
 rm -rf data/annotated data/raw_images data/train data/val
 
-# 2. Clear cache
+ 2. Clear cache
 rm -rf data/cache data/dataset_summary.txt
 
-# 3. Remove training runs
+3. Remove training runs
 rm -rf runs/
 
-# 4. Optional: Remove downloaded model
+4. Optional: Remove downloaded model
 rm -f yolov8n.pt
 
 
