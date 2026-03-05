@@ -131,13 +131,13 @@ training:
 
 When the camera preview window is active, use the following hotkeys:
 
-SPACE: Capture the current frame and extract text using MSI GenAI (or fallback OCR).
-C: Switch camera capture method (OpenCV ↔ FFmpeg).
-T: Toggle the Camera Settings Overlay (Adjust Brightness, Sharpness, Focus using your mouse).
-+ / =: Zoom In.
-- / _: Zoom Out.
-Z: Reset Zoom.
-X: Exit the application.
+# SPACE: Capture the current frame and extract text using MSI GenAI (or fallback OCR).
+# C: Switch camera capture method (OpenCV ↔ FFmpeg).
+# T: Toggle the Camera Settings Overlay (Adjust Brightness, Sharpness, Focus using your mouse).
+# + / =: Zoom In.
+# - / _: Zoom Out.
+# Z: Reset Zoom.
+# X: Exit the application.
 
 📁 Output Format
 
