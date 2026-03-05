@@ -131,13 +131,13 @@ training:
 
 When the camera preview window is active, use the following hotkeys:
 
-# SPACE: Capture the current frame and extract text using MSI GenAI (or fallback OCR).
-# C: Switch camera capture method (OpenCV ↔ FFmpeg).
-# T: Toggle the Camera Settings Overlay (Adjust Brightness, Sharpness, Focus using your mouse).
-# + / =: Zoom In.
-# - / _: Zoom Out.
-# Z: Reset Zoom.
-# X: Exit the application.
+ SPACE: Capture the current frame and extract text using MSI GenAI (or fallback OCR).
+ C: Switch camera capture method (OpenCV ↔ FFmpeg).
+ T: Toggle the Camera Settings Overlay (Adjust Brightness, Sharpness, Focus using your mouse).
+ + / =: Zoom In.
+ - / _: Zoom Out.
+ Z: Reset Zoom.
+ X: Exit the application.
 
 📁 Output Format
 
@@ -190,6 +190,8 @@ rm -rf runs/
 
 # 4. Optional: Remove downloaded model
 rm -f yolov8n.pt
+
+
 
 📊 Dataset Information
 
@@ -280,4 +282,4 @@ For issues:
 
 ---
 
-Note: This system requires a trained model. If no trained model is found, it will use a default YOLOv8n model which may not be optimized for walkie-talkie detection. Always train with your specific walkie-talkie models for best results.
+Note: This system requires a trained model. If no trained model is found, it will use a default YOLOv8n model which may not be optimized for walkie-talkie detection. Always train with your specific walkie-talkie models for best results...
