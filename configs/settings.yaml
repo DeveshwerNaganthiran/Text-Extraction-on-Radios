@@ -1,0 +1,94 @@
+# Model Configuration
+model:
+  name: "yolov8n"
+  input_size: 640
+  num_classes: 2
+  pretrained: true
+  
+# Training Configuration
+training:
+  epochs: 250
+  batch_size: 16
+  learning_rate: 0.01
+  device: "cpu"  # Change to "cuda" if you have GPU
+  patience: 25
+  save_period: 10
+  
+# Data Configuration
+data:
+  train_path: "data/train"
+  val_path: "data/val"
+  test_path: "data/test"
+  classes: ["walkie_talkie", "screen"]
+  
+# OCR Configuration - Use Tesseract for best results
+ocr:
+  engine: "tesseract"  # Change to "easyocr", "paddleocr", or "tesseract"
+  languages: ["en"]
+  gpu: false  # Set to true if you have GPU and using EasyOCR/PaddleOCR
+  
+# Screen Processing - Optimized for text extraction
+screen:
+  roi_offsets:
+    walkie_talkie:
+      x1: 0.15  # Adjust to capture more of screen
+      y1: 0.08
+      x2: 0.85
+      y2: 0.40
+  preprocessing:
+    resize_factor: 4.0  # Much higher for better text (4x upscaling)
+    contrast_alpha: 1.8  # Increase contrast
+    contrast_beta: 15   # Add brightness
+    blur_kernel: (3, 3)
+    adaptive_threshold_block_size: 11
+    adaptive_threshold_c: 2
+    clahe_clip_limit: 3.0  # Increase local contrast
+    use_morphology: true  # Use morphological operations
+
+# Tracking Configuration
+tracking:
+  method: "bytetrack"
+  persist_frames: 120  # Increased from 50
+  iou_threshold: 0.5   # Lowered - stricter matching
+  confidence_threshold: 0.7  # Higher - more confident detections
+  track_buffer: 120    # Add this for ByteTrack
+  match_thresh: 0.9    # Add this for stricter matching
+  reid_weights: "models/reid.onnx"  
+  
+detector:
+  path: "walkie_detector.pt"  # Your trained model
+  confidence: 0.5  # Detection confidence
+  device: "cpu"  # or "cuda" if you have GPU
+
+camera:
+  method: "opencv"  # "opencv" or "ffmpeg"
+  source: 1  # Try 0, 1, 2
+  width: 1280
+  height: 720
+  fps: 30
+
+# OCR Configuration - Optimized for accuracy
+ocr:
+  tesseract_path: "C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
+  min_confidence: 0.2  # Even lower - capture more text
+  char_whitelist: "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.-_ "
+  # Advanced settings
+  psm: 7  # PSM 7 = single line (best for digital displays)
+  oem: 3  # OEM 3 = use both Legacy and LSTM models
+  # Image preprocessing
+  upscale_factor: 4  # Upscale small ROIs 4x for better recognition
+  min_roi_width: 30  # Minimum ROI width to process
+  min_roi_height: 20  # Minimum ROI height to process
+
+output:
+  save_dir: "output"
+  save_format: "jpg"
+
+
+performance:
+  frame_skip: 1  # Process every nth frame (1 = all frames, 2 = every other frame)
+  max_devices: 2  # Maximum number of devices to track simultaneously
+  ocr_cooldown_frames: 10  # Minimum frames between OCR processing per device
+  downscale_width: 800  # Downscale frames for processing
+  use_gpu: false  # Set to true if you have CUDA
+

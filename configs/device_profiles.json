@@ -1,0 +1,14 @@
+{
+  "devices": [
+    {
+      "id": 1,
+      "name": "BALI",
+      "expected_softkeys": 4
+    },
+    {
+      "id": 2,
+      "name": "MALTA",
+      "expected_softkeys": 0
+    }
+  ]
+}

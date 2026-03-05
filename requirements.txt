@@ -1,0 +1,24 @@
+# Core Requirements
+ultralytics>=8.0.0
+opencv-python>=4.8.0.0
+torch>=2.2.1
+easyocr>=1.7.1
+paddleocr>=2.7.0
+pytesseract>=0.3.10
+supervision>=0.27.0
+numpy>=1.26.0
+
+# Utilities
+pillow>=10.0.0
+pyyaml>=6.0.1
+pymupdf>=1.23.0
+
+# UI
+streamlit>=1.30.0  # Optional for web interface
+
+# Additional
+requests>=2.31.0
+chardet<6,>=3.0.2
+pandas>=2.0.0  # For data processing
+openpyxl>=3.1.0
+python-dotenv>=1.2.1

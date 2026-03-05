@@ -1,0 +1,20 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Main",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/main.py",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "Python: Training",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/train_detector.py",
+            "console": "integratedTerminal"
+        }
+    ]
+}
