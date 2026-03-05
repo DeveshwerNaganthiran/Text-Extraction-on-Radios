@@ -44,6 +44,8 @@ walkie-tracker/
 ├── requirements.txt         # Python dependencies
 ├── .env                     # MSI GenAI API Credentials (Required)
 └── .vscode/                 # VS Code configuration
+
+
 🚀 Quick Start
 
 1. Environment Setup
@@ -66,13 +68,16 @@ pip cache purge
 pip install -r requirements.txt
 2. MSI GenAI Configuration (.env)
 
-To use the GenAI text extraction, you must create a .env file in the root directory with your API credentials:
+
+* **To use the GenAI text extraction, you must create a .env file in the root directory with your API credentials:**
 
 Code snippet
 MSI_HOST=your_msi_host_url
 MSI_API_KEY=your_api_key
 MSI_USER_ID=your_user_id
 MSI_DATASTORE_ID=your_datastore_id
+
+
 3. Data Collection & Model Training Pipeline
 
 Bash
@@ -92,7 +97,7 @@ python scripts/augment_train.py
 python src/train_detector.py
 4. Run the Application
 
-You can launch the application in several modes:
+* **You can launch the application in several modes:**
 
 Bash
 # 1. GUI Launcher Mode (Recommended for easy setup)
@@ -103,6 +108,9 @@ python main_msi_genai.py
 
 # 3. Automated Single Capture (Useful for automated testing)
 python main_msi_genai.py --once --warmup-sec 2.0
+
+
+
 ⚙️ Configuration
 
 Screen Region Coordinates
@@ -116,6 +124,8 @@ screen:
       y1: 0.55  # Top offset (55% from top)
       x2: 0.90  # Right offset (90% from left)
       y2: 0.70  # Bottom offset (70% from top)
+
+
 Training Parameters
 Adjust in configs/settings.yaml:
 
@@ -125,25 +135,22 @@ training:
   batch_size: 16      # Batch size
   learning_rate: 0.01 # Learning rate
   device: "cpu"       # "cuda" for GPU training
+
+
+
 🎮 Application Controls
 
 When the camera preview window is active, use the following hotkeys:
 
 SPACE: Capture the current frame and extract text using MSI GenAI (or fallback OCR).
-
 C: Switch camera capture method (OpenCV ↔ FFmpeg).
-
 T: Toggle the Camera Settings Overlay (Adjust Brightness, Sharpness, Focus using your mouse).
-
 + / =: Zoom In.
-
 - / _: Zoom Out.
-
 Z: Reset Zoom.
-
 X: Exit the application.
-
 S: Save screenshot (during the results preview screen).
+
 
 📁 Output Format
 
@@ -158,6 +165,9 @@ output/session_YYYYMMDD_HHMMSS/
     ├── device_info.json      # Specific device OCR text and error flags
     ├── screen_roi.jpg        # Cropped image of the screen
     └── sent_to_genai.jpg     # The exact crop sent to the GenAI API
+
+
+
 🔧 Troubleshooting
 
 Common Issues
@@ -217,25 +227,21 @@ Classes:
 🔍 OCR Engines Supported
 
 The system supports multiple OCR engines (configure in settings.yaml):
-
-MSI GenAI (Primary engine for complex, multilingual text and translation)
-
-Tesseract (Recommended offline fallback for digital displays)
-
-EasyOCR
-
-PaddleOCR
+* **MSI GenAI (Primary engine for complex, multilingual text and translation)**
+* **Tesseract (Recommended offline fallback for digital displays)**
+* **EasyOCR**
+* **PaddleOCR**
 
 🖥️ Development
 
-VS Code Configuration
+* **VS Code Configuration**
 The project includes VS Code settings for:
 · Python interpreter path
 · Auto-formatting with Black
 · Linting with Pylint
 · Debug configurations
 
-Testing
+* **Testing**
 
 Bash
 # Quick training test (30 epochs)
@@ -262,21 +268,16 @@ For real-time performance:
 
 🤝 Contributing
 
-Follow the data collection pipeline for new walkie-talkie models
-
-Test OCR accuracy with different screen types
-
-Report issues with specific walkie-talkie models
+* **Follow the data collection pipeline for new walkie-talkie models**
+* **Test OCR accuracy with different screen types**
+* **Report issues with specific walkie-talkie models**
 
 🆘 Support
 For issues:
 
-Check the troubleshooting section
-
-Ensure all dependencies are installed
-
-Verify camera and lighting setup
-
-Review console output for error messages
+* **Check the troubleshooting section**
+* **Ensure all dependencies are installed**
+* **Verify camera and lighting setup**
+* **Review console output for error messages**
 
 Note: This system requires a trained model. If no trained model is found, it will use a default YOLOv8n model which may not be optimized for walkie-talkie detection. Always train with your specific walkie-talkie models for best results.
