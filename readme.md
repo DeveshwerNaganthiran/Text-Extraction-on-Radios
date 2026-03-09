@@ -1,4 +1,3 @@
-Markdown
 # Walkie-Talkie Screen Text Tracker (MSI GenAI Edition)
 
 📋 **Project Overview**
@@ -8,7 +7,8 @@ A computer vision system that detects walkie-talkies, tracks them in real-time, 
 ✨ **Key Features**
 * **GenAI-Powered OCR:** Extracts complex, multilingual text and provides English translations.
 * **Automated Defect Detection:** Automatically flags UI issues such as misalignments, text overlaps (bridge errors), and upside-down text.
-* **GUI Launcher:** Includes a Tkinter-based user interface to easily configure device profiles, camera inputs, and output paths.
+* **String Verification GUI:** A dedicated interface to verify specific localized strings on the device screen against expected translations from an Excel file.
+* **Main GUI Launcher:** Includes a Tkinter-based user interface to easily configure device profiles, camera inputs, and output paths.
 * **Live Camera Tuning:** Adjust Brightness, Sharpness, and Focus dynamically via an on-screen overlay.
 * **Dual Capture Methods:** Seamlessly switch between OpenCV and FFmpeg camera backends.
 * **Unicode Rendering:** Renders complex scripts (Hangul, CJK, Arabic, Cyrillic) flawlessly on the preview using Pillow.
@@ -37,7 +37,9 @@ walkie-tracker/
 ├── scripts/
 │   ├── split_data.py        # Dataset splitting utility
 │   ├── capture_variations.py# Data collection script
-│   └── augment_train.py     # Data augmentation script
+│   ├── augment_train.py     # Data augmentation script
+│   ├── verify_string.py     # CLI backend for specific string verification
+│   └── verify_string_gui.py # GUI for verifying specific strings against an Excel list
 ├── models/                  # Trained model storage
 ├── output/                  # Saved session captures and JSON logs
 ├── runs/                    # Training runs and logs
@@ -48,7 +50,7 @@ walkie-tracker/
 
 🚀 Quick Start
 
-1. Environment Setup
+Environment Setup
 
 Bash
 # Clone or create project directory
@@ -66,19 +68,16 @@ source devenv/bin/activate
 # Clear pip cache and install dependencies
 pip cache purge
 pip install -r requirements.txt
-2. MSI GenAI Configuration (.env)
+MSI GenAI Configuration (.env)
 
+To use the GenAI text extraction, you must create a .env file in the root directory with your API credentials:
 
-* **To use the GenAI text extraction, you must create a .env file in the root directory with your API credentials:**
-
-Code snippet
+Plaintext
 MSI_HOST=your_msi_host_url
 MSI_API_KEY=your_api_key
 MSI_USER_ID=your_user_id
 MSI_DATASTORE_ID=your_datastore_id
-
-
-3. Data Collection & Model Training Pipeline
+Data Collection & Model Training Pipeline
 
 Bash
 # Step 1: Collect images of walkie-talkies (interactive)
@@ -95,20 +94,26 @@ python scripts/augment_train.py
 
 # Step 5: Train the detection model
 python src/train_detector.py
-4. Run the Application
+Run the Application
 
-* **You can launch the application in several modes:**
+You can launch the application in several modes depending on your goal:
+
+A. General Defect Detection (Main GUI) Use the Main GUI for general text extraction and to automatically detect UI formatting errors (like overlaps or misalignments) across the entire screen.
 
 Bash
-# 1. GUI Launcher Mode (Recommended for easy setup)
+# GUI Launcher Mode (Recommended for easy setup)
 python main_msi_genai.py --gui
 
-# 2. Standard CLI Mode
+# Standard CLI Mode
 python main_msi_genai.py
 
-# 3. Automated Single Capture (Useful for automated testing)
+# Automated Single Capture (Useful for automated testing)
 python main_msi_genai.py --once --warmup-sec 2.0
+B. Specific String Verification (Verification GUI) Use the Verification GUI when you need to cross-reference and verify that a specific localized string displaying on the radio matches the exact expected translation provided in your Excel translation list.
 
+Bash
+# Launch the String Verification GUI
+python scripts/verify_string_gui.py
 
 
 ⚙️ Configuration
@@ -124,8 +129,6 @@ screen:
       y1: 0.55  # Top offset (55% from top)
       x2: 0.90  # Right offset (90% from left)
       y2: 0.70  # Bottom offset (70% from top)
-
-
 Training Parameters
 Adjust in configs/settings.yaml:
 
@@ -137,20 +140,18 @@ training:
   device: "cpu"       # "cuda" for GPU training
 
 
-
 🎮 Application Controls
 
 When the camera preview window is active, use the following hotkeys:
 
-SPACE: Capture the current frame and extract text using MSI GenAI (or fallback OCR).
-C: Switch camera capture method (OpenCV ↔ FFmpeg).
-T: Toggle the Camera Settings Overlay (Adjust Brightness, Sharpness, Focus using your mouse).
-+ / =: Zoom In.
-- / _: Zoom Out.
-Z: Reset Zoom.
-X: Exit the application.
-S: Save screenshot (during the results preview screen).
-
+· SPACE: Capture the current frame and extract text using MSI GenAI (or fallback OCR).
+· C: Switch ca
+· T: Toggle the Camera Settings Overlay (Adjust Brightness, Sharpness, Focus using your mouse).
+· + / =: Zoom In.
+· - / _: Zoom Out.
+· Z: Reset Zoom.
+· X: Exit the application.
+· S: Save screenshot (during the results preview screen).
 
 📁 Output Format
 
@@ -165,8 +166,6 @@ output/session_YYYYMMDD_HHMMSS/
     ├── device_info.json      # Specific device OCR text and error flags
     ├── screen_roi.jpg        # Cropped image of the screen
     └── sent_to_genai.jpg     # The exact crop sent to the GenAI API
-
-
 🔧 Troubleshooting
 
 Common Issues
@@ -204,6 +203,9 @@ rm -rf runs/
 
 # 4. Optional: Remove downloaded model
 rm -f yolov8n.pt
+
+
+
 📊 Dataset Information
 
 Data Split Ratio
@@ -217,30 +219,32 @@ Supported Image Formats
 
 Annotation Format
 Uses YOLO format:
-
 <class_id> <x_center> <y_center> <width> <height>
+
 Classes:
 · 0: walkie_talkie
 · 1: screen
 
+
 🔍 OCR Engines Supported
 
 The system supports multiple OCR engines (configure in settings.yaml):
-* **MSI GenAI (Primary engine for complex, multilingual text and translation)**
-* **Tesseract (Recommended offline fallback for digital displays)**
-* **EasyOCR**
-* **PaddleOCR**
+· MSI GenAI (Primary engine for complex, multilingual text and translation)
+· Tesseract (Recommended offline fallback for digital displays)
+· EasyOCR
+· PaddleOCR
+
 
 🖥️ Development
 
-* **VS Code Configuration**
+VS Code Configuration
 The project includes VS Code settings for:
 · Python interpreter path
 · Auto-formatting with Black
 · Linting with Pylint
 · Debug configurations
 
-* **Testing**
+Testing
 
 Bash
 # Quick training test (30 epochs)
@@ -248,6 +252,9 @@ python src/train_detector.py --quick
 
 # Test with specific configuration
 python src/main_msi_genai.py --config configs/settings.yaml --camera 0
+
+
+
 📈 Performance Tips
 
 For better detection:
@@ -267,16 +274,16 @@ For real-time performance:
 
 🤝 Contributing
 
-* **Follow the data collection pipeline for new walkie-talkie models**
-* **Test OCR accuracy with different screen types**
-* **Report issues with specific walkie-talkie models**
+· Follow the data collection pipeline for new walkie-talkie models
+· Test OCR accuracy with different screen types
+· Report issues with specific walkie-talkie models
 
 🆘 Support
 For issues:
 
-* **Check the troubleshooting section**
-* **Ensure all dependencies are installed**
-* **Verify camera and lighting setup**
-* **Review console output for error messages**
+· Check the troubleshooting section
+· Ensure all dependencies are installed
+· Verify camera and lighting setup
+· Review console output for error messages
 
 Note: This system requires a trained model. If no trained model is found, it will use a default YOLOv8n model which may not be optimized for walkie-talkie detection. Always train with your specific walkie-talkie models for best results.
