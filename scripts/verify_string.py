@@ -1111,32 +1111,40 @@ def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float
     if not boxes:
         raise RuntimeError("No device detected")
 
-    x1, y1, x2, y2 = boxes[0]
-    screen_box = None
-    for s in screens:
-        sx1, sy1, sx2, sy2 = s
-        if sx1 >= x1 and sy1 >= y1 and sx2 <= x2 and sy2 <= y2:
-            screen_box = s
-            break
+    # Sort boxes left-to-right so devices are numbered correctly
+    boxes = sorted(boxes, key=lambda b: (b[0], b[1]))
+    
+    rois = []
+    for (x1, y1, x2, y2) in boxes:
+        screen_box = None
+        for s in screens:
+            sx1, sy1, sx2, sy2 = s
+            if sx1 >= x1 and sy1 >= y1 and sx2 <= x2 and sy2 <= y2:
+                screen_box = s
+                break
 
-    if screen_box is None:
-        device_w = x2 - x1
-        device_h = y2 - y1
-        screen_box = (
-            x1 + device_w // 4,
-            y1 + 10,
-            x2 - device_w // 4,
-            y1 + device_h // 3,
-        )
+        if screen_box is None:
+            device_w = x2 - x1
+            device_h = y2 - y1
+            screen_box = (
+                x1 + device_w // 4,
+                y1 + 10,
+                x2 - device_w // 4,
+                y1 + device_h // 3,
+            )
 
-    sx1, sy1, sx2, sy2 = screen_box
-    sx1, sy1 = max(0, sx1), max(0, sy1)
-    sx2, sy2 = min(last.shape[1], sx2), min(last.shape[0], sy2)
-    if sx2 <= sx1 or sy2 <= sy1:
-        raise RuntimeError("Invalid screen ROI")
+        sx1, sy1, sx2, sy2 = screen_box
+        sx1, sy1 = max(0, sx1), max(0, sy1)
+        sx2, sy2 = min(last.shape[1], sx2), min(last.shape[0], sy2)
+        if sx2 <= sx1 or sy2 <= sy1:
+            continue
 
-    roi = last[sy1:sy2, sx1:sx2]
-    return last, roi
+        rois.append(last[sy1:sy2, sx1:sx2])
+        
+    if not rois:
+        raise RuntimeError("Invalid screen ROIs")
+
+    return last, rois
 
 
 def capture_screen_roi_preview(
@@ -1374,33 +1382,41 @@ def capture_screen_roi_preview(
             "No device detected. Try adjusting lighting/camera angle or lower --confidence (e.g. 0.15)."
         )
 
-    x1, y1, x2, y2 = last_boxes[0]
-    screen_box = None
-    for s in last_screens:
-        sx1, sy1, sx2, sy2 = s
-        if sx1 >= x1 and sy1 >= y1 and sx2 <= x2 and sy2 <= y2:
-            screen_box = s
-            break
+    # Sort boxes left-to-right
+    boxes = sorted(last_boxes, key=lambda b: (b[0], b[1]))
+    rois = []
+    
+    for (x1, y1, x2, y2) in boxes:
+        screen_box = None
+        for s in last_screens:
+            sx1, sy1, sx2, sy2 = s
+            if sx1 >= x1 and sy1 >= y1 and sx2 <= x2 and sy2 <= y2:
+                screen_box = s
+                break
 
-    if screen_box is None:
-        device_w = x2 - x1
-        device_h = y2 - y1
-        screen_box = (
-            x1 + device_w // 4,
-            y1 + 10,
-            x2 - device_w // 4,
-            y1 + device_h // 3,
-        )
+        if screen_box is None:
+            device_w = x2 - x1
+            device_h = y2 - y1
+            screen_box = (
+                x1 + device_w // 4,
+                y1 + 10,
+                x2 - device_w // 4,
+                y1 + device_h // 3,
+            )
 
-    sx1, sy1, sx2, sy2 = screen_box
-    sx1, sy1 = max(0, sx1), max(0, sy1)
-    sx2, sy2 = min(last_frame.shape[1], sx2), min(last_frame.shape[0], sy2)
-    if sx2 <= sx1 or sy2 <= sy1:
-        raise RuntimeError("Invalid screen ROI")
+        sx1, sy1, sx2, sy2 = screen_box
+        sx1, sy1 = max(0, sx1), max(0, sy1)
+        sx2, sy2 = min(last_frame.shape[1], sx2), min(last_frame.shape[0], sy2)
+        if sx2 <= sx1 or sy2 <= sy1:
+            continue
 
-    roi = last_frame[sy1:sy2, sx1:sx2]
-    _ts_log(t0, "preview capture complete (returning ROI)")
-    return last_frame, roi
+        rois.append(last_frame[sy1:sy2, sx1:sx2])
+
+    if not rois:
+        raise RuntimeError("Invalid screen ROIs")
+        
+    _ts_log(t0, f"preview capture complete (returning {len(rois)} ROIs)")
+    return last_frame, rois
 
 
 def main():
@@ -1492,17 +1508,16 @@ def main():
     if args.preview:
         t0_preview = time.time()
         _ts_log(t0_total, "entering preview")
-        full_frame, roi = capture_screen_roi_preview(None, camera_id=camera_id, confidence=confidence, model_path=model_path)
+        full_frame, rois = capture_screen_roi_preview(None, camera_id=camera_id, confidence=confidence, model_path=model_path)
         t1_preview = time.time()
         _ts_log(t0_total, f"preview returned in {(t1_preview - t0_preview):.3f}s")
         t0_cap = t1_preview
         t1_cap = t1_preview
     else:
-        # Non-preview capture needs detector synchronously.
         _ts_log(t0_total, "loading detector (non-preview)")
         detector = FastDetector(model_path)
         t0_cap = time.time()
-        full_frame, roi = capture_screen_roi(detector, camera_id=camera_id, confidence=confidence)
+        full_frame, rois = capture_screen_roi(detector, camera_id=camera_id, confidence=confidence)
         t1_cap = time.time()
         _ts_log(t0_total, f"capture complete in {(t1_cap - t0_cap):.3f}s")
 
@@ -1511,140 +1526,108 @@ def main():
     _ts_log(t0_total, "expected strings loaded")
 
     print("=" * 70)
-    print("RADIO STRING VERIFICATION (OPTION A)")
+    print(f"RADIO STRING VERIFICATION - DETECTED {len(rois)} DEVICES")
     print("=" * 70)
     print(f"Index: {expected['index']}")
-    if expected.get("index_region"):
-        print(f"Index (region sheet): {expected['index_region']}")
-    if expected.get("tag"):
-        print(f"Tag: {expected['tag']}")
-    if expected.get("category"):
-        print(f"Category: {expected['category']}")
-    if expected.get("font_style") or expected.get("font_size"):
-        print(f"Font: style='{expected.get('font_style','')}', size='{expected.get('font_size','')}'")
-    print(f"Region sheet: {expected['region_sheet']}")
+    if expected.get("tag"): print(f"Tag: {expected['tag']}")
     print(f"Expected (English): {expected['expected_en']}")
     print(f"Expected ({args.region}/{args.language}): {expected['expected_local']}")
 
-    # Warm GenAI session after we already captured ROI (or while user was in preview).
-    # This reduces perceived camera-open delay.
     ocr = MSIGenAIOCR()
     try:
-        def _warm():
-            try:
-                ocr.get_or_init_session()
-            except Exception:
-                pass
-
-        th = threading.Thread(target=_warm, daemon=True)
-        th.start()
+        threading.Thread(target=lambda: ocr.get_or_init_session(), daemon=True).start()
     except Exception:
         pass
 
-    if args.save_roi:
-        outp = Path(args.save_roi)
-        outp.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(outp), roi)
-        print(f"Saved ROI: {outp}")
+    total_ocr_time = 0.0
 
-    t0_ocr = time.time()
-    text, _conf = ocr.extract_text(roi, expected_language=args.language)
-    t1_ocr = time.time()
+    # Loop over every detected device
+    for idx, roi in enumerate(rois):
+        device_id = idx + 1
+        print("\n" + "=" * 70)
+        print(f"DEVICE {device_id}")
+        print("=" * 70)
 
-    try:
-        lang_detected = _parse_structured_language(text)
-        orig_text = _parse_structured_original(text) or text
-        eng_text = _parse_structured_english(text)
-    except Exception:
-        pass
+        if args.save_roi:
+            outp = Path(args.save_roi)
+            new_outp = outp.with_name(f"{outp.stem}_D{device_id}{outp.suffix}")
+            new_outp.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(new_outp), roi)
 
-    observed = _parse_structured_original(text) or text
-    observed_n = _norm_text(observed)
-    expected_local_n = _norm_text(expected["expected_local"])
+        t0_ocr = time.time()
+        text, _conf = ocr.extract_text(roi, expected_language=args.language)
+        t1_ocr = time.time()
+        total_ocr_time += (t1_ocr - t0_ocr)
 
-    ok = False
-    warn = False
-    if expected_local_n:
-        ok = observed_n == expected_local_n or expected_local_n in observed_n
-
-        # Also ignore whitespace-only differences (common with CJK where OCR may omit spaces).
-        if not ok:
-            try:
-                observed_ns = "".join(observed_n.split())
-                expected_ns = "".join(expected_local_n.split())
-                ok = observed_ns == expected_ns or expected_ns in observed_ns
-            except Exception:
-                pass
-
-        # Japanese diacritic tolerance (dakuten/handakuten) as WARN (do not fail).
-        # Example: バ vs パ, ば vs ぱ, ハ vs バ vs パ, etc.
-        if not ok and args.language and str(args.language).strip().lower() in ["japanese", "ja"]:
-            try:
-                o_base = _jp_strip_diacritics(observed_n)
-                e_base = _jp_strip_diacritics(expected_local_n)
-                if o_base == e_base:
-                    warn = True
-            except Exception:
-                pass
-
-    try:
-        verdict = "PASS" if ok else ("WARN" if warn else "FAIL")
-    except Exception:
-        verdict = ""
-
-    try:
-        exp_lines = []
         try:
-            if expected.get("index_region"):
-                exp_lines.append(f"Index (region sheet): {expected.get('index_region')}")
-            if expected.get("tag"):
-                exp_lines.append(f"Tag: {expected.get('tag')}")
-            if expected.get("category"):
-                exp_lines.append(f"Category: {expected.get('category')}")
-            exp_lines.append(f"Region sheet: {expected.get('region_sheet','')}")
-            exp_lines.append(f"Expected (English): {expected.get('expected_en','')}")
-            exp_lines.append(f"Expected ({args.region}/{args.language}): {expected.get('expected_local','')}")
-        except Exception:
-            exp_lines = []
-
-        _show_ocr_result_window(roi, orig_text, eng_text, lang_detected, verdict, expected_lines=exp_lines)
-    except Exception:
-        try:
-            _show_ocr_result_window(roi, orig_text, eng_text, lang_detected)
+            lang_detected = _parse_structured_language(text)
+            orig_text = _parse_structured_original(text) or text
+            eng_text = _parse_structured_english(text)
         except Exception:
             pass
 
-    print("-" * 70)
-    print(f"Observed (normalized): {observed_n}")
-    print("-" * 70)
-    if ok:
-        print("PASS")
-    elif warn:
-        print("WARN")
-    else:
-        print("FAIL")
+        observed = _parse_structured_original(text) or text
+        observed_n = _norm_text(observed)
+        expected_local_n = _norm_text(expected["expected_local"])
 
-    if not ok and not warn:
-        print("Expected (normalized):")
-        print(expected_local_n)
+        ok = False
+        warn = False
+        if expected_local_n:
+            ok = observed_n == expected_local_n or expected_local_n in observed_n
+            if not ok:
+                try:
+                    observed_ns = "".join(observed_n.split())
+                    expected_ns = "".join(expected_local_n.split())
+                    ok = observed_ns == expected_ns or expected_ns in observed_ns
+                except Exception:
+                    pass
+            if not ok and args.language and str(args.language).strip().lower() in ["japanese", "ja"]:
+                try:
+                    if _jp_strip_diacritics(observed_n) == _jp_strip_diacritics(expected_local_n):
+                        warn = True
+                except Exception:
+                    pass
 
+        try:
+            verdict = "PASS" if ok else ("WARN" if warn else "FAIL")
+        except Exception:
+            verdict = ""
+
+        exp_lines = [
+            f"Expected (English): {expected.get('expected_en','')}",
+            f"Expected ({args.region}/{args.language}): {expected.get('expected_local','')}"
+        ]
+
+        try:
+            _show_ocr_result_window(roi, orig_text, eng_text, lang_detected, verdict, expected_lines=exp_lines)
+        except Exception:
+            pass
+
+        print("-" * 70)
+        print(f"Observed (normalized): {observed_n}")
+        print("-" * 70)
+        if ok:
+            print("PASS")
+        elif warn:
+            print("WARN")
+        else:
+            print("FAIL")
+
+        if not ok and not warn:
+            print("Expected (normalized):")
+            print(expected_local_n)
+
+    # Timing block
     try:
         total_s = time.time() - t0_total
         cap_s = t1_cap - t0_cap
-        ocr_s = t1_ocr - t0_ocr
         if args.preview:
-            try:
-                preview_wait_s = t1_preview - t0_preview
-            except Exception:
-                preview_wait_s = 0.0
-            print(
-                f"[TIMING] Preview-wait: {preview_wait_s:.2f}s | Capture: {cap_s:.2f}s | OCR: {ocr_s:.2f}s | Total: {total_s:.2f}s"
-            )
+            preview_wait_s = t1_preview - t0_preview
+            print(f"\n[TIMING] Preview: {preview_wait_s:.2f}s | Capture: {cap_s:.2f}s | OCR: {total_ocr_time:.2f}s | Total: {total_s:.2f}s")
         else:
-            print(f"[TIMING] Capture: {cap_s:.2f}s | OCR: {ocr_s:.2f}s | Total: {total_s:.2f}s")
+            print(f"\n[TIMING] Capture: {cap_s:.2f}s | OCR: {total_ocr_time:.2f}s | Total: {total_s:.2f}s")
     except Exception:
         pass
-
 
 if __name__ == "__main__":
     main()
