@@ -523,10 +523,18 @@ class MSIGenAIOCR:
             
             try:
                 now = time.time()
+                # Use the cached session if available, otherwise initialize a new one
                 if self._cached_session_id and (now - self._cached_session_ts) < self.session_ttl_sec:
                     session_id = self._cached_session_id
                 else:
-                    session_id = self.get_or_init_session()
+                    session_id = self.init_session()
+                
+                # CRITICAL FIX: Invalidate the cached session immediately!
+                # This guarantees that the next device in the loop will trigger a 
+                # fresh session, completely preventing the AI from remembering and 
+                # copying text from the previous devices.
+                self._cached_session_id = None
+                self._cached_session_ts = 0.0
                 
                 self.upload_image(session_id, image_base64)
                 result = self.send_prompt(session_id, prompt)

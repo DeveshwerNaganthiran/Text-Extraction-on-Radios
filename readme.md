@@ -167,7 +167,6 @@ output/session_YYYYMMDD_HHMMSS/
     └── sent_to_genai.jpg     # The exact crop sent to the GenAI API
 
 
-
 🔧 Troubleshooting
 
 Common Issues
