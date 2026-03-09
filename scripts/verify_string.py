@@ -11,6 +11,7 @@ import threading
 import cv2
 import numpy as np
 import yaml
+import json
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -578,6 +579,38 @@ def _parse_structured_english(block: str) -> str:
     return "\n".join([x for x in buf if str(x).strip()]).strip()
 
 
+def load_device_profiles() -> dict:
+    profiles = {}
+    try:
+        raw = str(os.getenv("WALKIE_DEVICE_PROFILES_JSON", "") or "").strip()
+        if raw:
+            obj = json.loads(raw)
+            devices = obj.get("devices") if isinstance(obj, dict) else None
+            if isinstance(devices, list):
+                for d in devices:
+                    if isinstance(d, dict) and d.get("id"):
+                        profiles[int(d["id"])] = d
+        else:
+            cfgp = Path(__file__).resolve().parents[1] / "configs" / "device_profiles.json"
+            if cfgp.exists():
+                with open(cfgp, "r", encoding="utf-8") as f:
+                    obj = json.load(f) or {}
+                devices = obj.get("devices") if isinstance(obj, dict) else None
+                if isinstance(devices, list):
+                    for d in devices:
+                        if isinstance(d, dict) and d.get("id"):
+                            profiles[int(d["id"])] = d
+    except Exception:
+        pass
+    return profiles
+
+
+def get_device_name(profiles: dict, device_id: int) -> str:
+    d = profiles.get(device_id) or {}
+    name = str(d.get("name") or "").strip()
+    return name if name else f"Device {device_id}"
+
+
 def _show_ocr_result_window(
     roi: np.ndarray,
     original: str,
@@ -585,6 +618,7 @@ def _show_ocr_result_window(
     language: str,
     verdict: str = "",
     expected_lines: list | None = None,
+    device_name: str = "",
 ) -> None:
     try:
         if roi is None or getattr(roi, "size", 0) == 0:
@@ -715,10 +749,11 @@ def _show_ocr_result_window(
             exp_draw_lines = []
 
         try:
-            header_h = 80
+            header_h = 100
             summary_h = 120 + (max(0, len(exp_draw_lines)) * 32) + 16
             header = np.zeros((header_h, out_w, 3), dtype=np.uint8)
-            cv2.putText(header, "OCR Result", (24, 56), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (0, 255, 255), 4)
+            title_text = f"OCR Result - {device_name}" if device_name else "OCR Result"
+            cv2.putText(header, title_text, (24, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 255, 255), 3)
 
             summary = np.zeros((summary_h, out_w, 3), dtype=np.uint8)
             lang_show = lang_label if lang_label else "Unknown"
@@ -1153,6 +1188,7 @@ def capture_screen_roi_preview(
     confidence: float = 0.25,
     model_path: str = "",
     window_name: str = "Verify Preview",
+    profiles: dict = None,
 ):
     t0 = time.time()
     _ts_log(t0, f"preview start (camera_id={int(camera_id)})")
@@ -1293,8 +1329,20 @@ def capture_screen_roi_preview(
                 last_screens = []
 
             vis = frame.copy()
-            for (x1, y1, x2, y2) in last_boxes:
+            
+            # Sort boxes so the device names line up with the 1, 2, 3 ordered outputs
+            sorted_boxes = sorted(last_boxes, key=lambda b: (b[0], b[1]))
+            for i, (x1, y1, x2, y2) in enumerate(sorted_boxes):
+                device_id = i + 1
+                dev_name = get_device_name(profiles, device_id) if profiles else f"Device {device_id}"
+                
                 cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                
+                # Draw the background shadow for text
+                cv2.putText(vis, dev_name, (x1, max(0, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
+                # Draw the actual text
+                cv2.putText(vis, dev_name, (x1, max(0, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
+
             for (sx1, sy1, sx2, sy2) in last_screens:
                 cv2.rectangle(vis, (sx1, sy1), (sx2, sy2), (0, 0, 255), 1)
 
@@ -1505,10 +1553,19 @@ def main():
 
     confidence = float(cfg.get("detector", {}).get("confidence", 0.25))
 
+    # Load device profiles so names can be shown in preview and logged out
+    profiles = load_device_profiles()
+
     if args.preview:
         t0_preview = time.time()
         _ts_log(t0_total, "entering preview")
-        full_frame, rois = capture_screen_roi_preview(None, camera_id=camera_id, confidence=confidence, model_path=model_path)
+        full_frame, rois = capture_screen_roi_preview(
+            None, 
+            camera_id=camera_id, 
+            confidence=confidence, 
+            model_path=model_path, 
+            profiles=profiles
+        )
         t1_preview = time.time()
         _ts_log(t0_total, f"preview returned in {(t1_preview - t0_preview):.3f}s")
         t0_cap = t1_preview
@@ -1544,8 +1601,11 @@ def main():
     # Loop over every detected device
     for idx, roi in enumerate(rois):
         device_id = idx + 1
+        dev_name = get_device_name(profiles, device_id)
+        
+        # Explicitly output "Device: Name" format for UI legibility
         print("\n" + "=" * 70)
-        print(f"DEVICE {device_id}")
+        print(f"Device: {dev_name}")
         print("=" * 70)
 
         if args.save_roi:
@@ -1599,7 +1659,15 @@ def main():
         ]
 
         try:
-            _show_ocr_result_window(roi, orig_text, eng_text, lang_detected, verdict, expected_lines=exp_lines)
+            _show_ocr_result_window(
+                roi, 
+                orig_text, 
+                eng_text, 
+                lang_detected, 
+                verdict, 
+                expected_lines=exp_lines,
+                device_name=dev_name  # Passes the device name to show in the OCR image window header
+            )
         except Exception:
             pass
 

@@ -293,7 +293,7 @@ class VerifyStringGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Verify String (Walkie-Tracker)")
-        self.root.minsize(900, 600)
+        self.root.minsize(900, 750)
 
         self._auto_start_verify = False
         self._last_run_is_verification = True
@@ -420,6 +420,29 @@ class VerifyStringGUI:
         tk.Button(frm, text="Browse...", command=self.browse_model).grid(row=row, column=2, sticky="e", pady=(6, 0))
         row += 1
 
+        # -------------------------------------------------------------
+        # ADDED DEVICES SECTION
+        # -------------------------------------------------------------
+        self.lf_devices = tk.LabelFrame(frm, text="Devices", padx=10, pady=5)
+        self.lf_devices.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
+
+        self.device_rows = []
+        self.selected_device_id = tk.IntVar(value=0)
+
+        tk.Label(self.lf_devices, text="").grid(row=0, column=0, sticky="w")
+        tk.Label(self.lf_devices, text="ID").grid(row=0, column=1, sticky="w")
+        tk.Label(self.lf_devices, text="Name").grid(row=0, column=2, sticky="w")
+        tk.Label(self.lf_devices, text="Columns").grid(row=0, column=3, sticky="w")
+
+        dev_btns = tk.Frame(self.lf_devices)
+        dev_btns.grid(row=0, column=4, rowspan=5, sticky="ne", padx=(12, 0))
+        tk.Button(dev_btns, text="Add", command=self._on_add_device).pack(fill="x", pady=(2, 2))
+        tk.Button(dev_btns, text="Remove", command=self._on_remove_device).pack(fill="x", pady=(2, 2))
+
+        self._load_devices_from_env_or_defaults()
+        row += 1
+        # -------------------------------------------------------------
+
         btns = tk.Frame(frm)
         btns.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
         self.btn_run = tk.Button(btns, text="Start", command=self.init_and_run)
@@ -435,7 +458,7 @@ class VerifyStringGUI:
         self.status_label.grid(row=row, column=0, columnspan=3, sticky="we", pady=(8, 0))
         row += 1
 
-        self.output = tk.Text(frm, height=22, wrap=tk.WORD)
+        self.output = tk.Text(frm, height=18, wrap=tk.WORD)
         self.output.grid(row=row, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
 
         self.output.tag_configure("pass", foreground="#1B5E20")
@@ -462,6 +485,144 @@ class VerifyStringGUI:
             pass
 
         self.root.after(50, self._drain_queue)
+
+    def _regrid_device_rows(self):
+        for idx, row in enumerate(self.device_rows):
+            row_idx = idx + 1
+            widgets = row.get("widgets") or ()
+            if len(widgets) >= 4:
+                rb, lbl_id, ent_name, spn = widgets[:4]
+                rb.grid(row=row_idx, column=0, sticky="w", padx=(0, 6), pady=2)
+                lbl_id.grid(row=row_idx, column=1, sticky="w", padx=(0, 10), pady=2)
+                ent_name.grid(row=row_idx, column=2, sticky="ew", pady=2)
+                spn.grid(row=row_idx, column=3, sticky="w", padx=(10, 0), pady=2)
+
+    def _renumber_device_rows(self):
+        for idx, row in enumerate(self.device_rows):
+            new_id = idx + 1
+            row["id"] = int(new_id)
+            widgets = row.get("widgets") or ()
+            if len(widgets) >= 2:
+                rb, lbl_id = widgets[0], widgets[1]
+                try:
+                    rb.configure(value=int(new_id))
+                    lbl_id.configure(text=f"D{int(new_id)}")
+                except Exception:
+                    pass
+
+    def _add_device_row(self, did: int, name: str = "", expected_softkeys: int | None = None):
+        row_idx = len(self.device_rows) + 1
+        var_name = tk.StringVar(value=str(name or ""))
+        var_exp = tk.StringVar(value="" if expected_softkeys is None else str(int(expected_softkeys)))
+
+        rb = tk.Radiobutton(self.lf_devices, variable=self.selected_device_id, value=int(did))
+        lbl_id = tk.Label(self.lf_devices, text=f"D{int(did)}")
+        ent_name = tk.Entry(self.lf_devices, textvariable=var_name, width=30)
+        spn = tk.Spinbox(self.lf_devices, from_=0, to=8, width=6, textvariable=var_exp)
+
+        rb.grid(row=row_idx, column=0, sticky="w", padx=(0, 6), pady=2)
+        lbl_id.grid(row=row_idx, column=1, sticky="w", padx=(0, 10), pady=2)
+        ent_name.grid(row=row_idx, column=2, sticky="ew", pady=2)
+        spn.grid(row=row_idx, column=3, sticky="w", padx=(10, 0), pady=2)
+
+        self.device_rows.append({
+            "id": int(did),
+            "var_name": var_name,
+            "var_expected": var_exp,
+            "widgets": (rb, lbl_id, ent_name, spn),
+        })
+
+        if int(self.selected_device_id.get() or 0) == 0:
+            self.selected_device_id.set(int(did))
+
+    def _on_remove_device(self):
+        if not self.device_rows:
+            return
+        target_id = None
+        try:
+            target_id = int(self.selected_device_id.get())
+        except Exception:
+            target_id = None
+
+        idx = None
+        if target_id is not None:
+            for i, r in enumerate(self.device_rows):
+                if int(r.get("id") or 0) == int(target_id):
+                    idx = i
+                    break
+        if idx is None:
+            idx = len(self.device_rows) - 1
+
+        row = self.device_rows.pop(int(idx))
+        for w in row.get("widgets") or []:
+            try:
+                w.destroy()
+            except Exception:
+                pass
+
+        self._renumber_device_rows()
+        self._regrid_device_rows()
+
+        if self.device_rows:
+            self.selected_device_id.set(int(self.device_rows[min(int(idx), len(self.device_rows) - 1)].get("id") or 0))
+        else:
+            self.selected_device_id.set(0)
+
+    def _on_add_device(self):
+        next_id = len(self.device_rows) + 1
+        self._add_device_row(next_id, "", None)
+
+    def _load_devices_from_env_or_defaults(self):
+        try:
+            raw = str(os.getenv("WALKIE_DEVICE_PROFILES_JSON", "") or "").strip()
+            if raw:
+                obj = json.loads(raw)
+                devices = obj.get("devices") if isinstance(obj, dict) else None
+                if isinstance(devices, list) and devices:
+                    for d in devices:
+                        if not isinstance(d, dict):
+                            continue
+                        try:
+                            did = int(d.get("id"))
+                        except Exception:
+                            continue
+                        nm = str(d.get("name") or "")
+                        try:
+                            exp = int(d.get("expected_softkeys")) if d.get("expected_softkeys") is not None else None
+                        except Exception:
+                            exp = None
+                        self._add_device_row(did, nm, exp)
+                    return
+        except Exception:
+            pass
+
+        try:
+            cfgp = Path(__file__).resolve().parents[1] / "configs" / "device_profiles.json"
+            if cfgp.exists():
+                with open(cfgp, "r", encoding="utf-8") as f:
+                    obj = json.load(f) or {}
+                devices = obj.get("devices") if isinstance(obj, dict) else None
+                if isinstance(devices, list) and devices:
+                    for d in devices:
+                        if not isinstance(d, dict):
+                            continue
+                        try:
+                            did = int(d.get("id"))
+                        except Exception:
+                            continue
+                        nm = str(d.get("name") or "")
+                        try:
+                            exp = int(d.get("expected_softkeys")) if d.get("expected_softkeys") is not None else None
+                        except Exception:
+                            exp = None
+                        self._add_device_row(did, nm, exp)
+                    return
+        except Exception:
+            pass
+
+        # Default to 2 devices
+        for i in range(2):
+            self._add_device_row(i + 1, "", None)
 
     def browse_excel(self):
         p = filedialog.askopenfilename(
@@ -896,6 +1057,33 @@ class VerifyStringGUI:
         except Exception:
             pass
 
+        # -----------------------------------------------------------------
+        # INJECT DEVICES INTO ENVIRONMENT FOR VERIFY_STRING.PY
+        # -----------------------------------------------------------------
+        env = os.environ.copy()
+        try:
+            devices = []
+            for r in self.device_rows:
+                did = int(r.get("id"))
+                nm = str(r.get("var_name").get() if r.get("var_name") else "").strip()
+                exp_raw = str(r.get("var_expected").get() if r.get("var_expected") else "").strip()
+                exp_val = None
+                if exp_raw:
+                    exp_val = int(exp_raw)
+                devices.append({
+                    "id": did,
+                    "name": nm,
+                    "expected_softkeys": exp_val,
+                })
+            
+            env["WALKIE_DEVICE_PROFILES_JSON"] = json.dumps({"devices": devices}, ensure_ascii=False)
+            cfgp = Path(__file__).resolve().parents[1] / "configs" / "device_profiles.json"
+            cfgp.parent.mkdir(parents=True, exist_ok=True)
+            with open(cfgp, "w", encoding="utf-8") as f:
+                json.dump({"devices": devices}, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
         def _worker():
             try:
                 self.proc = subprocess.Popen(
@@ -904,6 +1092,7 @@ class VerifyStringGUI:
                     stderr=subprocess.STDOUT,
                     text=False,
                     bufsize=0,
+                    env=env,
                 )
                 assert self.proc.stdout is not None
                 for raw in iter(self.proc.stdout.readline, b""):
@@ -1026,7 +1215,6 @@ class VerifyStringGUI:
 def main():
     root = tk.Tk()
     app = VerifyStringGUI(root)
-    root.minsize(900, 600)
     root.mainloop()
 
 
