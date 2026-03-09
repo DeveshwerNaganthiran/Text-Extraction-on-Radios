@@ -1598,14 +1598,15 @@ def main():
 
     total_ocr_time = 0.0
 
-    # Loop over every detected device
+    # --- PHASE 1: Extract text for all devices upfront ---
+    all_results = []
+    
     for idx, roi in enumerate(rois):
         device_id = idx + 1
         dev_name = get_device_name(profiles, device_id)
         
-        # Explicitly output "Device: Name" format for UI legibility
         print("\n" + "=" * 70)
-        print(f"Device: {dev_name}")
+        print(f"Device: {dev_name} (Extracting text...)")
         print("=" * 70)
 
         if args.save_roi:
@@ -1624,7 +1625,7 @@ def main():
             orig_text = _parse_structured_original(text) or text
             eng_text = _parse_structured_english(text)
         except Exception:
-            pass
+            lang_detected, orig_text, eng_text = "", text, ""
 
         observed = _parse_structured_original(text) or text
         observed_n = _norm_text(observed)
@@ -1658,19 +1659,7 @@ def main():
             f"Expected ({args.region}/{args.language}): {expected.get('expected_local','')}"
         ]
 
-        try:
-            _show_ocr_result_window(
-                roi, 
-                orig_text, 
-                eng_text, 
-                lang_detected, 
-                verdict, 
-                expected_lines=exp_lines,
-                device_name=dev_name  # Passes the device name to show in the OCR image window header
-            )
-        except Exception:
-            pass
-
+        # Print console output immediately so the user sees progress
         print("-" * 70)
         print(f"Observed (normalized): {observed_n}")
         print("-" * 70)
@@ -1684,6 +1673,32 @@ def main():
         if not ok and not warn:
             print("Expected (normalized):")
             print(expected_local_n)
+
+        # Save result to list instead of showing the window blocking the loop
+        all_results.append({
+            "roi": roi,
+            "orig_text": orig_text,
+            "eng_text": eng_text,
+            "lang_detected": lang_detected,
+            "verdict": verdict,
+            "exp_lines": exp_lines,
+            "dev_name": dev_name
+        })
+
+    # --- PHASE 2: Display all windows instantly ---
+    for res in all_results:
+        try:
+            _show_ocr_result_window(
+                res["roi"], 
+                res["orig_text"], 
+                res["eng_text"], 
+                res["lang_detected"], 
+                res["verdict"], 
+                expected_lines=res["exp_lines"],
+                device_name=res["dev_name"]
+            )
+        except Exception:
+            pass
 
     # Timing block
     try:
