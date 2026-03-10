@@ -5,6 +5,7 @@ from pywinauto.application import Application
 import threading
 import time
 import os
+import subprocess # <-- NEW: Required for pinging IPs
 
 # --- 1. SET YOUR SHORTCUT PATH HERE ---
 COMMG_PATH = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Motorola\CommG_LTD\CommG_LTD.lnk"
@@ -14,7 +15,7 @@ class CommG_Ultimate_Controller:
     def __init__(self, root):
         self.root = root
         self.root.title("CommG Pro - Auto-Sequencer")
-        self.root.geometry("650x720") # Adjusted height to perfectly fit the removed frame
+        self.root.geometry("650x720") 
         
         self.running = True
         self.commg_handles = [] 
@@ -93,6 +94,18 @@ class CommG_Ultimate_Controller:
     def get_target_ips(self):
         return list(self.ip_listbox.get(0, tk.END))
 
+    # --- NEW: PING HELPER ---
+    def ping_ip(self, ip):
+        """Pings the target IP. Returns True if reachable, False if not."""
+        try:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW # Hides the flashing console window
+            # -n 1 sends 1 packet, -w 2000 waits up to 2 seconds for a response
+            response = subprocess.call(['ping', '-n', '1', '-w', '2000', ip], startupinfo=startupinfo)
+            return response == 0
+        except Exception:
+            return False
+
     # --- AUTO-CONNECT LOGIC ---
     def _find_commg_handles(self):
         handles = []
@@ -104,15 +117,13 @@ class CommG_Ultimate_Controller:
         return handles
 
     def ensure_connection(self):
-        """Checks if CommuniGATOR is open. If not, launches it instantly."""
         if self.commg_handles:
-            # Verify the window didn't get closed by the user
             try:
                 app = Application(backend="uia").connect(handle=self.commg_handles[0])
                 app.window(handle=self.commg_handles[0]).exists()
                 return True
             except:
-                self.commg_handles = [] # Window was closed, clear it and proceed to relaunch
+                self.commg_handles = [] 
 
         self.root.after(0, self.status_label.config, {"text": "STATUS: LAUNCHING COMMG...", "fg": "orange"})
         self.root.after(0, self.ui_log, "SYSTEM: CommuniGATOR not found. Launching it now...")
@@ -126,7 +137,7 @@ class CommG_Ultimate_Controller:
                 return False
                 
             os.startfile(COMMG_PATH) 
-            time.sleep(3.5) # Wait for it to draw on screen
+            time.sleep(3.5) 
             found_handles = self._find_commg_handles()
             
         if not found_handles:
@@ -146,7 +157,6 @@ class CommG_Ultimate_Controller:
             messagebox.showwarning("No IPs", "Please add at least one IP address to the list!")
             return
             
-        # Guarantee we are connected before starting
         if not self.ensure_connection():
             return
             
@@ -159,43 +169,76 @@ class CommG_Ultimate_Controller:
             input_field = main_win.child_window(auto_id="1004", control_type="Edit")
             
             for ip in ips:
+                self.root.after(0, self.status_label.config, {"text": f"STATUS: CHECKING {ip}...", "fg": "purple"})
+                
+                # --- NEW: Check if the IP exists on the network ---
+                if not self.ping_ip(ip):
+                    self.root.after(0, self.ui_log, f"WARNING: {ip} is offline/unreachable.")
+                    
+                    # Pause and ask the user
+                    proceed = messagebox.askyesno(
+                        "IP Not Found", 
+                        f"Could not reach IP: {ip}\n\nDo you want to skip this one and proceed to the next IP?"
+                    )
+                    
+                    if proceed:
+                        continue # Skips to the next IP in the list
+                    else:
+                        self.root.after(0, self.ui_log, "SYSTEM: Sequence aborted by user.")
+                        break # Exits the loop entirely
+
+                # If we get here, the IP is reachable. Start automation for this specific IP.
                 self.root.after(0, self.status_label.config, {"text": f"STATUS: PROCESSING {ip}...", "fg": "purple"})
                 
-                with self.type_lock:
-                    main_win.set_focus()
-                    
-                    # 1. TCP/IP Switch
-                    toolbar.button(0).click() 
-                    time.sleep(1.0)
-                    popup = app.top_window() 
-                    popup.type_keys(ip + "{ENTER}", set_foreground=True)
-                    self.root.after(0, self.ui_log, f"\n--- TARGET: {ip} ---")
-                    time.sleep(1.5) 
-                    
-                    # 2. Click NO PROTO
-                    toolbar.button(1).click()
-                    self.root.after(0, self.ui_log, f"UI: Auto-Clicked NO PROTO")
-                    time.sleep(1.0)
-                    
-                    # 3. Send HANDSHAKE
-                    input_field.set_focus()
-                    input_field.type_keys("^a{BACKSPACE}0121FF{ENTER}", set_foreground=True)
-                    self.root.after(0, self.ui_log, f"UI: Auto-Sent HANDSHAKE")
-                    time.sleep(1.5)
-                    
-                    # 4. Send the target command
-                    input_field.set_focus()
-                    input_field.type_keys("^a{BACKSPACE}" + payload + "{ENTER}", set_foreground=True)
-                    self.root.after(0, self.ui_log, f"UI: Sent COMMAND ({payload})")
+                try:
+                    with self.type_lock:
+                        main_win.set_focus()
                         
-                # 5. Wait for the radio to process
-                self.root.after(0, self.status_label.config, {"text": f"STATUS: WAITING ON {ip}...", "fg": "orange"})
-                time.sleep(5.0) 
+                        # 1. TCP/IP Switch
+                        toolbar.button(0).click() 
+                        time.sleep(1.0)
+                        popup = app.top_window() 
+                        popup.type_keys(ip + "{ENTER}", set_foreground=True)
+                        self.root.after(0, self.ui_log, f"\n--- TARGET: {ip} ---")
+                        time.sleep(1.5) 
+                        
+                        # 2. Click NO PROTO
+                        toolbar.button(1).click()
+                        self.root.after(0, self.ui_log, f"UI: Auto-Clicked NO PROTO")
+                        time.sleep(1.0)
+                        
+                        # 3. Send HANDSHAKE
+                        input_field.set_focus()
+                        input_field.type_keys("^a{BACKSPACE}0121FF{ENTER}", set_foreground=True)
+                        self.root.after(0, self.ui_log, f"UI: Auto-Sent HANDSHAKE")
+                        time.sleep(1.5)
+                        
+                        # 4. Send the target command
+                        input_field.set_focus()
+                        input_field.type_keys("^a{BACKSPACE}" + payload + "{ENTER}", set_foreground=True)
+                        self.root.after(0, self.ui_log, f"UI: Sent COMMAND ({payload})")
+                            
+                    # 5. Wait for the radio to process
+                    self.root.after(0, self.status_label.config, {"text": f"STATUS: WAITING ON {ip}...", "fg": "orange"})
+                    time.sleep(5.0) 
                 
-            self.root.after(0, self.status_label.config, {"text": "STATUS: SEQUENCE COMPLETE ON ALL DEVICES", "fg": "green"})
+                except Exception as inner_e:
+                    # NEW: If the UI gets stuck on one specific IP, catch it without crashing the whole script
+                    self.root.after(0, self.ui_log, f"ERROR on {ip}: {inner_e}")
+                    proceed = messagebox.askyesno(
+                        "Automation Error", 
+                        f"An error occurred while controlling the UI for {ip}.\n\nDo you want to skip and proceed to the next IP?"
+                    )
+                    if not proceed:
+                        self.root.after(0, self.ui_log, "SYSTEM: Sequence aborted by user due to UI error.")
+                        break
+
+            else: 
+                # This 'else' belongs to the 'for' loop. It only runs if the loop wasn't stopped by 'break'
+                self.root.after(0, self.status_label.config, {"text": "STATUS: SEQUENCE COMPLETE ON ALL DEVICES", "fg": "green"})
 
         except Exception as e:
-            self.root.after(0, self.ui_log, f"ERROR: {e}")
+            self.root.after(0, self.ui_log, f"FATAL ERROR: {e}")
             self.root.after(0, self.status_label.config, {"text": "STATUS: ERROR OCCURRED", "fg": "red"})
 
     # --- BUTTON ENDPOINTS ---
