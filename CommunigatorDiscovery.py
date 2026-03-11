@@ -5,11 +5,16 @@ from pywinauto.application import Application
 import threading
 import time
 import os
-import subprocess # <-- NEW: Required for pinging IPs
+import subprocess 
+import json # <-- NEW: Required for saving/loading IPs persistently
 
 # --- 1. SET YOUR SHORTCUT PATH HERE ---
 COMMG_PATH = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Motorola\CommG_LTD\CommG_LTD.lnk"
 WINDOW_SEARCH_TERM = "CommuniGATOR" 
+
+# --- 2. CONFIG PATH FOR SAVED IPs ---
+CONFIG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "configs")
+IP_CONFIG_FILE = os.path.join(CONFIG_DIR, "communigator_ips.json")
 
 class CommG_Ultimate_Controller:
     def __init__(self, root):
@@ -31,8 +36,9 @@ class CommG_Ultimate_Controller:
         # Listbox for IPs
         self.ip_listbox = tk.Listbox(self.ip_frame, height=4, width=30, font=('Arial', 10))
         self.ip_listbox.grid(row=0, column=0, rowspan=2, padx=10, pady=10)
-        self.ip_listbox.insert(tk.END, "192.168.10.1")
-        self.ip_listbox.insert(tk.END, "192.168.10.2")
+        
+        # NEW: Load saved IPs instead of hardcoding them
+        self.load_ips()
 
         # Controls for Add/Remove
         self.ip_controls_frame = tk.Frame(self.ip_frame)
@@ -73,17 +79,74 @@ class CommG_Ultimate_Controller:
 
         threading.Thread(target=self.bg_monitor, daemon=True).start()
 
+    # --- NEW: SAVE / LOAD IP LOGIC ---
+    def load_ips(self):
+        """Loads IPs from the config file, or uses defaults if none exist."""
+        default_ips = ["192.168.10.1", "192.168.10.2"]
+        if os.path.exists(IP_CONFIG_FILE):
+            try:
+                with open(IP_CONFIG_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    ips = data.get("ips", default_ips)
+            except Exception as e:
+                print(f"Error loading IPs: {e}")
+                ips = default_ips
+        else:
+            ips = default_ips
+            
+        for ip in ips:
+            self.ip_listbox.insert(tk.END, ip)
+
+    def save_ips(self):
+        """Saves current IPs in the listbox to the config file."""
+        ips = self.get_target_ips()
+        os.makedirs(CONFIG_DIR, exist_ok=True)
+        try:
+            with open(IP_CONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump({"ips": ips}, f, indent=4)
+        except Exception as e:
+            print(f"Error saving IPs: {e}")
+
     # --- UI HELPERS ---
     def add_ip(self):
         new_ip = self.new_ip_entry.get().strip()
-        if new_ip:
-            self.ip_listbox.insert(tk.END, new_ip)
-            self.new_ip_entry.delete(0, tk.END)
+        
+        # 1. Warn if input is empty
+        if not new_ip:
+            messagebox.showwarning("Empty Input", "Please enter an IP address before clicking Add.")
+            return
+            
+        # 2. Warn if IP already exists (no duplicates)
+        current_ips = self.get_target_ips()
+        if new_ip in current_ips:
+            messagebox.showwarning("Duplicate IP", f"The IP address {new_ip} is already in the list!")
+            return
+            
+        # Add the IP, clear the entry box, and save persistently
+        self.ip_listbox.insert(tk.END, new_ip)
+        self.new_ip_entry.delete(0, tk.END)
+        self.save_ips()
 
     def remove_ip(self):
         selected = self.ip_listbox.curselection()
-        if selected:
+        
+        # 1. Warn if nothing is selected
+        if not selected:
+            messagebox.showinfo("No Selection", "Please select an IP address from the list to remove.")
+            return
+            
+        ip_to_remove = self.ip_listbox.get(selected[0])
+        
+        # 2. Ask for confirmation
+        confirm = messagebox.askyesno(
+            "Confirm Removal", 
+            f"Are you sure you want to remove this IP address?\n\n{ip_to_remove}"
+        )
+        
+        # Delete and save if confirmed
+        if confirm:
             self.ip_listbox.delete(selected[0])
+            self.save_ips()
 
     def ui_log(self, message):
         self.log_display.config(state='normal')
@@ -94,7 +157,7 @@ class CommG_Ultimate_Controller:
     def get_target_ips(self):
         return list(self.ip_listbox.get(0, tk.END))
 
-    # --- NEW: PING HELPER ---
+    # --- PING HELPER ---
     def ping_ip(self, ip):
         """Pings the target IP. Returns True if reachable, False if not."""
         try:
@@ -223,7 +286,7 @@ class CommG_Ultimate_Controller:
                     time.sleep(5.0) 
                 
                 except Exception as inner_e:
-                    # NEW: If the UI gets stuck on one specific IP, catch it without crashing the whole script
+                    # If the UI gets stuck on one specific IP, catch it without crashing the whole script
                     self.root.after(0, self.ui_log, f"ERROR on {ip}: {inner_e}")
                     proceed = messagebox.askyesno(
                         "Automation Error", 
