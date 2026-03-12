@@ -13,11 +13,21 @@ import cv2
 import json
 import re
 import yaml
+import pandas as pd
 
 from openpyxl import load_workbook
 
+try:
+    from pywinauto import Desktop
+    from pywinauto.application import Application
+    HAS_PYWINAUTO = True
+except ImportError:
+    Desktop = None
+    Application = None
+    HAS_PYWINAUTO = False
 
 _EVT_FINISHED = "__PROCESS_FINISHED__"
+_EVT_COMMG_DONE = "__COMMG_DONE__"
 
 
 def _settings_path() -> Path:
@@ -89,17 +99,14 @@ def _sheet_name_for_region(xls_path: str, region: str) -> str:
     wb = load_workbook(filename=xls_path, read_only=True, data_only=True)
     try:
         want = _norm_col(region)
-        # Canonical region names
         if want in ["en", "english", "global"]:
             want = "english"
         if want in ["latam", "lac", "lacr", "la cr"]:
             want = "lacr"
 
-        # Exact match first
         for s in wb.sheetnames:
             if _norm_col(s) == want:
                 return s
-        # Partial match
         for s in wb.sheetnames:
             if want in _norm_col(s):
                 return s
@@ -154,7 +161,6 @@ def _tag_options_from_excel(excel_path: str) -> list[str]:
             s = str(v).strip()
             if not s:
                 continue
-            # Sometimes the sheet can contain repeated header-like cells in the body; exclude them.
             try:
                 if _norm_col(s) in ["string tag", "stringtag", "tag"]:
                     continue
@@ -187,22 +193,10 @@ def _language_options_from_excel(excel_path: str, region: str) -> list[str]:
             headers = list(row)
             break
 
-        # Normalize and filter obvious non-language columns
         ignore = {
-            "index",
-            "string tag",
-            "tag",
-            "string category",
-            "category",
-            "version",
-            "ver",
-            "english",
-            "comment",
-            "comments",
-            "notes",
-            "note",
-            "description",
-            "desc",
+            "index", "string tag", "tag", "string category", "category",
+            "version", "ver", "english", "comment", "comments",
+            "notes", "note", "description", "desc",
         }
 
         opts = []
@@ -211,27 +205,12 @@ def _language_options_from_excel(excel_path: str, region: str) -> list[str]:
             n = _norm_col(h)
             if not n or n in ignore:
                 continue
-            # For headers like "String (Japanese)", _norm_col becomes "japanese".
             label = str(h).strip() if h is not None else ""
-            # Prefer clean normalized language name when it looks like a language
             if n in [
-                "japanese",
-                "korean",
-                "simplified chinese",
-                "traditional chinese",
-                "french",
-                "spanish",
-                "german",
-                "italian",
-                "polish",
-                "russian",
-                "turkish",
-                "arabic",
-                "hungarian",
-                "hebrew",
-                "czech",
-                "portuguese",
-                "english",
+                "japanese", "korean", "simplified chinese", "traditional chinese",
+                "french", "spanish", "german", "italian", "polish",
+                "russian", "turkish", "arabic", "hungarian", "hebrew",
+                "czech", "portuguese", "english",
             ]:
                 label = n.title()
             if label and label not in seen:
@@ -247,7 +226,6 @@ def _language_options_from_excel(excel_path: str, region: str) -> list[str]:
 
 
 def _default_excel_path() -> str:
-    # Try common locations / previously used path
     p = os.getenv("VERIFY_EXCEL", "").strip()
     if p:
         return p
@@ -292,8 +270,8 @@ def _resolve_path(p: str) -> str:
 class VerifyStringGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Verify String (Walkie-Tracker)")
-        self.root.minsize(900, 750)
+        self.root.title("Verify String (Walkie-Tracker + CommG Integration)")
+        self.root.minsize(1000, 850)
 
         self._auto_start_verify = False
         self._last_run_is_verification = True
@@ -305,119 +283,136 @@ class VerifyStringGUI:
 
         self._settings = _load_settings()
 
-        self.excel_var = tk.StringVar(value=str(self._settings.get("excel") or _default_excel_path()))
-        self.region_var = tk.StringVar(value=str(self._settings.get("region") or "APAC"))
-        self.language_var = tk.StringVar(value=str(self._settings.get("language") or "Japanese"))
-        self.tag_var = tk.StringVar(value=str(self._settings.get("tag") or ""))
-        self.index_var = tk.StringVar(value=str(self._settings.get("index") or ""))
-        self.preview_var = tk.BooleanVar(value=bool(self._settings.get("preview", True)))
-        saved_model = str(self._settings.get("model_path") or "")
-        if not saved_model.strip():
-            saved_model = _default_model_path()
-        self.model_path_var = tk.StringVar(value=_resolve_path(saved_model))
-        self.camera_id_var = tk.StringVar(value=str(self._settings.get("camera_id") or "1"))
-        self.save_log_var = tk.BooleanVar(value=bool(self._settings.get("save_log", False)))
-        self.log_path_var = tk.StringVar(value=str(self._settings.get("log_path") or ""))
-        self._log_fp = None
-        self._log_session_dir = None
+        # CommG specific variables
+        self.COMMG_PATH = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Motorola\CommG_LTD\CommG_LTD.lnk"
+        self.WINDOW_SEARCH_TERM = "CommuniGATOR"
+        self.commg_handles = []
+        self.type_lock = threading.Lock()
+        self._commg_pending_queue = []
+        self._commg_is_active_run = False
 
+        # Build Main UI Frame
         frm = tk.Frame(root, padx=10, pady=10)
         frm.pack(fill=tk.BOTH, expand=True)
 
         row = 0
 
+        # --- EXCEL & STRING CONFIG ---
+        self.excel_var = tk.StringVar(value=str(self._settings.get("excel") or _default_excel_path()))
+        self.region_var = tk.StringVar(value=str(self._settings.get("region") or "APAC"))
+        self.language_var = tk.StringVar(value=str(self._settings.get("language") or "Japanese"))
+        self.tag_var = tk.StringVar(value=str(self._settings.get("tag") or ""))
+        self.index_var = tk.StringVar(value=str(self._settings.get("index") or ""))
+        
         tk.Label(frm, text="Excel (.xlsm/.xlsx)").grid(row=row, column=0, sticky="w")
         tk.Entry(frm, textvariable=self.excel_var, width=60).grid(row=row, column=1, sticky="we", padx=(8, 8))
         tk.Button(frm, text="Browse...", command=self.browse_excel).grid(row=row, column=2, sticky="e")
         row += 1
 
         tk.Label(frm, text="Region").grid(row=row, column=0, sticky="w", pady=(6, 0))
-        self.region_combo = ttk.Combobox(
-            frm,
-            textvariable=self.region_var,
-            width=20,
-            state="normal",
-            values=["APAC", "EMEA", "LACR", "English"],
-        )
+        self.region_combo = ttk.Combobox(frm, textvariable=self.region_var, width=20, state="normal", values=["APAC", "EMEA", "LACR", "English"])
         self.region_combo.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
-        try:
-            self.region_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_languages())
-        except Exception:
-            pass
-
-        try:
-            self.region_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_tags(), add=True)
-        except Exception:
-            pass
+        self.region_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_languages())
+        self.region_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_tags(), add=True)
         row += 1
 
         tk.Label(frm, text="Language").grid(row=row, column=0, sticky="w", pady=(6, 0))
-        self.language_combo = ttk.Combobox(
-            frm,
-            textvariable=self.language_var,
-            width=30,
-            state="normal",
-            values=[
-                "Japanese",
-                "Korean",
-                "Simplified Chinese",
-                "Traditional Chinese",
-                "French",
-                "Spanish",
-                "German",
-                "Italian",
-                "Polish",
-                "Russian",
-                "Turkish",
-                "Arabic",
-                "Hungarian",
-                "Hebrew",
-                "Czech",
-                "Portuguese",
-            ],
-        )
+        self.language_combo = ttk.Combobox(frm, textvariable=self.language_var, width=30, state="normal")
         self.language_combo.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
         row += 1
 
         tk.Label(frm, text="String Tag").grid(row=row, column=0, sticky="w", pady=(6, 0))
-        self.tag_combo = ttk.Combobox(frm, textvariable=self.tag_var, width=50, state="normal", values=[])
+        self.tag_combo = ttk.Combobox(frm, textvariable=self.tag_var, width=50, state="normal")
         self.tag_combo.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
-        try:
-            self.tag_combo.bind("<KeyRelease>", self._on_tag_typed)
-        except Exception:
-            pass
-        try:
-            self.tag_combo.bind("<Escape>", self._on_tag_escape)
-            self.tag_combo.bind("<FocusOut>", self._on_tag_focus_out)
-            self.tag_combo.bind("<Down>", self._on_tag_down)
-        except Exception:
-            pass
+        self.tag_combo.bind("<KeyRelease>", self._on_tag_typed)
+        self.tag_combo.bind("<Escape>", self._on_tag_escape)
+        self.tag_combo.bind("<FocusOut>", self._on_tag_focus_out)
+        self.tag_combo.bind("<Down>", self._on_tag_down)
         row += 1
 
         tk.Label(frm, text="Index (optional)").grid(row=row, column=0, sticky="w", pady=(6, 0))
         tk.Entry(frm, textvariable=self.index_var, width=20).grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
         row += 1
 
+        # --- CAMERA, PREVIEW & LOGS ---
+        self.preview_var = tk.BooleanVar(value=bool(self._settings.get("preview", True)))
+        self.camera_id_var = tk.StringVar(value=str(self._settings.get("camera_id") or "1"))
+        self.save_log_var = tk.BooleanVar(value=bool(self._settings.get("save_log", False)))
+        self.log_path_var = tk.StringVar(value=str(self._settings.get("log_path") or ""))
+        self._log_fp = None
+        self._log_session_dir = None
+
         extras = tk.Frame(frm)
         extras.grid(row=row, column=0, columnspan=3, sticky="we", pady=(8, 0))
 
         tk.Checkbutton(extras, text="Preview (OpenCV window)", variable=self.preview_var).pack(side=tk.LEFT)
-
         tk.Label(extras, text="Camera ID").pack(side=tk.LEFT, padx=(12, 2))
-
         self.camera_combo = ttk.Combobox(extras, textvariable=self.camera_id_var, width=8, state="readonly")
         self.camera_combo.pack(side=tk.LEFT)
         tk.Button(extras, text="Refresh", command=self.refresh_cameras).pack(side=tk.LEFT, padx=(6, 0))
-
         tk.Checkbutton(extras, text="Save log", variable=self.save_log_var).pack(side=tk.LEFT, padx=(12, 0))
         tk.Entry(extras, textvariable=self.log_path_var, width=28).pack(side=tk.LEFT, padx=(6, 0))
         tk.Button(extras, text="Browse...", command=self.browse_log).pack(side=tk.LEFT, padx=(6, 0))
-
         row += 1
 
-        tk.Label(frm, text="Model Path (optional)").grid(row=row, column=0, sticky="w", pady=(6, 0))
+        saved_model = str(self._settings.get("model_path") or "")
+        if not saved_model.strip():
+            saved_model = _default_model_path()
+        self.model_path_var = tk.StringVar(value=_resolve_path(saved_model))
+        
+        tk.Label(frm, text="Model Path").grid(row=row, column=0, sticky="w", pady=(6, 0))
         tk.Entry(frm, textvariable=self.model_path_var, width=60).grid(row=row, column=1, sticky="we", padx=(8, 8), pady=(6, 0))
         tk.Button(frm, text="Browse...", command=self.browse_model).grid(row=row, column=2, sticky="e", pady=(6, 0))
+        row += 1
+
+        # -------------------------------------------------------------
+        # ADDED COMMG INTEGRATION SECTION
+        # -------------------------------------------------------------
+        self.lf_commg = tk.LabelFrame(frm, text=" CommG Pro - Integration ", padx=10, pady=5, fg="#00008B", font=('Arial', 10, 'bold'))
+        self.lf_commg.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
+        
+        self.commg_enable_var = tk.BooleanVar(value=bool(self._settings.get("commg_enable", False)))
+        tk.Checkbutton(self.lf_commg, text="Enable CommG Execution (Takes control of sequence)", variable=self.commg_enable_var, font=('Arial', 9, 'bold')).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 5))
+
+        # CommG IPs
+        ip_frame = tk.Frame(self.lf_commg)
+        ip_frame.grid(row=1, column=0, sticky="nw", padx=(0, 20))
+        tk.Label(ip_frame, text="Target IPs").pack(anchor="w")
+        self.ip_listbox = tk.Listbox(ip_frame, height=3, width=20)
+        self.ip_listbox.pack(side=tk.LEFT, fill="y")
+        
+        saved_ips = self._settings.get("commg_ips", ["192.168.10.1", "192.168.10.2"])
+        for ip in saved_ips:
+            self.ip_listbox.insert(tk.END, ip)
+
+        ip_btns = tk.Frame(ip_frame)
+        ip_btns.pack(side=tk.LEFT, padx=(5, 0), fill="y")
+        self.new_ip_entry = tk.Entry(ip_btns, width=15)
+        self.new_ip_entry.pack(pady=(0, 2))
+        tk.Button(ip_btns, text="Add IP", command=self._commg_add_ip).pack(fill="x", pady=1)
+        tk.Button(ip_btns, text="Remove", command=self._commg_remove_ip).pack(fill="x", pady=1)
+
+        # CommG Execution Type
+        cmd_frame = tk.Frame(self.lf_commg)
+        cmd_frame.grid(row=1, column=1, sticky="nw")
+        
+        self.commg_mode_var = tk.StringVar(value=str(self._settings.get("commg_mode", "Batch")))
+        
+        tk.Radiobutton(cmd_frame, text="Single Command", variable=self.commg_mode_var, value="Single").grid(row=0, column=0, sticky="w")
+        self.commg_custom_cmd_var = tk.StringVar(value=str(self._settings.get("commg_custom_cmd", "03001101")))
+        tk.Entry(cmd_frame, textvariable=self.commg_custom_cmd_var, width=15).grid(row=0, column=1, padx=(5, 0))
+
+        tk.Radiobutton(cmd_frame, text="Batch (CSV/Excel)", variable=self.commg_mode_var, value="Batch").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.commg_batch_file_var = tk.StringVar(value=str(self._settings.get("commg_batch_file", "")))
+        tk.Entry(cmd_frame, textvariable=self.commg_batch_file_var, width=35).grid(row=1, column=1, padx=(5, 0), pady=(8, 0))
+        tk.Button(cmd_frame, text="Browse...", command=self._commg_browse_batch).grid(row=1, column=2, padx=(5, 0), pady=(8, 0))
+        
+        if not HAS_PYWINAUTO:
+            tk.Label(self.lf_commg, text="⚠️ pywinauto not installed. CommG unavailable.", fg="red").grid(row=2, column=0, columnspan=3, sticky="w")
+            self.commg_enable_var.set(False)
+            for child in self.lf_commg.winfo_children():
+                try: child.configure(state='disabled')
+                except Exception: pass
         row += 1
 
         # -------------------------------------------------------------
@@ -441,20 +436,22 @@ class VerifyStringGUI:
 
         self._load_devices_from_env_or_defaults()
         row += 1
-        # -------------------------------------------------------------
 
+        # -------------------------------------------------------------
+        # ACTIONS & LOGS
+        # -------------------------------------------------------------
         btns = tk.Frame(frm)
         btns.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
-        self.btn_run = tk.Button(btns, text="Start", command=self.init_and_run)
+        self.btn_run = tk.Button(btns, text="Start", command=self.init_and_run, bg="#90EE90", font=('Arial', 10, 'bold'))
         self.btn_run.pack(side=tk.LEFT)
-        self.btn_stop = tk.Button(btns, text="Stop", command=self.stop)
+        self.btn_stop = tk.Button(btns, text="Stop", command=self.stop, bg="#FFCCCB")
         self.btn_stop.pack(side=tk.LEFT, padx=(8, 0))
         self.btn_close = tk.Button(btns, text="Close", command=self.close)
         self.btn_close.pack(side=tk.LEFT, padx=(8, 0))
         row += 1
 
         self.status_var = tk.StringVar(value="Idle")
-        self.status_label = tk.Label(frm, textvariable=self.status_var, anchor="w")
+        self.status_label = tk.Label(frm, textvariable=self.status_var, anchor="w", font=('Arial', 10, 'bold'))
         self.status_label.grid(row=row, column=0, columnspan=3, sticky="we", pady=(8, 0))
         row += 1
 
@@ -466,6 +463,7 @@ class VerifyStringGUI:
         self.output.tag_configure("warn", foreground="#E65100")
         self.output.tag_configure("cmd", foreground="#1565C0")
         self.output.tag_configure("error", foreground="#B71C1C")
+        self.output.tag_configure("commg", foreground="#800080")
 
         frm.grid_columnconfigure(1, weight=1)
         frm.grid_rowconfigure(row, weight=1)
@@ -486,6 +484,190 @@ class VerifyStringGUI:
 
         self.root.after(50, self._drain_queue)
 
+    # --- CommG Specific Methods ---
+    def _commg_add_ip(self):
+        new_ip = self.new_ip_entry.get().strip()
+        if not new_ip:
+            messagebox.showwarning("Empty Input", "Please enter an IP address before clicking Add.")
+            return
+            
+        current_ips = list(self.ip_listbox.get(0, tk.END))
+        if new_ip in current_ips:
+            messagebox.showwarning("Duplicate IP", f"The IP address {new_ip} is already in the list!")
+            return
+            
+        self.ip_listbox.insert(tk.END, new_ip)
+        self.new_ip_entry.delete(0, tk.END)
+
+    def _commg_remove_ip(self):
+        selected = self.ip_listbox.curselection()
+        if not selected:
+            messagebox.showinfo("No Selection", "Please select an IP address from the list to remove.")
+            return
+            
+        ip_to_remove = self.ip_listbox.get(selected[0])
+        confirm = messagebox.askyesno(
+            "Confirm Removal", 
+            f"Are you sure you want to remove this IP address?\n\n{ip_to_remove}"
+        )
+        
+        if confirm:
+            self.ip_listbox.delete(selected[0])
+
+    def _commg_browse_batch(self):
+        p = filedialog.askopenfilename(
+            title="Select CommG Batch File",
+            filetypes=[("Excel/CSV Files", "*.xlsx *.xls *.csv"), ("All Files", "*.*")]
+        )
+        if p:
+            self.commg_batch_file_var.set(p)
+
+    def _commg_ping_ip(self, ip):
+        try:
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            response = subprocess.call(['ping', '-n', '1', '-w', '2000', ip], startupinfo=startupinfo)
+            return response == 0
+        except Exception:
+            return False
+
+    def _commg_find_handles(self):
+        if not HAS_PYWINAUTO: return []
+        handles = []
+        desktop = Desktop(backend="uia")
+        for win in desktop.windows():
+            text = win.window_text()
+            if text and self.WINDOW_SEARCH_TERM in text:
+                handles.append(win.handle)
+        return handles
+
+    def _commg_ensure_connection(self):
+        if not HAS_PYWINAUTO: return False
+        if self.commg_handles:
+            try:
+                app = Application(backend="uia").connect(handle=self.commg_handles[0])
+                app.window(handle=self.commg_handles[0]).exists()
+                return True
+            except:
+                self.commg_handles = [] 
+
+        self.q.put("[CommG] CommuniGATOR not found. Launching...\n")
+        found_handles = self._commg_find_handles()
+        
+        if not found_handles:
+            if not os.path.exists(self.COMMG_PATH):
+                self.q.put(f"[CommG] ERROR: Cannot find shortcut at {self.COMMG_PATH}\n")
+                return False
+                
+            os.startfile(self.COMMG_PATH) 
+            time.sleep(3.5) 
+            found_handles = self._commg_find_handles()
+            
+        if not found_handles:
+            self.q.put("[CommG] ERROR: Software launched but couldn't attach.\n")
+            return False
+
+        self.commg_handles = found_handles[:1]
+        self.q.put("[CommG] Successfully hooked into CommuniGATOR.\n")
+        return True
+
+    def _commg_send_command_thread(self, payload):
+        ips = list(self.ip_listbox.get(0, tk.END))
+        if not ips:
+            self.q.put("[CommG] No IPs configured!\n")
+            self.q.put((_EVT_COMMG_DONE, "ABORT"))
+            return
+
+        if not self._commg_ensure_connection():
+            self.q.put("[CommG] Failed to connect to CommuniGATOR.\n")
+            self.q.put((_EVT_COMMG_DONE, "ABORT"))
+            return
+
+        handle = self.commg_handles[0]
+        try:
+            app = Application(backend="uia").connect(handle=handle)
+            main_win = app.window(handle=handle)
+            toolbar = main_win.child_window(auto_id="59392", control_type="ToolBar")
+            input_field = main_win.child_window(auto_id="1004", control_type="Edit")
+            
+            for ip in ips:
+                self.q.put(f"[CommG] Ping check {ip}...\n")
+                if not self._commg_ping_ip(ip):
+                    self.q.put(f"[CommG] WARNING: {ip} is offline.\n")
+                    # Pop up the warning
+                    proceed = messagebox.askyesno("IP Not Found", f"Could not reach IP: {ip}\n\nDo you want to skip this one and proceed?")
+                    if not proceed:
+                        self.q.put("[CommG] Sequence aborted by user.\n")
+                        self.q.put((_EVT_COMMG_DONE, "ABORT"))
+                        return
+                    continue
+
+                try:
+                    with self.type_lock:
+                        main_win.set_focus()
+                        
+                        toolbar.button(0).click() 
+                        time.sleep(1.0)
+                        popup = app.top_window() 
+                        popup.type_keys(ip + "{ENTER}", set_foreground=True)
+                        time.sleep(1.5) 
+                        
+                        toolbar.button(1).click()
+                        time.sleep(1.0)
+                        
+                        input_field.set_focus()
+                        input_field.type_keys("^a{BACKSPACE}0121FF{ENTER}", set_foreground=True)
+                        time.sleep(1.5)
+                        
+                        input_field.set_focus()
+                        input_field.type_keys("^a{BACKSPACE}" + payload + "{ENTER}", set_foreground=True)
+                        self.q.put(f"[CommG] Sent {payload} to {ip}\n")
+                
+                except Exception as inner_e:
+                    self.q.put(f"[CommG] ERROR on {ip}: {inner_e}\n")
+                    # Pop up the automation warning
+                    proceed = messagebox.askyesno("Automation Error", f"An error occurred while controlling the UI for {ip}.\n\nDo you want to skip and proceed?")
+                    if not proceed:
+                        self.q.put("[CommG] Sequence aborted by user due to UI error.\n")
+                        self.q.put((_EVT_COMMG_DONE, "ABORT"))
+                        return
+                    
+            self.q.put("[CommG] Waiting 5s for UI to update...\n")
+            time.sleep(5.0) 
+            
+        except Exception as e:
+            self.q.put(f"[CommG] FATAL ERROR: {e}\n")
+            self.q.put((_EVT_COMMG_DONE, "ABORT"))
+            return
+
+        self.q.put((_EVT_COMMG_DONE, None))
+
+    def _run_next_commg_step(self):
+        if not self._commg_pending_queue:
+            self._commg_is_active_run = False
+            self._set_running(False)
+            self.status_var.set("CommG Batch Complete")
+            self.status_label.configure(fg="green")
+            return
+
+        item = self._commg_pending_queue.pop(0)
+        cmd = item
+        tag = ""
+        if isinstance(item, tuple):
+            cmd, tag = item
+        
+        if tag:
+            self.tag_var.set(tag)
+            self.index_var.set("")
+            self.q.put(f"\n[CommG] Switching String Tag to: {tag}\n", ("commg",))
+
+        self.status_var.set(f"CommG Running: {cmd}...")
+        self.status_label.configure(fg="purple")
+        self._set_running(True)
+
+        threading.Thread(target=self._commg_send_command_thread, args=(cmd,), daemon=True).start()
+
+    # --- Device List Methods ---
     def _regrid_device_rows(self):
         for idx, row in enumerate(self.device_rows):
             row_idx = idx + 1
@@ -536,13 +718,10 @@ class VerifyStringGUI:
             self.selected_device_id.set(int(did))
 
     def _on_remove_device(self):
-        if not self.device_rows:
-            return
+        if not self.device_rows: return
         target_id = None
-        try:
-            target_id = int(self.selected_device_id.get())
-        except Exception:
-            target_id = None
+        try: target_id = int(self.selected_device_id.get())
+        except Exception: target_id = None
 
         idx = None
         if target_id is not None:
@@ -550,15 +729,12 @@ class VerifyStringGUI:
                 if int(r.get("id") or 0) == int(target_id):
                     idx = i
                     break
-        if idx is None:
-            idx = len(self.device_rows) - 1
+        if idx is None: idx = len(self.device_rows) - 1
 
         row = self.device_rows.pop(int(idx))
         for w in row.get("widgets") or []:
-            try:
-                w.destroy()
-            except Exception:
-                pass
+            try: w.destroy()
+            except Exception: pass
 
         self._renumber_device_rows()
         self._regrid_device_rows()
@@ -580,21 +756,15 @@ class VerifyStringGUI:
                 devices = obj.get("devices") if isinstance(obj, dict) else None
                 if isinstance(devices, list) and devices:
                     for d in devices:
-                        if not isinstance(d, dict):
-                            continue
-                        try:
-                            did = int(d.get("id"))
-                        except Exception:
-                            continue
+                        if not isinstance(d, dict): continue
+                        try: did = int(d.get("id"))
+                        except Exception: continue
                         nm = str(d.get("name") or "")
-                        try:
-                            exp = int(d.get("expected_softkeys")) if d.get("expected_softkeys") is not None else None
-                        except Exception:
-                            exp = None
+                        try: exp = int(d.get("expected_softkeys")) if d.get("expected_softkeys") is not None else None
+                        except Exception: exp = None
                         self._add_device_row(did, nm, exp)
                     return
-        except Exception:
-            pass
+        except Exception: pass
 
         try:
             cfgp = Path(__file__).resolve().parents[1] / "configs" / "device_profiles.json"
@@ -604,26 +774,20 @@ class VerifyStringGUI:
                 devices = obj.get("devices") if isinstance(obj, dict) else None
                 if isinstance(devices, list) and devices:
                     for d in devices:
-                        if not isinstance(d, dict):
-                            continue
-                        try:
-                            did = int(d.get("id"))
-                        except Exception:
-                            continue
+                        if not isinstance(d, dict): continue
+                        try: did = int(d.get("id"))
+                        except Exception: continue
                         nm = str(d.get("name") or "")
-                        try:
-                            exp = int(d.get("expected_softkeys")) if d.get("expected_softkeys") is not None else None
-                        except Exception:
-                            exp = None
+                        try: exp = int(d.get("expected_softkeys")) if d.get("expected_softkeys") is not None else None
+                        except Exception: exp = None
                         self._add_device_row(did, nm, exp)
                     return
-        except Exception:
-            pass
+        except Exception: pass
 
-        # Default to 2 devices
         for i in range(2):
             self._add_device_row(i + 1, "", None)
 
+    # --- Directory Handlers ---
     def browse_excel(self):
         p = filedialog.askopenfilename(
             title="Select Excel file",
@@ -634,22 +798,20 @@ class VerifyStringGUI:
             try:
                 self.refresh_languages()
                 self.refresh_tags()
-            except Exception:
-                pass
+            except Exception: pass
 
     def browse_model(self):
         p = filedialog.askopenfilename(
             title="Select YOLO model weights",
             filetypes=[("PyTorch Weights", "*.pt"), ("All Files", "*.*")],
         )
-        if p:
-            self.model_path_var.set(_resolve_path(p))
+        if p: self.model_path_var.set(_resolve_path(p))
 
     def browse_log(self):
         d = filedialog.askdirectory(title="Select log folder")
-        if d:
-            self.log_path_var.set(d)
+        if d: self.log_path_var.set(d)
 
+    # --- Append Logs ---
     def _append(self, s: str):
         self.output.insert(tk.END, s)
         self.output.see(tk.END)
@@ -657,8 +819,7 @@ class VerifyStringGUI:
             if self._log_fp is not None:
                 self._log_fp.write(s)
                 self._log_fp.flush()
-        except Exception:
-            pass
+        except Exception: pass
 
     def _append_cmd(self, s: str):
         self.output.insert(tk.END, s, ("cmd",))
@@ -667,39 +828,29 @@ class VerifyStringGUI:
             if self._log_fp is not None:
                 self._log_fp.write(s)
                 self._log_fp.flush()
-        except Exception:
-            pass
+        except Exception: pass
 
     def _append_line_with_result_color(self, line: str):
-        # Colorize PASS/FAIL lines from verify_string.py
         stripped = (line or "").strip()
         low = stripped.lower()
 
         if stripped.startswith("Expected (") and "):" in stripped:
-            try:
-                self.last_expected = stripped.split("):", 1)[1].strip()
-            except Exception:
-                pass
+            try: self.last_expected = stripped.split("):", 1)[1].strip()
+            except Exception: pass
         elif stripped == "Expected (normalized):":
             self._pending_expected_norm = True
         elif self._pending_expected_norm and stripped and stripped not in ["PASS", "FAIL", "WARN"]:
-            try:
-                self.last_expected = stripped
-            except Exception:
-                pass
+            try: self.last_expected = stripped
+            except Exception: pass
             self._pending_expected_norm = False
 
         is_error = False
-        if stripped.startswith("Traceback"):
-            is_error = True
-        elif "[error]" in low or "[gui error]" in low:
-            is_error = True
-        elif low.startswith("error:") or low.startswith("exception"):
-            is_error = True
-        elif "typeerror" in low or "valueerror" in low or "runtimeerror" in low:
-            is_error = True
-        elif "❌" in stripped:
-            is_error = True
+        if stripped.startswith("Traceback"): is_error = True
+        elif "[error]" in low or "[gui error]" in low: is_error = True
+        elif low.startswith("error:") or low.startswith("exception"): is_error = True
+        elif "typeerror" in low or "valueerror" in low or "runtimeerror" in low: is_error = True
+        elif "❌" in stripped: is_error = True
+
         if stripped == "PASS":
             self.last_result = "PASS"
             self.output.insert(tk.END, line, ("pass",))
@@ -710,15 +861,17 @@ class VerifyStringGUI:
                 if (self.last_expected or "").strip():
                     exp_line = f"Expected: {self.last_expected}\n"
                     self.output.insert(tk.END, exp_line)
-            except Exception:
-                pass
+            except Exception: pass
         elif stripped == "WARN":
             self.last_result = "WARN"
             self.output.insert(tk.END, line, ("warn",))
         elif is_error:
             self.output.insert(tk.END, line, ("error",))
+        elif "[CommG]" in stripped:
+            self.output.insert(tk.END, line, ("commg",))
         else:
             self.output.insert(tk.END, line)
+            
         self.output.see(tk.END)
         try:
             if self._log_fp is not None:
@@ -726,8 +879,7 @@ class VerifyStringGUI:
                 if not line.endswith("\n"):
                     self._log_fp.write("\n")
                 self._log_fp.flush()
-        except Exception:
-            pass
+        except Exception: pass
 
     def _current_settings(self) -> dict:
         return {
@@ -741,6 +893,11 @@ class VerifyStringGUI:
             "camera_id": (self.camera_id_var.get() or "").strip(),
             "save_log": bool(self.save_log_var.get()),
             "log_path": (self.log_path_var.get() or "").strip(),
+            "commg_enable": bool(self.commg_enable_var.get()),
+            "commg_ips": list(self.ip_listbox.get(0, tk.END)),
+            "commg_mode": (self.commg_mode_var.get() or "Batch"),
+            "commg_custom_cmd": (self.commg_custom_cmd_var.get() or "").strip(),
+            "commg_batch_file": (self.commg_batch_file_var.get() or "").strip(),
         }
 
     def _persist_settings(self):
@@ -748,132 +905,76 @@ class VerifyStringGUI:
         _save_settings(self._settings)
 
     def _on_close(self):
-        try:
-            self._persist_settings()
-        except Exception:
-            pass
+        try: self._persist_settings()
+        except Exception: pass
         try:
             if self._log_fp is not None:
                 self._log_fp.close()
                 self._log_fp = None
-        except Exception:
-            pass
-        try:
-            self._log_session_dir = None
-        except Exception:
-            pass
+        except Exception: pass
+        try: self._log_session_dir = None
+        except Exception: pass
         try:
             if self.proc and self.proc.poll() is None:
                 self.proc.terminate()
-        except Exception:
-            pass
+        except Exception: pass
         self.root.destroy()
 
     def refresh_cameras(self):
         cams = _probe_camera_ids(max_id=8)
-        if not cams:
-            cams = ["0", "1", "2"]
+        if not cams: cams = ["0", "1", "2"]
         try:
             self.camera_combo["values"] = cams
             cur = (self.camera_id_var.get() or "").strip()
             if cur not in cams:
-                if "1" in cams:
-                    self.camera_id_var.set("1")
-                else:
-                    self.camera_id_var.set(cams[0])
-        except Exception:
-            pass
+                if "1" in cams: self.camera_id_var.set("1")
+                else: self.camera_id_var.set(cams[0])
+        except Exception: pass
 
     def refresh_languages(self):
         excel = (self.excel_var.get() or "").strip()
         region = (self.region_var.get() or "").strip() or "APAC"
-
-        opts = []
-        try:
-            opts = _language_options_from_excel(excel, region)
-        except Exception:
-            opts = []
+        try: opts = _language_options_from_excel(excel, region)
+        except Exception: opts = []
 
         if not opts:
-            opts = [
-                "Japanese",
-                "Korean",
-                "Simplified Chinese",
-                "Traditional Chinese",
-                "French",
-                "Spanish",
-                "German",
-                "Italian",
-                "Polish",
-                "Russian",
-                "Turkish",
-                "Arabic",
-                "Hungarian",
-                "Hebrew",
-                "Czech",
-                "Portuguese",
-            ]
+            opts = ["Japanese", "Korean", "Simplified Chinese", "Traditional Chinese", "French", "Spanish", "German", "Italian", "Polish", "Russian", "Turkish", "Arabic", "Hungarian", "Hebrew", "Czech", "Portuguese"]
 
         try:
             self.language_combo["values"] = opts
             cur = (self.language_var.get() or "").strip()
-            if cur and cur in opts:
-                return
-            if cur and cur not in opts:
-                return
-            if opts:
-                self.language_var.set(opts[0])
-        except Exception:
-            pass
+            if cur and cur in opts: return
+            if cur and cur not in opts: return
+            if opts: self.language_var.set(opts[0])
+        except Exception: pass
 
     def refresh_tags(self):
         excel = (self.excel_var.get() or "").strip()
-        tags = []
-        try:
-            tags = _tag_options_from_excel(excel)
-        except Exception:
-            tags = []
-
-        try:
-            self._all_tags = tags
-        except Exception:
-            pass
-
-        try:
-            self.tag_combo["values"] = tags
-        except Exception:
-            pass
+        try: tags = _tag_options_from_excel(excel)
+        except Exception: tags = []
+        try: self._all_tags = tags
+        except Exception: pass
+        try: self.tag_combo["values"] = tags
+        except Exception: pass
 
     def _on_tag_typed(self, _evt=None):
-        try:
-            all_tags = list(getattr(self, "_all_tags", []) or [])
-        except Exception:
-            all_tags = []
+        try: all_tags = list(getattr(self, "_all_tags", []) or [])
+        except Exception: all_tags = []
 
-        if not all_tags:
-            return
+        if not all_tags: return
 
-        # Read directly from the widget; Tk can lag syncing the StringVar depending on event order.
-        try:
-            typed_raw = self.tag_combo.get()
-        except Exception:
-            typed_raw = self.tag_var.get()
+        try: typed_raw = self.tag_combo.get()
+        except Exception: typed_raw = self.tag_var.get()
         typed = (typed_raw or "").strip().lower()
-        if not typed:
-            filtered = all_tags
-        else:
-            filtered = [t for t in all_tags if typed in str(t).lower()]
+        if not typed: filtered = all_tags
+        else: filtered = [t for t in all_tags if typed in str(t).lower()]
 
-        try:
-            self.tag_combo["values"] = filtered
-        except Exception:
-            pass
+        try: self.tag_combo["values"] = filtered
+        except Exception: pass
 
     def _unpost_tag_dropdown(self):
-        try:
-            self.tag_combo.tk.call("ttk::combobox::Unpost")
-        except Exception:
-            pass
+        try: self.tag_combo.tk.call("ttk::combobox::Unpost")
+        except Exception: pass
 
     def _on_tag_escape(self, _evt=None):
         self._unpost_tag_dropdown()
@@ -882,44 +983,28 @@ class VerifyStringGUI:
         self._unpost_tag_dropdown()
 
     def _on_tag_down(self, _evt=None):
-        # Let the user open suggestions explicitly.
         try:
-            if not list(self.tag_combo["values"] or []):
-                self.refresh_tags()
-        except Exception:
-            pass
-
-        # Ensure list is filtered to whatever is currently typed.
-        try:
-            self._on_tag_typed()
-        except Exception:
-            pass
-        try:
-            self.tag_combo.tk.call("ttk::combobox::Post", str(self.tag_combo))
-        except Exception:
-            pass
+            if not list(self.tag_combo["values"] or []): self.refresh_tags()
+        except Exception: pass
+        try: self._on_tag_typed()
+        except Exception: pass
+        try: self.tag_combo.tk.call("ttk::combobox::Post", str(self.tag_combo))
+        except Exception: pass
 
     def clear(self):
         self.output.delete("1.0", tk.END)
         self.last_result = ""
         self.status_var.set("Idle")
-        try:
-            self.status_label.configure(fg="black")
-        except Exception:
-            pass
+        try: self.status_label.configure(fg="black")
+        except Exception: pass
 
     def close(self):
-        try:
-            self.stop()
+        try: self.stop()
+        except Exception: pass
+        try: self.root.destroy()
         except Exception:
-            pass
-        try:
-            self.root.destroy()
-        except Exception:
-            try:
-                self.root.quit()
-            except Exception:
-                pass
+            try: self.root.quit()
+            except Exception: pass
 
     def _set_running(self, running: bool):
         try:
@@ -929,47 +1014,38 @@ class VerifyStringGUI:
             else:
                 self.btn_run.configure(state=tk.NORMAL)
                 self.btn_stop.configure(state=tk.DISABLED)
-        except Exception:
-            pass
+        except Exception: pass
 
     def _build_cmd(self):
         excel = self.excel_var.get().strip()
-        if not excel:
-            raise ValueError("Excel path is required")
+        if not excel: raise ValueError("Excel path is required")
 
         region = self.region_var.get().strip()
         language = self.language_var.get().strip()
         tag = self.tag_var.get().strip()
         idx = self.index_var.get().strip()
 
-        if not region:
-            raise ValueError("Region is required (e.g., APAC/EMEA/LACR/English)")
-        if not language:
-            raise ValueError("Language is required (e.g., Japanese)")
-        if not tag and not idx:
-            raise ValueError("Provide either String Tag or Index")
+        if not region: raise ValueError("Region is required (e.g., APAC/EMEA/LACR/English)")
+        if not language: raise ValueError("Language is required (e.g., Japanese)")
+        if not tag and not idx: raise ValueError("Provide either String Tag or Index")
 
         script_path = Path(__file__).resolve().parent / "verify_string.py"
         cmd = [_python_exe(), str(script_path), "--excel", excel, "--region", region, "--language", language]
 
-        if tag:
-            cmd += ["--tag", tag]
-        if idx:
-            cmd += ["--index", idx]
-        if self.preview_var.get():
+        if tag: cmd += ["--tag", tag]
+        if idx: cmd += ["--index", idx]
+        
+        # If CommG is actively running, DO NOT pass --preview so that the screen is captured automatically!
+        if self.preview_var.get() and not self._commg_is_active_run:
             cmd += ["--preview"]
 
         model_path = _resolve_path(self.model_path_var.get())
-        try:
-            self.model_path_var.set(model_path)
-        except Exception:
-            pass
-        if model_path:
-            cmd += ["--model-path", model_path]
+        try: self.model_path_var.set(model_path)
+        except Exception: pass
+        if model_path: cmd += ["--model-path", model_path]
 
         camera_id = self.camera_id_var.get().strip()
-        if camera_id:
-            cmd += ["--camera-id", camera_id]
+        if camera_id: cmd += ["--camera-id", camera_id]
 
         return cmd
 
@@ -978,24 +1054,18 @@ class VerifyStringGUI:
             messagebox.showinfo("Running", "A process is already running. Click Stop first.")
             return
 
-        try:
-            self._last_run_is_verification = bool(is_verification)
-        except Exception:
-            self._last_run_is_verification = True
+        try: self._last_run_is_verification = bool(is_verification)
+        except Exception: self._last_run_is_verification = True
 
         self.last_result = ""
-        self.status_var.set("Running...")
-        try:
-            self.status_label.configure(fg="black")
-        except Exception:
-            pass
+        self.status_var.set("Running Verify...")
+        try: self.status_label.configure(fg="black")
+        except Exception: pass
         self._set_running(True)
 
         try:
-            if self._log_fp is not None:
-                self._log_fp.close()
-        except Exception:
-            pass
+            if self._log_fp is not None: self._log_fp.close()
+        except Exception: pass
         self._log_fp = None
 
         if self.save_log_var.get() and bool(is_verification):
@@ -1004,22 +1074,16 @@ class VerifyStringGUI:
                 d = str(Path.cwd())
                 self.log_path_var.set(d)
 
-            # If user pasted a file path, treat its parent as the folder.
             try:
                 dp = Path(d)
-                if dp.suffix.lower() in [".log", ".txt"]:
-                    dp = dp.parent
+                if dp.suffix.lower() in [".log", ".txt"]: dp = dp.parent
                 d = str(dp)
-            except Exception:
-                pass
+            except Exception: pass
 
-            # Create one dated subfolder per RUN so each verification has its own folder.
             sess = time.strftime("%Y%m%d_%H%M%S")
             self._log_session_dir = str(Path(d) / f"verified_{sess}")
-            try:
-                Path(self._log_session_dir).mkdir(parents=True, exist_ok=True)
-            except Exception:
-                self._log_session_dir = d
+            try: Path(self._log_session_dir).mkdir(parents=True, exist_ok=True)
+            except Exception: self._log_session_dir = d
 
             ts = time.strftime("%Y%m%d_%H%M%S")
             safe_tag = (self.tag_var.get() or "").strip()
@@ -1031,18 +1095,13 @@ class VerifyStringGUI:
                 self._log_fp = open(p, "a", encoding="utf-8")
                 self._log_fp.write("\n" + ("=" * 72) + "\n")
                 self._log_fp.write(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            except Exception:
-                self._log_fp = None
+            except Exception: self._log_fp = None
 
-        # Show the command in the GUI, but do not write it into the log file.
         try:
             self.output.insert(tk.END, "$ " + " ".join(cmd) + "\n\n", ("cmd",))
             self.output.see(tk.END)
-        except Exception:
-            pass
+        except Exception: pass
 
-        # If this is a verification run and logging is enabled, ensure ROI is saved.
-        # verify_string.py supports --save-roi <path>.
         try:
             if self.save_log_var.get() and bool(is_verification) and self._log_session_dir:
                 has_save_roi = "--save-roi" in cmd
@@ -1054,12 +1113,8 @@ class VerifyStringGUI:
                     suffix = safe_tag or ("idx" + idx if idx else "roi")
                     roi_path = str(Path(self._log_session_dir) / f"roi_{suffix}_{ts}.jpg")
                     cmd = list(cmd) + ["--save-roi", roi_path]
-        except Exception:
-            pass
+        except Exception: pass
 
-        # -----------------------------------------------------------------
-        # INJECT DEVICES INTO ENVIRONMENT FOR VERIFY_STRING.PY
-        # -----------------------------------------------------------------
         env = os.environ.copy()
         try:
             devices = []
@@ -1067,48 +1122,31 @@ class VerifyStringGUI:
                 did = int(r.get("id"))
                 nm = str(r.get("var_name").get() if r.get("var_name") else "").strip()
                 exp_raw = str(r.get("var_expected").get() if r.get("var_expected") else "").strip()
-                exp_val = None
-                if exp_raw:
-                    exp_val = int(exp_raw)
-                devices.append({
-                    "id": did,
-                    "name": nm,
-                    "expected_softkeys": exp_val,
-                })
+                exp_val = int(exp_raw) if exp_raw else None
+                devices.append({"id": did, "name": nm, "expected_softkeys": exp_val})
             
             env["WALKIE_DEVICE_PROFILES_JSON"] = json.dumps({"devices": devices}, ensure_ascii=False)
             cfgp = Path(__file__).resolve().parents[1] / "configs" / "device_profiles.json"
             cfgp.parent.mkdir(parents=True, exist_ok=True)
             with open(cfgp, "w", encoding="utf-8") as f:
                 json.dump({"devices": devices}, f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+        except Exception: pass
 
         def _worker():
             try:
                 self.proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=False,
-                    bufsize=0,
-                    env=env,
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=False, bufsize=0, env=env,
                 )
                 assert self.proc.stdout is not None
                 for raw in iter(self.proc.stdout.readline, b""):
-                    try:
-                        line = raw.decode("utf-8", errors="replace")
+                    try: line = raw.decode("utf-8", errors="replace")
                     except Exception:
-                        try:
-                            line = raw.decode(errors="replace")
-                        except Exception:
-                            line = str(raw)
+                        try: line = raw.decode(errors="replace")
+                        except Exception: line = str(raw)
                     self.q.put(line)
 
-                try:
-                    rc = self.proc.wait(timeout=1)
-                except Exception:
-                    rc = None
+                try: rc = self.proc.wait(timeout=1)
+                except Exception: rc = None
                 self.q.put((_EVT_FINISHED, rc))
             except Exception as e:
                 self.q.put(f"[GUI ERROR] {e}\n")
@@ -1123,38 +1161,95 @@ class VerifyStringGUI:
         self._run_subprocess(cmd, is_verification=False)
 
     def init_and_run(self):
-        try:
-            self._auto_start_verify = True
-        except Exception:
-            pass
+        # Setup CommG Batch if enabled
+        if self.commg_enable_var.get() and HAS_PYWINAUTO:
+            
+            # --- ADD THIS CHECK HERE ---
+            if not list(self.ip_listbox.get(0, tk.END)):
+                messagebox.showwarning("No IPs", "Please add at least one IP address to the list before starting!")
+                return
+            # ---------------------------
+
+            if self.commg_mode_var.get() == "Single":
+                c = self.commg_custom_cmd_var.get().strip()
+                if not c:
+                    messagebox.showerror("Error", "Please enter a Custom CommG Command.")
+                    return
+                self._commg_pending_queue = [c]
+            else:
+                bf = self.commg_batch_file_var.get().strip()
+                if not bf or not os.path.exists(bf):
+                    messagebox.showerror("Error", "Please select a valid CommG Batch File.")
+                    return
+                try:
+                    if bf.lower().endswith('.csv'): df = pd.read_csv(bf, header=None)
+                    else: df = pd.read_excel(bf, header=None)
+                    
+                    cmds = df.iloc[:, 0].dropna().astype(str).tolist()
+                    self._commg_pending_queue = [c.strip() for c in cmds if c.strip()]
+                    
+                    if len(df.columns) > 1:
+                        tags = df.iloc[:, 1].fillna("").astype(str).tolist()
+                        self._commg_pending_queue = list(zip(self._commg_pending_queue, tags))
+                        
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to load CommG Batch File: {e}")
+                    return
+                    
+            if not self._commg_pending_queue:
+                messagebox.showwarning("Warning", "No commands found in the CommG batch file.")
+                return
+            
+            self._commg_is_active_run = True
+            self.q.put(f"[CommG] Initialized batch with {len(self._commg_pending_queue)} commands.\n", ("commg",))
+        else:
+            self._commg_pending_queue = []
+            self._commg_is_active_run = False
+
+        self._auto_start_verify = True
         self.init_genai()
 
     def run(self):
-        try:
-            cmd = self._build_cmd()
+        try: cmd = self._build_cmd()
         except Exception as e:
             messagebox.showerror("Invalid input", str(e))
+            self._commg_is_active_run = False
+            self._set_running(False)
             return
 
-        try:
-            self._persist_settings()
-        except Exception:
-            pass
+        try: self._persist_settings()
+        except Exception: pass
 
         self._run_subprocess(cmd, is_verification=True)
 
     def stop(self):
+        self._commg_pending_queue = []
+        self._commg_is_active_run = False
         if self.proc and self.proc.poll() is None:
             try:
                 self.proc.terminate()
                 self._append("\n[INFO] Stopping process...\n")
-            except Exception:
-                pass
+            except Exception: pass
 
     def _drain_queue(self):
         try:
             while True:
                 s = self.q.get_nowait()
+                
+                # Intercept CommG Command Done
+                if isinstance(s, tuple) and len(s) == 2 and s[0] == _EVT_COMMG_DONE:
+                    if s[1] == "ABORT":
+                        # If user aborted, cancel the active run and reset UI
+                        self._commg_is_active_run = False
+                        self._commg_pending_queue = []
+                        self.status_var.set("CommG Sequence Aborted")
+                        self.status_label.configure(fg="red")
+                        self._set_running(False)
+                    else:
+                        # After successfully sending the CommG command, run Verify
+                        self.run()
+                    continue
+
                 if isinstance(s, tuple) and len(s) == 2 and s[0] == _EVT_FINISHED:
                     rc = s[1]
                     is_verify = bool(self._last_run_is_verification)
@@ -1165,25 +1260,35 @@ class VerifyStringGUI:
                     except Exception:
                         will_autostart = False
 
+                    # Hook CommG Integration iteration logic
+                    if self._commg_is_active_run:
+                        if is_verify:
+                            if self._commg_pending_queue:
+                                self._run_next_commg_step()
+                            else:
+                                self._commg_is_active_run = False
+                                self.status_var.set("CommG Batch Complete")
+                                self.status_label.configure(fg="green")
+                                self._set_running(False)
+                            continue
+                        elif will_autostart:
+                            self._auto_start_verify = False 
+                            self._run_next_commg_step()
+                            continue
+
                     if will_autostart:
                         self.status_var.set("Init GenAI finished, starting verification...")
                     else:
-                        if is_verify:
-                            msg = "Finished" if rc in [0, None] else f"Finished (exit={rc})"
-                        else:
-                            msg = "Init GenAI finished" if rc in [0, None] else f"Init GenAI finished (exit={rc})"
+                        if is_verify: msg = "Finished" if rc in [0, None] else f"Finished (exit={rc})"
+                        else: msg = "Init GenAI finished" if rc in [0, None] else f"Init GenAI finished (exit={rc})"
                         self.status_var.set(msg)
 
                     try:
-                        if rc not in [0, None]:
-                            self.status_label.configure(fg="#B71C1C")
-                        else:
-                            self.status_label.configure(fg="black")
-                    except Exception:
-                        pass
+                        if rc not in [0, None]: self.status_label.configure(fg="#B71C1C")
+                        else: self.status_label.configure(fg="black")
+                    except Exception: pass
 
-                    if not will_autostart:
-                        self._set_running(False)
+                    if not will_autostart: self._set_running(False)
 
                     try:
                         if self._log_fp is not None:
@@ -1191,8 +1296,7 @@ class VerifyStringGUI:
                             self._log_fp.flush()
                             self._log_fp.close()
                             self._log_fp = None
-                    except Exception:
-                        pass
+                    except Exception: pass
 
                     try:
                         if will_autostart:
