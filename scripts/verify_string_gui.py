@@ -5,6 +5,7 @@ import sys
 import threading
 import tkinter as tk
 import time
+import tempfile
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from tkinter import ttk
@@ -20,10 +21,12 @@ from openpyxl import load_workbook
 try:
     from pywinauto import Desktop
     from pywinauto.application import Application
+    from pywinauto.keyboard import send_keys  
     HAS_PYWINAUTO = True
 except ImportError:
     Desktop = None
     Application = None
+    send_keys = None
     HAS_PYWINAUTO = False
 
 _EVT_FINISHED = "__PROCESS_FINISHED__"
@@ -270,7 +273,7 @@ def _resolve_path(p: str) -> str:
 class VerifyStringGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
-        self.root.title("Verify String (Walkie-Tracker + CommG Integration)")
+        self.root.title("Verify String (Walkie-Tracker + Automation Integration)")
         self.root.minsize(1000, 850)
 
         self._auto_start_verify = False
@@ -288,8 +291,11 @@ class VerifyStringGUI:
         self.WINDOW_SEARCH_TERM = "CommuniGATOR"
         self.commg_handles = []
         self.type_lock = threading.Lock()
+        
+        # Automation queues & windows
         self._commg_pending_queue = []
         self._commg_is_active_run = False
+        self.active_cmd_windows = []
 
         # Build Main UI Frame
         frm = tk.Frame(root, padx=10, pady=10)
@@ -366,15 +372,30 @@ class VerifyStringGUI:
         row += 1
 
         # -------------------------------------------------------------
-        # ADDED COMMG INTEGRATION SECTION
+        # ADDED COMMG/CMD INTEGRATION SECTION
         # -------------------------------------------------------------
-        self.lf_commg = tk.LabelFrame(frm, text=" CommG Pro - Integration ", padx=10, pady=5, fg="#00008B", font=('Arial', 10, 'bold'))
+        self.lf_commg = tk.LabelFrame(frm, text=" Automation Integration (CommG / CMD) ", padx=10, pady=5, fg="#00008B", font=('Arial', 10, 'bold'))
         self.lf_commg.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
         
-        self.commg_enable_var = tk.BooleanVar(value=bool(self._settings.get("commg_enable", False)))
-        tk.Checkbutton(self.lf_commg, text="Enable CommG Execution (Takes control of sequence)", variable=self.commg_enable_var, font=('Arial', 9, 'bold')).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 5))
+        top_frame = tk.Frame(self.lf_commg)
+        top_frame.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 5))
 
-        # CommG IPs
+        old_enable = self._settings.get("integration_enable")
+        if old_enable is None:
+            old_enable = self._settings.get("commg_enable", False)
+        self.integration_enable_var = tk.BooleanVar(value=bool(old_enable))
+        tk.Checkbutton(top_frame, text="Enable Automation Sequence", variable=self.integration_enable_var, font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=(0, 15))
+
+        self.integration_type_var = tk.StringVar(value=str(self._settings.get("integration_type", "CommG")))
+        tk.Label(top_frame, text="Tool:").pack(side=tk.LEFT)
+        tk.Radiobutton(top_frame, text="CommG", variable=self.integration_type_var, value="CommG").pack(side=tk.LEFT, padx=(5, 5))
+        tk.Radiobutton(top_frame, text="CMD (Telnet)", variable=self.integration_type_var, value="CMD").pack(side=tk.LEFT, padx=(5, 5))
+
+        self.telnet_port_var = tk.StringVar(value=str(self._settings.get("telnet_port", "23")))
+        tk.Label(top_frame, text="Port (CMD):").pack(side=tk.LEFT, padx=(10, 2))
+        tk.Entry(top_frame, textvariable=self.telnet_port_var, width=5).pack(side=tk.LEFT)
+
+        # Target IPs
         ip_frame = tk.Frame(self.lf_commg)
         ip_frame.grid(row=1, column=0, sticky="nw", padx=(0, 20))
         tk.Label(ip_frame, text="Target IPs").pack(anchor="w")
@@ -392,7 +413,7 @@ class VerifyStringGUI:
         tk.Button(ip_btns, text="Add IP", command=self._commg_add_ip).pack(fill="x", pady=1)
         tk.Button(ip_btns, text="Remove", command=self._commg_remove_ip).pack(fill="x", pady=1)
 
-        # CommG Execution Type
+        # Execution Type
         cmd_frame = tk.Frame(self.lf_commg)
         cmd_frame.grid(row=1, column=1, sticky="nw")
         
@@ -408,8 +429,8 @@ class VerifyStringGUI:
         tk.Button(cmd_frame, text="Browse...", command=self._commg_browse_batch).grid(row=1, column=2, padx=(5, 0), pady=(8, 0))
         
         if not HAS_PYWINAUTO:
-            tk.Label(self.lf_commg, text="⚠️ pywinauto not installed. CommG unavailable.", fg="red").grid(row=2, column=0, columnspan=3, sticky="w")
-            self.commg_enable_var.set(False)
+            tk.Label(self.lf_commg, text="⚠️ pywinauto not installed. Automation unavailable.", fg="red").grid(row=2, column=0, columnspan=3, sticky="w")
+            self.integration_enable_var.set(False)
             for child in self.lf_commg.winfo_children():
                 try: child.configure(state='disabled')
                 except Exception: pass
@@ -484,7 +505,7 @@ class VerifyStringGUI:
 
         self.root.after(50, self._drain_queue)
 
-    # --- CommG Specific Methods ---
+    # --- Automation / CommG / CMD Specific Methods ---
     def _commg_add_ip(self):
         new_ip = self.new_ip_entry.get().strip()
         if not new_ip:
@@ -516,7 +537,7 @@ class VerifyStringGUI:
 
     def _commg_browse_batch(self):
         p = filedialog.askopenfilename(
-            title="Select CommG Batch File",
+            title="Select Batch File",
             filetypes=[("Excel/CSV Files", "*.xlsx *.xls *.csv"), ("All Files", "*.*")]
         )
         if p:
@@ -571,7 +592,7 @@ class VerifyStringGUI:
         self.q.put("[CommG] Successfully hooked into CommuniGATOR.\n")
         return True
 
-    def _commg_send_command_thread(self, payload):
+    def _commg_send_command_thread_impl(self, payload):
         ips = list(self.ip_listbox.get(0, tk.END))
         if not ips:
             self.q.put("[CommG] No IPs configured!\n")
@@ -594,7 +615,6 @@ class VerifyStringGUI:
                 self.q.put(f"[CommG] Ping check {ip}...\n")
                 if not self._commg_ping_ip(ip):
                     self.q.put(f"[CommG] WARNING: {ip} is offline.\n")
-                    # Pop up the warning
                     proceed = messagebox.askyesno("IP Not Found", f"Could not reach IP: {ip}\n\nDo you want to skip this one and proceed?")
                     if not proceed:
                         self.q.put("[CommG] Sequence aborted by user.\n")
@@ -625,7 +645,6 @@ class VerifyStringGUI:
                 
                 except Exception as inner_e:
                     self.q.put(f"[CommG] ERROR on {ip}: {inner_e}\n")
-                    # Pop up the automation warning
                     proceed = messagebox.askyesno("Automation Error", f"An error occurred while controlling the UI for {ip}.\n\nDo you want to skip and proceed?")
                     if not proceed:
                         self.q.put("[CommG] Sequence aborted by user due to UI error.\n")
@@ -642,11 +661,94 @@ class VerifyStringGUI:
 
         self.q.put((_EVT_COMMG_DONE, None))
 
+    def _cmd_telnet_thread(self, payload):
+        ips = [ip.strip() for ip in self.ip_listbox.get(0, tk.END) if ip.strip()]
+        if not ips:
+            self.q.put("[CMD] No IPs configured!\n")
+            self.q.put((_EVT_COMMG_DONE, "ABORT"))
+            return
+
+        port = self.telnet_port_var.get().strip()
+
+        for ip in ips:
+            self.q.put(f"[CMD] Ping check {ip}...\n")
+            if not self._commg_ping_ip(ip):
+                self.q.put(f"[CMD] WARNING: {ip} did not respond to ping. Attempting Telnet anyway...\n")
+
+            try:
+                with self.type_lock:
+                    self.q.put(f"[CMD] Opening command prompt natively for {ip}...\n")
+                    
+                    # 1. Generate a robust batch script to completely break out of Python environments
+                    temp_dir = tempfile.gettempdir()
+                    bat_path = os.path.join(temp_dir, f"walkie_telnet_{ip.replace('.', '_')}.bat")
+                    
+                    with open(bat_path, "w") as f:
+                        f.write("@echo off\n")
+                        f.write(f"title Telnet_Session_{ip}\n")
+                        f.write(f"echo Connecting to {ip}:{port}...\n")
+                        f.write(f"if exist \"%windir%\\sysnative\\telnet.exe\" (\n")
+                        f.write(f"    \"%windir%\\sysnative\\telnet.exe\" {ip} {port}\n")
+                        f.write(f") else (\n")
+                        f.write(f"    telnet {ip} {port}\n")
+                        f.write(f")\n")
+                    
+                    # 2. Execute it natively via Windows Explorer/Shell
+                    os.startfile(bat_path)
+                    
+                    self.q.put("[CMD] Waiting 4s for window and AT_Debug> prompt...\n")
+                    time.sleep(4.0) 
+                    
+                    # 3. Find the exact window we just opened
+                    desktop = Desktop(backend="uia")
+                    cmd_win = None
+                    for win in desktop.windows():
+                        text = win.window_text() or ""
+                        if ip in text or "Telnet_Session" in text:
+                            cmd_win = win
+                            break
+                    
+                    if not cmd_win:
+                        self.q.put(f"[CMD] WARNING: Could not detect the CMD window for {ip}. It might have closed instantly if connection failed.\n")
+                        proceed = messagebox.askyesno("Window Not Found", f"Could not find the Telnet window for {ip}.\n\nDid it open and close immediately?\nClick Yes to skip, No to abort.")
+                        if not proceed:
+                            self.q.put("[CMD] Sequence aborted by user.\n")
+                            self.q.put((_EVT_COMMG_DONE, "ABORT"))
+                            return
+                        continue
+
+                    # 4. Inject payload into the targeted window
+                    cmd_win.set_focus()
+                    cmd_win.type_keys(f"{payload}{{ENTER}}", with_spaces=True, set_foreground=True)
+                    self.q.put(f"[CMD] Sent {payload} to {ip} (Leaving session open during verification)\n")
+                    
+                    # Track for cleanup
+                    self.active_cmd_windows.append(cmd_win)
+            
+            except Exception as inner_e:
+                self.q.put(f"[CMD] ERROR on {ip}: {inner_e}\n")
+                proceed = messagebox.askyesno("Automation Error", f"An error occurred while controlling CMD for {ip}.\n\nDo you want to skip and proceed?")
+                if not proceed:
+                    self.q.put("[CMD] Sequence aborted by user due to UI error.\n")
+                    self.q.put((_EVT_COMMG_DONE, "ABORT"))
+                    return
+
+        self.q.put("[CMD] Waiting 3s for devices to process...\n")
+        time.sleep(3.0) 
+        self.q.put((_EVT_COMMG_DONE, None))
+
+    def _integration_send_command_thread(self, payload):
+        integration_type = self.integration_type_var.get()
+        if integration_type == "CMD":
+            self._cmd_telnet_thread(payload)
+        else:
+            self._commg_send_command_thread_impl(payload)
+
     def _run_next_commg_step(self):
         if not self._commg_pending_queue:
             self._commg_is_active_run = False
             self._set_running(False)
-            self.status_var.set("CommG Batch Complete")
+            self.status_var.set("Automation Batch Complete")
             self.status_label.configure(fg="green")
             return
 
@@ -659,13 +761,14 @@ class VerifyStringGUI:
         if tag:
             self.tag_var.set(tag)
             self.index_var.set("")
-            self.q.put(f"\n[CommG] Switching String Tag to: {tag}\n", ("commg",))
+            tool = self.integration_type_var.get()
+            self.q.put(f"\n[{tool}] Switching String Tag to: {tag}\n", ("commg",))
 
-        self.status_var.set(f"CommG Running: {cmd}...")
+        self.status_var.set(f"Automation Running: {cmd}...")
         self.status_label.configure(fg="purple")
         self._set_running(True)
 
-        threading.Thread(target=self._commg_send_command_thread, args=(cmd,), daemon=True).start()
+        threading.Thread(target=self._integration_send_command_thread, args=(cmd,), daemon=True).start()
 
     # --- Device List Methods ---
     def _regrid_device_rows(self):
@@ -867,7 +970,7 @@ class VerifyStringGUI:
             self.output.insert(tk.END, line, ("warn",))
         elif is_error:
             self.output.insert(tk.END, line, ("error",))
-        elif "[CommG]" in stripped:
+        elif "[CommG]" in stripped or "[CMD]" in stripped:
             self.output.insert(tk.END, line, ("commg",))
         else:
             self.output.insert(tk.END, line)
@@ -893,7 +996,10 @@ class VerifyStringGUI:
             "camera_id": (self.camera_id_var.get() or "").strip(),
             "save_log": bool(self.save_log_var.get()),
             "log_path": (self.log_path_var.get() or "").strip(),
-            "commg_enable": bool(self.commg_enable_var.get()),
+            "integration_enable": bool(self.integration_enable_var.get()),
+            "integration_type": (self.integration_type_var.get() or "CommG"),
+            "telnet_port": (self.telnet_port_var.get() or "23"),
+            "commg_enable": bool(self.integration_enable_var.get()), 
             "commg_ips": list(self.ip_listbox.get(0, tk.END)),
             "commg_mode": (self.commg_mode_var.get() or "Batch"),
             "commg_custom_cmd": (self.commg_custom_cmd_var.get() or "").strip(),
@@ -934,18 +1040,28 @@ class VerifyStringGUI:
     def refresh_languages(self):
         excel = (self.excel_var.get() or "").strip()
         region = (self.region_var.get() or "").strip() or "APAC"
-        try: opts = _language_options_from_excel(excel, region)
-        except Exception: opts = []
+        
+        # --- NEW LOGIC: Force English language if English region is selected ---
+        if region.lower() == "english":
+            opts = ["English"]
+        else:
+            try: opts = _language_options_from_excel(excel, region)
+            except Exception: opts = []
 
-        if not opts:
-            opts = ["Japanese", "Korean", "Simplified Chinese", "Traditional Chinese", "French", "Spanish", "German", "Italian", "Polish", "Russian", "Turkish", "Arabic", "Hungarian", "Hebrew", "Czech", "Portuguese"]
+            if not opts:
+                opts = ["Japanese", "Korean", "Simplified Chinese", "Traditional Chinese", "French", "Spanish", "German", "Italian", "Polish", "Russian", "Turkish", "Arabic", "Hungarian", "Hebrew", "Czech", "Portuguese"]
 
         try:
             self.language_combo["values"] = opts
             cur = (self.language_var.get() or "").strip()
-            if cur and cur in opts: return
-            if cur and cur not in opts: return
-            if opts: self.language_var.set(opts[0])
+            
+            # If current language is valid for this region, keep it
+            if cur and cur in opts: 
+                return
+                
+            # Otherwise, auto-select the first available language (which will be 'English' for the English region)
+            if opts: 
+                self.language_var.set(opts[0])
         except Exception: pass
 
     def refresh_tags(self):
@@ -1035,7 +1151,7 @@ class VerifyStringGUI:
         if tag: cmd += ["--tag", tag]
         if idx: cmd += ["--index", idx]
         
-        # If CommG is actively running, DO NOT pass --preview so that the screen is captured automatically!
+        # If integration is actively running, DO NOT pass --preview so that the screen is captured automatically!
         if self.preview_var.get() and not self._commg_is_active_run:
             cmd += ["--preview"]
 
@@ -1161,25 +1277,23 @@ class VerifyStringGUI:
         self._run_subprocess(cmd, is_verification=False)
 
     def init_and_run(self):
-        # Setup CommG Batch if enabled
-        if self.commg_enable_var.get() and HAS_PYWINAUTO:
+        # Setup Automation Batch if enabled
+        if self.integration_enable_var.get() and HAS_PYWINAUTO:
             
-            # --- ADD THIS CHECK HERE ---
             if not list(self.ip_listbox.get(0, tk.END)):
                 messagebox.showwarning("No IPs", "Please add at least one IP address to the list before starting!")
                 return
-            # ---------------------------
 
             if self.commg_mode_var.get() == "Single":
                 c = self.commg_custom_cmd_var.get().strip()
                 if not c:
-                    messagebox.showerror("Error", "Please enter a Custom CommG Command.")
+                    messagebox.showerror("Error", "Please enter a Custom Command.")
                     return
                 self._commg_pending_queue = [c]
             else:
                 bf = self.commg_batch_file_var.get().strip()
                 if not bf or not os.path.exists(bf):
-                    messagebox.showerror("Error", "Please select a valid CommG Batch File.")
+                    messagebox.showerror("Error", "Please select a valid Batch File.")
                     return
                 try:
                     if bf.lower().endswith('.csv'): df = pd.read_csv(bf, header=None)
@@ -1193,15 +1307,16 @@ class VerifyStringGUI:
                         self._commg_pending_queue = list(zip(self._commg_pending_queue, tags))
                         
                 except Exception as e:
-                    messagebox.showerror("Error", f"Failed to load CommG Batch File: {e}")
+                    messagebox.showerror("Error", f"Failed to load Batch File: {e}")
                     return
                     
             if not self._commg_pending_queue:
-                messagebox.showwarning("Warning", "No commands found in the CommG batch file.")
+                messagebox.showwarning("Warning", "No commands found in the batch file.")
                 return
             
             self._commg_is_active_run = True
-            self.q.put(f"[CommG] Initialized batch with {len(self._commg_pending_queue)} commands.\n", ("commg",))
+            tool = self.integration_type_var.get()
+            self.q.put(f"[{tool}] Initialized batch with {len(self._commg_pending_queue)} commands.\n", ("commg",))
         else:
             self._commg_pending_queue = []
             self._commg_is_active_run = False
@@ -1225,6 +1340,24 @@ class VerifyStringGUI:
     def stop(self):
         self._commg_pending_queue = []
         self._commg_is_active_run = False
+        
+        # Cleanup lingering CMD windows if stopped midway
+        if getattr(self, "active_cmd_windows", []):
+            for win in self.active_cmd_windows:
+                try:
+                    win.set_focus()
+                    time.sleep(0.2)
+                    if send_keys:
+                        # 1. Send the device closing command
+                        win.type_keys("STR_TEST:CLOSE{ENTER}", with_spaces=True, set_foreground=True)
+                        time.sleep(1.0)
+                        
+                        # 2. Quit telnet
+                        win.type_keys("quit{ENTER}", with_spaces=True, set_foreground=True)
+                except Exception:
+                    pass
+            self.active_cmd_windows = []
+
         if self.proc and self.proc.poll() is None:
             try:
                 self.proc.terminate()
@@ -1236,17 +1369,17 @@ class VerifyStringGUI:
             while True:
                 s = self.q.get_nowait()
                 
-                # Intercept CommG Command Done
+                # Intercept Automation Command Done
                 if isinstance(s, tuple) and len(s) == 2 and s[0] == _EVT_COMMG_DONE:
                     if s[1] == "ABORT":
                         # If user aborted, cancel the active run and reset UI
                         self._commg_is_active_run = False
                         self._commg_pending_queue = []
-                        self.status_var.set("CommG Sequence Aborted")
+                        self.status_var.set("Automation Sequence Aborted")
                         self.status_label.configure(fg="red")
                         self._set_running(False)
                     else:
-                        # After successfully sending the CommG command, run Verify
+                        # After successfully sending the command, run Verify
                         self.run()
                     continue
 
@@ -1254,20 +1387,39 @@ class VerifyStringGUI:
                     rc = s[1]
                     is_verify = bool(self._last_run_is_verification)
 
+                    # --- Close active cmd windows after verification completes ---
+                    if is_verify and getattr(self, "active_cmd_windows", []):
+                        self.q.put("[CMD] Verification complete. Sending close command and terminating sessions...\n")
+                        for win in self.active_cmd_windows:
+                            try:
+                                win.set_focus()
+                                time.sleep(0.2)
+                                if send_keys:
+                                    # 1. Send the device closing command
+                                    win.type_keys("STR_TEST:CLOSE{ENTER}", with_spaces=True, set_foreground=True)
+                                    time.sleep(1.0)
+                                    
+                                    # 2. Quit telnet
+                                    win.type_keys("quit{ENTER}", with_spaces=True, set_foreground=True)
+                            except Exception:
+                                pass
+                        self.active_cmd_windows = []
+                    # --------------------------------------------------------------------
+
                     will_autostart = False
                     try:
                         will_autostart = bool(self._auto_start_verify) and (not is_verify) and int(rc or 0) == 0
                     except Exception:
                         will_autostart = False
 
-                    # Hook CommG Integration iteration logic
+                    # Hook Integration iteration logic
                     if self._commg_is_active_run:
                         if is_verify:
                             if self._commg_pending_queue:
                                 self._run_next_commg_step()
                             else:
                                 self._commg_is_active_run = False
-                                self.status_var.set("CommG Batch Complete")
+                                self.status_var.set("Automation Batch Complete")
                                 self.status_label.configure(fg="green")
                                 self._set_running(False)
                             continue

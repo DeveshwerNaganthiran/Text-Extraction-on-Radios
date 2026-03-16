@@ -1011,7 +1011,12 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
     }
 
 def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float, warmup_sec: float = 0.7):
-    cap = cv2.VideoCapture(camera_id)
+    cap = None
+    # Force DirectShow backend for instant camera initialization
+    try: cap = cv2.VideoCapture(int(camera_id), cv2.CAP_DSHOW)
+    except Exception: pass
+    if cap is None or not cap.isOpened(): cap = cv2.VideoCapture(int(camera_id))
+    
     if not cap.isOpened(): raise RuntimeError(f"Could not open camera {camera_id}")
     try: cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
     except Exception: pass
