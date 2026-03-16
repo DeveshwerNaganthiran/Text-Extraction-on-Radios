@@ -2,12 +2,22 @@
   "devices": [
     {
       "id": 1,
-      "name": "BALI",
+      "name": "DANUBE",
       "expected_softkeys": 4
     },
     {
       "id": 2,
-      "name": "MALTA",
+      "name": "GENESIS",
+      "expected_softkeys": 4
+    },
+    {
+      "id": 3,
+      "name": "TAHITI",
+      "expected_softkeys": 0
+    },
+    {
+      "id": 4,
+      "name": "TONGA",
       "expected_softkeys": 0
     }
   ]

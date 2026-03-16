@@ -7,7 +7,8 @@ model:
   
 # Training Configuration
 training:
-  epochs: 150
+
+  epochs: 250
   batch_size: 16
   learning_rate: 0.01
   device: "cpu"  # Change to "cuda" if you have GPU
