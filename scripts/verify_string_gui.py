@@ -700,6 +700,7 @@ class VerifyStringGUI:
                         f.write(f") else (\n")
                         f.write(f"    telnet {ip} {port}\n")
                         f.write(f")\n")
+                        f.write("exit\n") # <-- ADDED: Forces the cmd window to close when telnet ends
                     
                     # 2. Execute it natively via Windows Explorer/Shell
                     os.startfile(bat_path)
@@ -1272,8 +1273,14 @@ class VerifyStringGUI:
 
         def _worker():
             try:
+                # --- AUTOMATION UPDATE: Hide subprocess terminal window ---
+                kwargs = {}
+                if os.name == 'nt':
+                    kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+                # ----------------------------------------------------------
+                
                 self.proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=False, bufsize=0, env=env,
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=False, bufsize=0, env=env, **kwargs
                 )
                 assert self.proc.stdout is not None
                 for raw in iter(self.proc.stdout.readline, b""):
@@ -1389,8 +1396,15 @@ class VerifyStringGUI:
                         win.type_keys("STR_TEST:CLOSE{ENTER}", with_spaces=True, set_foreground=True)
                         time.sleep(1.0)
                         
-                        # 2. Quit telnet
-                        win.type_keys("quit{ENTER}", with_spaces=True, set_foreground=True)
+                        # 2. Ask the window to close gracefully
+                        try: win.close()
+                        except Exception: pass
+                        
+                        # 3. Aggressive fallback: kill the window process invisibly
+                        try:
+                            import subprocess
+                            subprocess.call(['taskkill', '/F', '/T', '/PID', str(win.process_id())], creationflags=subprocess.CREATE_NO_WINDOW)
+                        except Exception: pass
                 except Exception:
                     pass
             self.active_cmd_windows = []
@@ -1436,8 +1450,15 @@ class VerifyStringGUI:
                                     win.type_keys("STR_TEST:CLOSE{ENTER}", with_spaces=True, set_foreground=True)
                                     time.sleep(1.0)
                                     
-                                    # 2. Quit telnet
-                                    win.type_keys("quit{ENTER}", with_spaces=True, set_foreground=True)
+                                    # 2. Ask the window to close gracefully
+                                    try: win.close()
+                                    except Exception: pass
+                                    
+                                    # 3. Aggressive fallback: kill the window process invisibly
+                                    try:
+                                        import subprocess
+                                        subprocess.call(['taskkill', '/F', '/T', '/PID', str(win.process_id())], creationflags=subprocess.CREATE_NO_WINDOW)
+                                    except Exception: pass
                             except Exception:
                                 pass
                         self.active_cmd_windows = []

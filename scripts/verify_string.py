@@ -894,11 +894,21 @@ def _show_ocr_result_window(
         try: cv2.resizeWindow("OCR Result", int(disp.shape[1]), int(disp.shape[0]))
         except Exception: pass
         cv2.imshow("OCR Result", disp)
+        
+        # --- AUTOMATION UPDATE: Auto-close after 5 seconds ---
+        start_time = time.time()
         while True:
             try:
                 if hasattr(cv2, "getWindowProperty") and hasattr(cv2, "WND_PROP_VISIBLE") and cv2.getWindowProperty("OCR Result", cv2.WND_PROP_VISIBLE) < 1: break
             except Exception: pass
+            
+            # Break if a key is pressed manually
             if cv2.waitKey(50) not in [None, -1]: break
+            
+            # Break automatically after 5 seconds
+            if time.time() - start_time > 5.0: break
+        # -----------------------------------------------------
+        
         try: cv2.destroyWindow("OCR Result")
         except Exception: pass
     except Exception: return
