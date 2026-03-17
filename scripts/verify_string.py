@@ -956,6 +956,9 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
         if s.endswith(".0"):
             try: return str(int(float(s)))
             except Exception: pass
+        if s.isdigit():
+            try: return str(int(s))  # Strip leading zeros for robust matching
+            except Exception: pass
         return s
 
     if "index" in [_norm_col(c) for c in df_en.columns]: df_en["__index"] = df_en[next(c for c in df_en.columns if _norm_col(c) == "index")].apply(_coerce_index)
@@ -968,6 +971,9 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
     idx = str(index).strip()
     if idx and idx.endswith(".0"):
         try: idx = str(int(float(idx)))
+        except Exception: pass
+    if idx.isdigit():
+        try: idx = str(int(idx))  # Strip leading zeros from extracted GUI index 
         except Exception: pass
 
     def _find_tag_column(df: pd.DataFrame) -> str:
@@ -1366,6 +1372,11 @@ def main():
             f"Expected (English): {expected.get('expected_en','')}",
             f"Expected ({args.region}/{args.language}): {expected.get('expected_local','')}"
         ]
+        
+        # --- NEW: Print the raw detected text on a single line ---
+        detected_flat = " ".join([ln.strip() for ln in str(orig_text).splitlines() if ln.strip()])
+        print(f"Detected: '{detected_flat}'")
+        
         print("-" * 70)
         print(f"Observed (normalized): {observed_n}")
         print("-" * 70)
@@ -1407,12 +1418,12 @@ def main():
         try: _show_ocr_result_window(res["roi"], res["orig_text"], res["eng_text"], res["lang_detected"], res["verdict"], expected_lines=res["exp_lines"], device_name=res["dev_name"], error_msg=res.get("error_msg", ""))
         except Exception: pass
 
-    try:
-        total_s = time.time() - t0_total
-        cap_s = t1_cap - t0_cap
-        if args.preview: print(f"\n[TIMING] Preview: {(t1_preview - t0_preview):.2f}s | Capture: {cap_s:.2f}s | OCR: {total_ocr_time:.2f}s | Total: {total_s:.2f}s")
-        else: print(f"\n[TIMING] Capture: {cap_s:.2f}s | OCR: {total_ocr_time:.2f}s | Total: {total_s:.2f}s")
-    except Exception: pass
+    # try:
+    #     total_s = time.time() - t0_total
+    #     cap_s = t1_cap - t0_cap
+    #     if args.preview: print(f"\n[TIMING] Preview: {(t1_preview - t0_preview):.2f}s | Capture: {cap_s:.2f}s | OCR: {total_ocr_time:.2f}s | Total: {total_s:.2f}s")
+    #     else: print(f"\n[TIMING] Capture: {cap_s:.2f}s | OCR: {total_ocr_time:.2f}s | Total: {total_s:.2f}s")
+    # except Exception: pass
 
 if __name__ == "__main__":
     main()

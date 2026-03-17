@@ -183,6 +183,72 @@ def _tag_options_from_excel(excel_path: str) -> list[str]:
         except Exception:
             pass
 
+def _build_index_to_tag_map(excel_path: str) -> dict:
+    if not excel_path:
+        return {}
+    try:
+        xls = pd.ExcelFile(excel_path, engine="openpyxl")
+        
+        # 1. Find the English sheet dynamically
+        target = "english"
+        sheet_name = None
+        for s in xls.sheet_names:
+            if _norm_col(s) in ["english", "en", "global"]:
+                sheet_name = s
+                break
+            if target in _norm_col(s):
+                sheet_name = s
+                break
+                
+        if not sheet_name: 
+            return {}
+            
+        df = pd.read_excel(xls, sheet_name=sheet_name, engine="openpyxl")
+        
+        # 2. Find Index Column
+        idx_col = next((c for c in df.columns if _norm_col(c) == "index"), None)
+        
+        # 3. Find Tag Column
+        preferred, fallback = [], []
+        for c in df.columns:
+            low, n = str(c or "").strip().lower(), _norm_col(c)
+            if ("tag" in low and "string" in low) or n in ["string tag", "stringtag"]: preferred.append(c)
+            elif n == "tag" or "tag" in low: fallback.append(c)
+        tag_col = preferred[0] if preferred else (fallback[0] if fallback else "")
+        
+        if not idx_col or not tag_col: 
+            return {}
+            
+        # 4. Build Dictionary mapping Index -> Tag
+        mapping = {}
+        for _, row in df.iterrows():
+            idx_val = row[idx_col]
+            tag_val = row[tag_col]
+            
+            if pd.isna(idx_val) or pd.isna(tag_val): 
+                continue
+                
+            iv = str(idx_val).strip()
+            tv = str(tag_val).strip()
+            
+            if tv.lower() == 'nan' or not tv: 
+                continue
+                
+            # Clean up index to match
+            if iv.endswith(".0"): 
+                try: iv = str(int(float(iv)))
+                except Exception: pass
+            if iv.isdigit(): 
+                try: iv = str(int(iv))
+                except Exception: pass
+                
+            # --- THE FIX: Only map the FIRST occurrence to match verify_string.py ---
+            if iv not in mapping:
+                mapping[iv] = tv
+            
+        return mapping
+    except Exception:
+        return {}
 
 def _language_options_from_excel(excel_path: str, region: str) -> list[str]:
     if not excel_path:
@@ -772,12 +838,53 @@ class VerifyStringGUI:
         tag = ""
         if isinstance(item, tuple):
             cmd, tag = item
+            
+        # Clean up tag (pandas might read empty cells as 'nan')
+        tag = str(tag).strip()
+        if tag.lower() == 'nan':
+            tag = ""
         
-        if tag:
+        if tag.upper() in ["SKIP", "NO_VERIFY", "NONE"]:
+            self.tag_var.set("SKIP_VERIFY")
+            self.index_var.set("SKIP_VERIFY")
+            tool = self.integration_type_var.get()
+            self.q.put(f"\n[{tool}] Non-verification command detected: {cmd}\n", ("commg",))
+        elif tag:
             self.tag_var.set(tag)
             self.index_var.set("")
             tool = self.integration_type_var.get()
             self.q.put(f"\n[{tool}] Switching String Tag to: {tag}\n", ("commg",))
+        else:
+            # Auto-extract index from the command (e.g., STR_TEST:FIX:0052:0030 -> 0030)
+            if ":" in cmd:
+                extracted_idx = cmd.split(":")[-1].strip()
+            else:
+                extracted_idx = cmd.strip()
+            
+            # Clean index for dictionary lookup (strip leading zeros)
+            clean_idx = extracted_idx
+            if clean_idx.isdigit():
+                clean_idx = str(int(clean_idx))
+                
+            # Lookup the tag dynamically from the Excel file
+            if not getattr(self, "_index_to_tag_cache", None):
+                self.q.put("[GUI] Caching Excel index-to-tag mapping...\n", ("commg",))
+                try:
+                    self._index_to_tag_cache = _build_index_to_tag_map(self.excel_var.get().strip())
+                except Exception:
+                    self._index_to_tag_cache = {}
+
+            found_tag = self._index_to_tag_cache.get(clean_idx, "")
+
+            self.index_var.set(extracted_idx)
+            tool = self.integration_type_var.get()
+            
+            if found_tag:
+                self.tag_var.set(found_tag)
+                self.q.put(f"\n[{tool}] Extracted Index '{extracted_idx}' (Found Tag: {found_tag})\n", ("commg",))
+            else:
+                self.tag_var.set("")  # Clear it only if no tag exists for that index
+                self.q.put(f"\n[{tool}] Extracted Index '{extracted_idx}'\n", ("commg",))
 
         self.status_var.set(f"Automation Running: {cmd}...")
         self.status_label.configure(fg="purple")
@@ -913,6 +1020,7 @@ class VerifyStringGUI:
         )
         if p:
             self.excel_var.set(p)
+            self._index_to_tag_cache = {}  # <-- ADD THIS LINE to clear the cache
             try:
                 self.refresh_languages()
                 self.refresh_tags()
@@ -936,20 +1044,12 @@ class VerifyStringGUI:
     def _append(self, s: str):
         self.output.insert(tk.END, s)
         self.output.see(tk.END)
-        try:
-            if self._log_fp is not None:
-                self._log_fp.write(s)
-                self._log_fp.flush()
-        except Exception: pass
+        # We removed the self._log_fp.write() from here to keep logs clean
 
     def _append_cmd(self, s: str):
         self.output.insert(tk.END, s, ("cmd",))
         self.output.see(tk.END)
-        try:
-            if self._log_fp is not None:
-                self._log_fp.write(s)
-                self._log_fp.flush()
-        except Exception: pass
+        # We removed the self._log_fp.write() from here to keep logs clean
 
     def _append_line_with_result_color(self, line: str):
         stripped = (line or "").strip()
@@ -994,8 +1094,11 @@ class VerifyStringGUI:
             self.output.insert(tk.END, line)
             
         self.output.see(tk.END)
+        
+        # --- NEW LOGIC: Only write to the log file if it's pure script output ---
+        is_gui_msg = stripped.startswith("[CommG]") or stripped.startswith("[CMD]") or stripped.startswith("[GUI")
         try:
-            if self._log_fp is not None:
+            if self._log_fp is not None and not is_gui_msg:
                 self._log_fp.write(line)
                 if not line.endswith("\n"):
                     self._log_fp.write("\n")
@@ -1236,8 +1339,7 @@ class VerifyStringGUI:
             try:
                 Path(p).parent.mkdir(parents=True, exist_ok=True)
                 self._log_fp = open(p, "a", encoding="utf-8")
-                self._log_fp.write("\n" + ("=" * 72) + "\n")
-                self._log_fp.write(f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                # Deleted the hardcoded headers here so the file starts exactly at "RADIO STRING VERIFICATION..."
             except Exception: self._log_fp = None
 
         try:
@@ -1427,6 +1529,7 @@ class VerifyStringGUI:
                 s = self.q.get_nowait()
                 
                 # Intercept Automation Command Done
+                # Intercept Automation Command Done
                 if isinstance(s, tuple) and len(s) == 2 and s[0] == _EVT_COMMG_DONE:
                     if s[1] == "ABORT":
                         # If user aborted, cancel the active run and reset UI
@@ -1436,8 +1539,19 @@ class VerifyStringGUI:
                         self.status_label.configure(fg="red")
                         self._set_running(False)
                     else:
-                        # After successfully sending the command, run Verify
-                        self.run()
+                        # Check if skipping verification
+                        if self.index_var.get() == "SKIP_VERIFY" or self.tag_var.get() == "SKIP_VERIFY":
+                            self.q.put("[GUI] Skipping verification phase as requested.\n", ("commg",))
+                            if self._commg_pending_queue:
+                                self._run_next_commg_step()
+                            else:
+                                self._commg_is_active_run = False
+                                self.status_var.set("Automation Batch Complete")
+                                self.status_label.configure(fg="green")
+                                self._set_running(False)
+                        else:
+                            # After successfully sending the command, run Verify
+                            self.run()
                     continue
 
                 if isinstance(s, tuple) and len(s) == 2 and s[0] == _EVT_FINISHED:
@@ -1508,7 +1622,7 @@ class VerifyStringGUI:
 
                     try:
                         if self._log_fp is not None:
-                            self._log_fp.write(f"Finished: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                            # self._log_fp.write(f"Finished: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                             self._log_fp.flush()
                             self._log_fp.close()
                             self._log_fp = None
