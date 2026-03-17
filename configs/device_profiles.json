@@ -2,22 +2,17 @@
   "devices": [
     {
       "id": 1,
-      "name": "DANUBE",
+      "name": "BALI",
       "expected_softkeys": 4
     },
     {
       "id": 2,
-      "name": "GENESIS",
-      "expected_softkeys": 4
-    },
-    {
-      "id": 3,
-      "name": "TAHITI",
+      "name": "ION",
       "expected_softkeys": 0
     },
     {
-      "id": 4,
-      "name": "TONGA",
+      "id": 3,
+      "name": "DANUBE",
       "expected_softkeys": 0
     }
   ]

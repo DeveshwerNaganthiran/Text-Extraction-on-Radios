@@ -18,6 +18,10 @@ import pandas as pd
 
 from openpyxl import load_workbook
 
+import sys
+sys.coinit_flags = 2  # Forces COM initialization to STA mode to prevent Tkinter crashes
+# ---------------------------
+
 try:
     from pywinauto import Desktop
     from pywinauto.application import Application
@@ -282,7 +286,11 @@ class VerifyStringGUI:
         self.q = queue.Queue()
         self.last_result = ""
         self.last_expected = ""
+        self.last_actual = ""       # <-- NEW: Track actual extracted string
+        self.last_error_msg = ""    # <-- NEW: Track error messages
         self._pending_expected_norm = False
+        self._pending_actual_norm = False # <-- NEW: Flag for actual normalization
+        self._batch_log_dir = None  # <-- NEW: Track single folder for batch runs
 
         self._settings = _load_settings()
 
@@ -911,8 +919,11 @@ class VerifyStringGUI:
         if p: self.model_path_var.set(_resolve_path(p))
 
     def browse_log(self):
-        d = filedialog.askdirectory(title="Select log folder")
-        if d: self.log_path_var.set(d)
+        d = filedialog.askdirectory(title="Select Log Folder")
+        if d:
+            # Convert to absolute path and normalize to prevent crashes during mkdir
+            normalized_path = str(Path(d).resolve())
+            self.log_path_var.set(normalized_path)
 
     # --- Append Logs ---
     def _append(self, s: str):
@@ -1174,6 +1185,10 @@ class VerifyStringGUI:
         except Exception: self._last_run_is_verification = True
 
         self.last_result = ""
+        self.last_expected = ""   # Reset expected
+        self.last_actual = ""     # Reset actual
+        self.last_error_msg = ""  # Reset error msg
+        
         self.status_var.set("Running Verify...")
         try: self.status_label.configure(fg="black")
         except Exception: pass
@@ -1185,21 +1200,26 @@ class VerifyStringGUI:
         self._log_fp = None
 
         if self.save_log_var.get() and bool(is_verification):
-            d = (self.log_path_var.get() or "").strip()
-            if not d:
-                d = str(Path.cwd())
-                self.log_path_var.set(d)
+            # --- NEW: Check if part of a batch, reuse folder if so ---
+            if getattr(self, "_commg_is_active_run", False) and getattr(self, "_batch_log_dir", None):
+                self._log_session_dir = self._batch_log_dir
+            else:
+                d = (self.log_path_var.get() or "").strip()
+                if not d:
+                    d = str(Path.cwd())
+                    self.log_path_var.set(d)
 
-            try:
-                dp = Path(d)
-                if dp.suffix.lower() in [".log", ".txt"]: dp = dp.parent
-                d = str(dp)
-            except Exception: pass
+                try:
+                    dp = Path(d)
+                    if dp.suffix.lower() in [".log", ".txt"]: dp = dp.parent
+                    d = str(dp)
+                except Exception: pass
 
-            sess = time.strftime("%Y%m%d_%H%M%S")
-            self._log_session_dir = str(Path(d) / f"verified_{sess}")
-            try: Path(self._log_session_dir).mkdir(parents=True, exist_ok=True)
-            except Exception: self._log_session_dir = d
+                sess = time.strftime("%Y%m%d_%H%M%S")
+                self._log_session_dir = str(Path(d) / f"verified_{sess}")
+                try: Path(self._log_session_dir).mkdir(parents=True, exist_ok=True)
+                except Exception: self._log_session_dir = d
+            # ---------------------------------------------------------
 
             ts = time.strftime("%Y%m%d_%H%M%S")
             safe_tag = (self.tag_var.get() or "").strip()
@@ -1229,7 +1249,9 @@ class VerifyStringGUI:
                     suffix = safe_tag or ("idx" + idx if idx else "roi")
                     roi_path = str(Path(self._log_session_dir) / f"roi_{suffix}_{ts}.jpg")
                     cmd = list(cmd) + ["--save-roi", roi_path]
-        except Exception: pass
+        except Exception as e:
+            self.q.put(f"[GUI ERROR] Failed to initialize log: {e}\n")
+            self._log_fp = None
 
         env = os.environ.copy()
         try:
@@ -1317,9 +1339,24 @@ class VerifyStringGUI:
             self._commg_is_active_run = True
             tool = self.integration_type_var.get()
             self.q.put(f"[{tool}] Initialized batch with {len(self._commg_pending_queue)} commands.\n", ("commg",))
+
+            # --- NEW: Create a single log folder for the whole batch ---
+            if self.save_log_var.get():
+                d = (self.log_path_var.get() or "").strip()
+                if not d:
+                    d = str(Path.cwd())
+                    self.log_path_var.set(d)
+                sess = time.strftime("%Y%m%d_%H%M%S")
+                self._batch_log_dir = str(Path(d) / f"batch_run_{sess}")
+                try:
+                    Path(self._batch_log_dir).mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    self._batch_log_dir = d
+            # -----------------------------------------------------------
         else:
             self._commg_pending_queue = []
             self._commg_is_active_run = False
+            self._batch_log_dir = None  # Reset batch dir if not running batch
 
         self._auto_start_verify = True
         self.init_genai()
