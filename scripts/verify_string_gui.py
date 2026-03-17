@@ -681,7 +681,13 @@ class VerifyStringGUI:
         for ip in ips:
             self.q.put(f"[CMD] Ping check {ip}...\n")
             if not self._commg_ping_ip(ip):
-                self.q.put(f"[CMD] WARNING: {ip} did not respond to ping. Attempting Telnet anyway...\n")
+                self.q.put(f"[CMD] WARNING: {ip} is offline.\n")
+                proceed = messagebox.askyesno("IP Not Found", f"Could not reach IP: {ip}\n\nDo you want to skip this one and proceed?")
+                if not proceed:
+                    self.q.put("[CMD] Sequence aborted by user.\n")
+                    self.q.put((_EVT_COMMG_DONE, "ABORT"))
+                    return
+                continue
 
             try:
                 with self.type_lock:
