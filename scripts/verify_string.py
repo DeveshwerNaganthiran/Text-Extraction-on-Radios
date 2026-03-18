@@ -1351,23 +1351,11 @@ def main():
                 if not final_error_evidence: final_error_evidence = parsed_doc_evidence
 
         lang_detected = parsed.get("language") or ""
-        
-        # 1. Stop hallucinated error messages from being treated as "Detected Text"
-        orig_text = parsed.get("original")
-        if not orig_text:
-            if parsed_doc_error or lang_detected or parsed.get("english"):
-                orig_text = ""
-            else:
-                orig_text = text
-                
+        orig_text = parsed.get("original") or text
         eng_text = parsed.get("english") or ""
 
         observed_n = _norm_text(orig_text)
         expected_local_n = _norm_text(expected["expected_local"])
-
-        # 2. Suppress visual error tags if the screen is actually blank
-        if not observed_n or observed_n.lower() in ["no text", "no_text", "api error"]:
-            final_error_red = False
 
         ok, warn = False, False
         if expected_local_n:
