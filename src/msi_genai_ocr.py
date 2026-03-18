@@ -511,7 +511,7 @@ class MSIGenAIOCR:
                     "Upside Down Evidence: <if YES, output ONLY the upside down character or word>\n"
                     "Overlap Error: <YES or NO>\n"
                     "Overlap Evidence: <if YES, quote the merged word>\n"
-                    "Misalignment Error: <YES or NO. Answer YES if ANY line is indented or shifted away from the left or right margin compared to the other lines.>\n"
+                    "Misalignment Error: <YES or NO. Answer YES ONLY if a line is SEVERELY indented or shifted (e.g., more than 15% of the screen width) compared to the main text block. Ignore minor pixel staggering or slight unevenness.>\n"
                     "Misalignment Evidence: <If YES, extract ONLY the specific line of text that is visibly indented/shifted away from the margin. Do NOT output the first or second lines if the third line is the indented one.>\n"
                     "Vertical Overlap Error: <YES or NO>\n"
                     "Vertical Overlap Evidence: <if YES, quote the stacked snippet>\n"
@@ -608,10 +608,10 @@ class MSIGenAIOCR:
                         if len(merged_lines) >= 2:
                             roi_w = cx2 - cx1
                             
-                            # How close a letter needs to be to "touch" the line (2% variance)
-                            touch_tol = max(3, int(roi_w * 0.02))   
-                            # How far away it must be to be considered "misaligned" (5% shift)
-                            shift_thresh = max(5, int(roi_w * 0.05)) 
+                            # Increase tolerance to 4% variance before it considers it a new margin
+                            touch_tol = max(5, int(roi_w * 0.04))   
+                            # REQUIRE A SEVERE SHIFT (15% of the screen width) to trigger an error
+                            shift_thresh = max(15, int(roi_w * 0.15))
                             
                             is_rtl = any(rtl_lang in str(parsed.get("language") or "").lower() for rtl_lang in ["arabic", "hebrew", "farsi", "urdu", "persian"])
                             
