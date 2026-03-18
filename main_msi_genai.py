@@ -2590,8 +2590,18 @@ class WalkieMSIApp:
                             if not w:
                                 continue
                             
-                            # Deduplicate and append (We no longer artificially restrict it to Hangul+Latin!)
-                            if w.lower() not in [x.lower() for x in words]:
+                            # Substring deduplication: Keep only the longest, most complete token
+                            is_dup = False
+                            for i, x in enumerate(words):
+                                if w.lower() in x.lower():
+                                    is_dup = True
+                                    break
+                                elif x.lower() in w.lower():
+                                    words[i] = w  # Replace shorter chunk with the longer one
+                                    is_dup = True
+                                    break
+                            
+                            if not is_dup:
                                 words.append(w)
                                 
                             if len(words) >= 3:

@@ -1097,8 +1097,25 @@ class VerifyStringGUI:
         
         # --- NEW LOGIC: Only write to the log file if it's pure script output ---
         is_gui_msg = stripped.startswith("[CommG]") or stripped.startswith("[CMD]") or stripped.startswith("[GUI")
+        # Trigger recording only when the main verification block starts
+        if "RADIO STRING VERIFICATION - DETECTED" in stripped:
+            
+            # (OPTIONAL) If you STRICTLY want to save logs ONLY when exactly 3 devices are found, uncomment the next 4 lines:
+            # import re
+            # match = re.search(r"DETECTED (\d+) DEVICES", stripped)
+            # if match and int(match.group(1)) != 3: 
+            #     return 
+            
+            self._is_recording_log = True
+            try:
+                if self._log_fp is not None:
+                    # Manually write the top border line that precedes this trigger
+                    self._log_fp.write("=" * 70 + "\n")
+            except Exception: pass
+
+        # Write to the file only if the recording flag is True
         try:
-            if self._log_fp is not None and not is_gui_msg:
+            if self._log_fp is not None and getattr(self, "_is_recording_log", False) and not is_gui_msg:
                 self._log_fp.write(line)
                 if not line.endswith("\n"):
                     self._log_fp.write("\n")
@@ -1295,9 +1312,10 @@ class VerifyStringGUI:
         except Exception: self._last_run_is_verification = True
 
         self.last_result = ""
-        self.last_expected = ""   # Reset expected
-        self.last_actual = ""     # Reset actual
-        self.last_error_msg = ""  # Reset error msg
+        self.last_expected = ""   
+        self.last_actual = ""     
+        self.last_error_msg = ""  
+        self._is_recording_log = False # <--- ADD THIS LINE HERE
         
         self.status_var.set("Running Verify...")
         try: self.status_label.configure(fg="black")
