@@ -64,7 +64,9 @@ class MSIGenAIOCR:
 
             if sid:
                 self._cached_session_id = sid
-                self._cached_session_ts = time.time()
+                # Force the cache timestamp to 0 so the script knows it's an old session
+                # and generates a fresh one instead of overloading Claude!
+                self._cached_session_ts = 0.0 
         except Exception:
             pass
         
@@ -491,7 +493,8 @@ class MSIGenAIOCR:
 
                 prompt = (
                     "Extract all visible text from this walkie-talkie screen image. "
-                    "Ignore icons/pictograms. extract TEXT ONLY. "
+                    "Ignore all icons/pictograms (especially the music note ♪, battery, or signal bars). Extract TEXT ONLY. "
+                    "EXTREMELY CRITICAL: This is an industrial radio LCD screen. The text may be in a very blocky, segmented, or dot-matrix font. Do NOT mistake large, stylized letters (like 'AF', 'H', or zone indicators) for icons or geometric shapes. You MUST read ALL visible characters, no matter how blocky they look. "
                     "CRITICAL: You MUST preserve exact leading spaces and indentation for every line! "
                     "CRITICAL: Preserve column separators and layout exactly. "
                     "EXTREMELY CRITICAL: Carefully inspect the text for ANY upside-down or inverted characters. "
@@ -770,6 +773,8 @@ class MSIGenAIOCR:
         if not text or text == "NO_TEXT":
             return text
         
+        text = text.replace("♪", "").replace("♫", "")
+        
         fixes = [
             ("ce11u10r", "cellular"), ("ce11u1ar", "cellular"), ("ce11ular", "cellular"),
             ("he11o", "hello"), ("ca11", "call"), ("te11", "tell"), ("se11", "sell"),
@@ -777,6 +782,20 @@ class MSIGenAIOCR:
             ("bi11", "bill"), ("si11y", "silly"), ("c0nnect", "connect"), ("t0tal", "total"),
             ("m0de", "mode"), ("r0ad", "road"), ("5can", "Scan"), ("5ignal", "Signal"),
             ("5tatus", "Status"), ("8att", "Batt"), ("8attery", "Battery"),
+            # --- VAPORIZE STATUS BAR ICON HALLUCINATIONS ---
+            ("JMAX", ""),
+            ("MAX", ""),   
+            ("H A X", ""),  
+            ("H|AX", ""),    
+            ("HAX", ""),
+            ("H A K", ""),
+            ("H AF", ""),
+            ("*", ""),
+            ("★|4★", ""),
+            ("H1 AK", ""),
+            ("|4▲", ""),
+            ("Hi Δ⚡ 📶", ""),
+            ("H|AK", "")
         ]
         
         for wrong, correct in fixes:
@@ -784,6 +803,11 @@ class MSIGenAIOCR:
             text = text.replace(wrong.upper(), correct.upper())
             text = text.replace(wrong.capitalize(), correct.capitalize())
         
+        
+        # Clean up any leftover blank spaces or empty lines caused by the deletion
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        return '\n'.join(lines)
+    
         return text
 
     def calculate_confidence(self, text: str) -> float:

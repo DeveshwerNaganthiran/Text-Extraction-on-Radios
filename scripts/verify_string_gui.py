@@ -736,13 +736,23 @@ class VerifyStringGUI:
         self.q.put((_EVT_COMMG_DONE, None))
 
     def _cmd_telnet_thread(self, payload):
+        import socket
+        
         ips = [ip.strip() for ip in self.ip_listbox.get(0, tk.END) if ip.strip()]
         if not ips:
             self.q.put("[CMD] No IPs configured!\n")
             self.q.put((_EVT_COMMG_DONE, "ABORT"))
             return
 
-        port = self.telnet_port_var.get().strip()
+        # Get port safely
+        try:
+            port = int(self.telnet_port_var.get().strip() or 23)
+        except ValueError:
+            port = 23
+            
+        # Prepare list to track background sockets
+        if not hasattr(self, "active_sockets"):
+            self.active_sockets = []
 
         for ip in ips:
             self.q.put(f"[CMD] Ping check {ip}...\n")
@@ -756,61 +766,28 @@ class VerifyStringGUI:
                 continue
 
             try:
-                with self.type_lock:
-                    self.q.put(f"[CMD] Opening command prompt natively for {ip}...\n")
-                    
-                    # 1. Generate a robust batch script to completely break out of Python environments
-                    temp_dir = tempfile.gettempdir()
-                    bat_path = os.path.join(temp_dir, f"walkie_telnet_{ip.replace('.', '_')}.bat")
-                    
-                    with open(bat_path, "w") as f:
-                        f.write("@echo off\n")
-                        f.write(f"title Telnet_Session_{ip}\n")
-                        f.write(f"echo Connecting to {ip}:{port}...\n")
-                        f.write(f"if exist \"%windir%\\sysnative\\telnet.exe\" (\n")
-                        f.write(f"    \"%windir%\\sysnative\\telnet.exe\" {ip} {port}\n")
-                        f.write(f") else (\n")
-                        f.write(f"    telnet {ip} {port}\n")
-                        f.write(f")\n")
-                        f.write("exit\n") # <-- ADDED: Forces the cmd window to close when telnet ends
-                    
-                    # 2. Execute it natively via Windows Explorer/Shell
-                    os.startfile(bat_path)
-                    
-                    self.q.put("[CMD] Waiting 4s for window and AT_Debug> prompt...\n")
-                    time.sleep(4.0) 
-                    
-                    # 3. Find the exact window we just opened
-                    desktop = Desktop(backend="uia")
-                    cmd_win = None
-                    for win in desktop.windows():
-                        text = win.window_text() or ""
-                        if ip in text or "Telnet_Session" in text:
-                            cmd_win = win
-                            break
-                    
-                    if not cmd_win:
-                        self.q.put(f"[CMD] WARNING: Could not detect the CMD window for {ip}. It might have closed instantly if connection failed.\n")
-                        proceed = messagebox.askyesno("Window Not Found", f"Could not find the Telnet window for {ip}.\n\nDid it open and close immediately?\nClick Yes to skip, No to abort.")
-                        if not proceed:
-                            self.q.put("[CMD] Sequence aborted by user.\n")
-                            self.q.put((_EVT_COMMG_DONE, "ABORT"))
-                            return
-                        continue
-
-                    # 4. Inject payload into the targeted window
-                    cmd_win.set_focus()
-                    cmd_win.type_keys(f"{payload}{{ENTER}}", with_spaces=True, set_foreground=True)
-                    self.q.put(f"[CMD] Sent {payload} to {ip} (Leaving session open during verification)\n")
-                    
-                    # Track for cleanup
-                    self.active_cmd_windows.append(cmd_win)
+                self.q.put(f"[CMD] Opening background connection to {ip}...\n")
+                
+                # 1. Connect natively in the background (No CMD window opens)
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(5.0)
+                s.connect((ip, port))
+                
+                # Wait briefly for the prompt to be ready
+                time.sleep(1.0)
+                
+                # 2. Inject payload directly over the network
+                s.sendall(f"{payload}\r\n".encode('ascii'))
+                self.q.put(f"[CMD] Sent {payload} to {ip} (Session running invisibly)\n")
+                
+                # Track the socket so we can close it later
+                self.active_sockets.append(s)
             
             except Exception as inner_e:
                 self.q.put(f"[CMD] ERROR on {ip}: {inner_e}\n")
-                proceed = messagebox.askyesno("Automation Error", f"An error occurred while controlling CMD for {ip}.\n\nDo you want to skip and proceed?")
+                proceed = messagebox.askyesno("Automation Error", f"An error occurred while connecting to {ip}.\n\nDo you want to skip and proceed?")
                 if not proceed:
-                    self.q.put("[CMD] Sequence aborted by user due to UI error.\n")
+                    self.q.put("[CMD] Sequence aborted by user.\n")
                     self.q.put((_EVT_COMMG_DONE, "ABORT"))
                     return
 
@@ -838,6 +815,8 @@ class VerifyStringGUI:
         tag = ""
         if isinstance(item, tuple):
             cmd, tag = item
+            
+        self._current_batch_cmd = str(cmd).strip()  # <-- ADD THIS LINE to track the current command
             
         # Clean up tag (pandas might read empty cells as 'nan')
         tag = str(tag).strip()
@@ -1330,7 +1309,19 @@ class VerifyStringGUI:
         if self.save_log_var.get() and bool(is_verification):
             # --- NEW: Check if part of a batch, reuse folder if so ---
             if getattr(self, "_commg_is_active_run", False) and getattr(self, "_batch_log_dir", None):
-                self._log_session_dir = self._batch_log_dir
+                import re
+                # Get the command name, default to "Unknown" if missing
+                cmd_name = getattr(self, "_current_batch_cmd", "Unknown_Command")
+                # Clean invalid Windows folder characters (like colons) into underscores
+                safe_folder_name = re.sub(r'[\\/*?:"<>|]', '_', cmd_name)
+                
+                # Append the safe command name as a subfolder inside the batch directory
+                self._log_session_dir = str(Path(self._batch_log_dir) / safe_folder_name)
+                
+                try: 
+                    Path(self._log_session_dir).mkdir(parents=True, exist_ok=True)
+                except Exception: 
+                    self._log_session_dir = self._batch_log_dir
             else:
                 d = (self.log_path_var.get() or "").strip()
                 if not d:
@@ -1511,42 +1502,30 @@ class VerifyStringGUI:
         self._commg_pending_queue = []
         self._commg_is_active_run = False
         
-        # Cleanup lingering CMD windows if stopped midway
-        if getattr(self, "active_cmd_windows", []):
-            for win in self.active_cmd_windows:
+        # Cleanup lingering background sockets if stopped midway
+        if getattr(self, "active_sockets", []):
+            for s in self.active_sockets:
                 try:
-                    win.set_focus()
+                    # 1. Send the device closing command
+                    s.sendall(b"STR_TEST:CLOSE\r\n")
                     time.sleep(0.2)
-                    if send_keys:
-                        # 1. Send the device closing command
-                        win.type_keys("STR_TEST:CLOSE{ENTER}", with_spaces=True, set_foreground=True)
-                        time.sleep(1.0)
-                        
-                        # 2. Ask the window to close gracefully
-                        try: win.close()
-                        except Exception: pass
-                        
-                        # 3. Aggressive fallback: kill the window process invisibly
-                        try:
-                            import subprocess
-                            subprocess.call(['taskkill', '/F', '/T', '/PID', str(win.process_id())], creationflags=subprocess.CREATE_NO_WINDOW)
-                        except Exception: pass
+                    # 2. Close gracefully
+                    s.close()
                 except Exception:
                     pass
-            self.active_cmd_windows = []
+            self.active_sockets = []
 
         if self.proc and self.proc.poll() is None:
             try:
                 self.proc.terminate()
                 self._append("\n[INFO] Stopping process...\n")
             except Exception: pass
-
+            
     def _drain_queue(self):
         try:
             while True:
                 s = self.q.get_nowait()
                 
-                # Intercept Automation Command Done
                 # Intercept Automation Command Done
                 if isinstance(s, tuple) and len(s) == 2 and s[0] == _EVT_COMMG_DONE:
                     if s[1] == "ABORT":
@@ -1576,30 +1555,17 @@ class VerifyStringGUI:
                     rc = s[1]
                     is_verify = bool(self._last_run_is_verification)
 
-                    # --- Close active cmd windows after verification completes ---
-                    if is_verify and getattr(self, "active_cmd_windows", []):
+                    # --- Close background sockets after verification completes ---
+                    if is_verify and getattr(self, "active_sockets", []):
                         self.q.put("[CMD] Verification complete. Sending close command and terminating sessions...\n")
-                        for win in self.active_cmd_windows:
+                        for s in self.active_sockets:
                             try:
-                                win.set_focus()
+                                s.sendall(b"STR_TEST:CLOSE\r\n")
                                 time.sleep(0.2)
-                                if send_keys:
-                                    # 1. Send the device closing command
-                                    win.type_keys("STR_TEST:CLOSE{ENTER}", with_spaces=True, set_foreground=True)
-                                    time.sleep(1.0)
-                                    
-                                    # 2. Ask the window to close gracefully
-                                    try: win.close()
-                                    except Exception: pass
-                                    
-                                    # 3. Aggressive fallback: kill the window process invisibly
-                                    try:
-                                        import subprocess
-                                        subprocess.call(['taskkill', '/F', '/T', '/PID', str(win.process_id())], creationflags=subprocess.CREATE_NO_WINDOW)
-                                    except Exception: pass
+                                s.close()
                             except Exception:
                                 pass
-                        self.active_cmd_windows = []
+                        self.active_sockets = []
                     # --------------------------------------------------------------------
 
                     will_autostart = False
