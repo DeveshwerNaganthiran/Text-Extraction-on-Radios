@@ -2,18 +2,15 @@
   "devices": [
     {
       "id": 1,
-      "name": "DANUBE",
-      "expected_softkeys": 4
+      "name": "DANUBE"
     },
     {
       "id": 2,
-      "name": "BALI",
-      "expected_softkeys": 0
+      "name": "BALI"
     },
     {
       "id": 3,
-      "name": "ION",
-      "expected_softkeys": 0
+      "name": "ION"
     }
   ]
 }

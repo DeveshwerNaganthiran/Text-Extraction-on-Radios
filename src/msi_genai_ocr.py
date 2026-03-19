@@ -783,18 +783,82 @@ class MSIGenAIOCR:
             ("m0de", "mode"), ("r0ad", "road"), ("5can", "Scan"), ("5ignal", "Signal"),
             ("5tatus", "Status"), ("8att", "Batt"), ("8attery", "Battery"),
             # --- VAPORIZE STATUS BAR ICON HALLUCINATIONS ---
+            # "MAX" / "JMAX" Signal Indicator misreads
             ("JMAX", ""),
-            ("MAX", ""),   
-            ("H A X", ""),  
-            ("H|AX", ""),    
+            ("MAX", ""),
+            ("M A X", ""),
+            ("MAK", ""),
+            ("M A K", ""),
+
+            # "HAX" / "HAK" / "HAF" (High Power + Antenna misreads)
+            ("H A X", ""),
+            ("H|AX", ""),
             ("HAX", ""),
+            ("H4X", ""),
             ("H A K", ""),
+            ("HAK", ""),
+            ("H|AK", ""),
+            ("H4K", ""),
+            ("H A F", ""),
             ("H AF", ""),
-            ("*", ""),
-            ("★|4★", ""),
+            ("HAF", ""),
+
+            # "H1" / "HI" / "Hl" Variants
             ("H1 AK", ""),
-            ("|4▲", ""),
+            ("H1AK", ""),
+            ("H1 AX", ""),
+            ("H1AX", ""),
+            ("H1A K", ""),
+            ("H1A X", ""),
+            ("J H1 AX", ""),
+            ("H I A", ""),
+            ("HIA", ""),
+            ("H1A", ""),
+            ("H l A", ""),  # lowercase L
+            ("HlA", ""),    # lowercase L
+
+            # Number/Letter confusions (5 instead of S, etc.)
+            ("HIA5", ""),
+            ("H1A5", ""),
+            ("HIA S", ""),
+            ("HIAS", ""),
+            ("H1A S", ""),
+            ("H1AS", ""),
+
+            # Symbols and Emojis (Battery, Signal, Bluetooth, Star)
             ("Hi Δ⚡ 📶", ""),
+            ("H A ⚡ 0", ""),
+            ("H A ⚡", ""),
+            ("H ⚡", ""),
+            ("⚡", ""),
+            ("📶", ""),
+            ("M1 Δ", ""),
+            ("H1 Δ", ""),
+            ("H Δ", ""),
+            ("Δ", ""),
+            ("▲", ""),
+            ("▼", ""),
+
+            # Star/Notification Icon misreads
+            ("★|4★", ""),
+            ("★", ""),
+            ("☆", ""),
+            ("*", ""),
+            ("HIA☆", ""),
+            ("H1A☆", ""),
+            ("HIA*", ""),
+            ("H1A*", ""),
+
+            # Signal Bar edge-cases (|4▲ often misread depending on font)
+            ("|4▲", ""),
+            ("14▲", ""),    # number 1
+            ("l4▲", ""),    # lowercase L
+            ("I4▲", ""),    # capital I
+            
+            # Common stray UI boundaries (Optional: remove if they conflict with real text)
+            # ("|", ""),
+            # ("[", ""),
+            # ("]", ""),
             ("H|AK", "")
         ]
         
