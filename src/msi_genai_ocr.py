@@ -782,6 +782,7 @@ class MSIGenAIOCR:
             ("bi11", "bill"), ("si11y", "silly"), ("c0nnect", "connect"), ("t0tal", "total"),
             ("m0de", "mode"), ("r0ad", "road"), ("5can", "Scan"), ("5ignal", "Signal"),
             ("5tatus", "Status"), ("8att", "Batt"), ("8attery", "Battery"),
+            
             # --- VAPORIZE STATUS BAR ICON HALLUCINATIONS ---
             # "MAX" / "JMAX" Signal Indicator misreads
             ("JMAX", ""),
@@ -848,6 +849,8 @@ class MSIGenAIOCR:
             ("H1A☆", ""),
             ("HIA*", ""),
             ("H1A*", ""),
+            ("NIAX 0", ""),
+            ("NIAX", ""),
 
             # Signal Bar edge-cases (|4▲ often misread depending on font)
             ("|4▲", ""),
