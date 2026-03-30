@@ -544,6 +544,8 @@ class VerifyStringGUI:
         # -------------------------------------------------------------
         btns = tk.Frame(frm)
         btns.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
+        self.btn_cam_test = tk.Button(btns, text="Camera Test", command=self.run_camera_test, bg="#ADD8E6", font=('Arial', 10, 'bold'))
+        self.btn_cam_test.pack(side=tk.LEFT, padx=(0, 15))
         self.btn_run = tk.Button(btns, text="Start", command=self.init_and_run, bg="#90EE90", font=('Arial', 10, 'bold'))
         self.btn_run.pack(side=tk.LEFT)
         self.btn_stop = tk.Button(btns, text="Stop", command=self.stop, bg="#FFCCCB")
@@ -1450,6 +1452,46 @@ class VerifyStringGUI:
 
         t = threading.Thread(target=_worker, daemon=True)
         t.start()
+
+    def run_camera_test(self):
+        # Path to main_msi_genai.py in the main folder
+        script_path = Path(__file__).resolve().parents[1] / "main_msi_genai.py"
+        
+        # Command WITHOUT --gui so it jumps straight into the live camera feed
+        cmd = [_python_exe(), str(script_path)]
+        
+        # Grab the camera currently selected in your Verification GUI
+        env = os.environ.copy()
+        camera_name = self.camera_id_var.get().strip()
+        if camera_name:
+            camera_id = getattr(self, "_camera_map", {}).get(camera_name, camera_name)
+            env["WALKIE_CAMERA_ID"] = str(camera_id)
+
+        # --- NEW: Extract live device names from the UI and pass them to the preview ---
+        try:
+            devices = []
+            for r in self.device_rows:
+                did = int(r.get("id"))
+                nm = str(r.get("var_name").get() if r.get("var_name") else "").strip()
+                devices.append({"id": did, "name": nm})
+            
+            env["WALKIE_DEVICE_PROFILES_JSON"] = json.dumps({"devices": devices}, ensure_ascii=False)
+            cfgp = Path(__file__).resolve().parents[1] / "configs" / "device_profiles.json"
+            cfgp.parent.mkdir(parents=True, exist_ok=True)
+            with open(cfgp, "w", encoding="utf-8") as f:
+                json.dump({"devices": devices}, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            self.q.put(f"[GUI WARNING] Failed to pass device profiles: {e}\n", ("warn",))
+        # -------------------------------------------------------------------------------
+            
+        self.q.put("\n[INFO] Launching Live Camera Preview...\n")
+        self.q.put("$ " + " ".join(cmd) + f" (Camera: {camera_name})\n\n", ("cmd",))
+        
+        try:
+            # Open the camera preview in a separate background process
+            subprocess.Popen(cmd, env=env)
+        except Exception as e:
+            self.q.put(f"[GUI ERROR] Failed to launch camera test: {e}\n", ("error",))
 
     def init_genai(self):
         script_path = Path(__file__).resolve().parent / "init_genai_session.py"
