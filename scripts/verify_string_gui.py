@@ -61,7 +61,16 @@ def _save_settings(data: dict) -> None:
         pass
 
 
-def _probe_camera_ids(max_id: int = 5) -> list[str]:
+def _probe_camera_ids(max_id: int = 5) -> list[tuple[str, str]]:
+    cam_names = []
+    if os.name == 'nt':
+        try:
+            cmd = 'powershell -ExecutionPolicy Bypass -Command "Get-PnpDevice -PresentOnly | Where-Object { $_.Class -eq \'Camera\' -or $_.Class -eq \'Image\' } | Select-Object -ExpandProperty FriendlyName"'
+            res = subprocess.check_output(cmd, shell=True, text=True, creationflags=0x08000000)
+            cam_names = [line.strip() for line in res.strip().split('\n') if line.strip()]
+        except Exception:
+            pass
+
     found = []
     for i in range(int(max_id) + 1):
         cap = None
@@ -69,27 +78,28 @@ def _probe_camera_ids(max_id: int = 5) -> list[str]:
             backend = getattr(cv2, "CAP_DSHOW", 0)
             cap = cv2.VideoCapture(i, backend)
             if not cap.isOpened():
-                try:
-                    cap.release()
-                except Exception:
-                    pass
+                try: cap.release()
+                except Exception: pass
                 cap = cv2.VideoCapture(i)
+                
             if not cap.isOpened():
                 continue
+                
             ok, frame = cap.read()
             if not ok or frame is None or getattr(frame, "size", 0) == 0:
                 continue
-            found.append(str(i))
+            
+            # Return a tuple of (ID, Name)
+            name = cam_names[i] if i < len(cam_names) else f"Camera {i}"
+            found.append((str(i), name))
+            
         except Exception:
             continue
         finally:
             try:
-                if cap is not None:
-                    cap.release()
-            except Exception:
-                pass
+                if cap is not None: cap.release()
+            except Exception: pass
     return found
-
 
 def _norm_col(s: str) -> str:
     v = str(s or "").strip().lower().replace("_", " ")
@@ -425,7 +435,7 @@ class VerifyStringGUI:
         extras.grid(row=row, column=0, columnspan=3, sticky="we", pady=(8, 0))
 
         tk.Label(extras, text="Camera ID").pack(side=tk.LEFT, padx=(0, 2))
-        self.camera_combo = ttk.Combobox(extras, textvariable=self.camera_id_var, width=8, state="readonly")
+        self.camera_combo = ttk.Combobox(extras, textvariable=self.camera_id_var, width=35, state="readonly")
         self.camera_combo.pack(side=tk.LEFT)
         tk.Button(extras, text="Refresh", command=self.refresh_cameras).pack(side=tk.LEFT, padx=(6, 0))
         tk.Checkbutton(extras, text="Save log", variable=self.save_log_var).pack(side=tk.LEFT, padx=(12, 0))
@@ -493,7 +503,7 @@ class VerifyStringGUI:
         
         tk.Radiobutton(cmd_frame, text="Single Command", variable=self.commg_mode_var, value="Single").grid(row=0, column=0, sticky="w")
         self.commg_custom_cmd_var = tk.StringVar(value=str(self._settings.get("commg_custom_cmd", "03001101")))
-        tk.Entry(cmd_frame, textvariable=self.commg_custom_cmd_var, width=15).grid(row=0, column=1, padx=(5, 0))
+        tk.Entry(cmd_frame, textvariable=self.commg_custom_cmd_var, width=35).grid(row=0, column=1, padx=(5, 0))
 
         tk.Radiobutton(cmd_frame, text="Batch (CSV/Excel)", variable=self.commg_mode_var, value="Batch").grid(row=1, column=0, sticky="w", pady=(8, 0))
         self.commg_batch_file_var = tk.StringVar(value=str(self._settings.get("commg_batch_file", "")))
@@ -1090,6 +1100,10 @@ class VerifyStringGUI:
         except Exception: pass
 
     def _current_settings(self) -> dict:
+        camera_name = (self.camera_id_var.get() or "").strip()
+        # Save the numeric ID so it works cleanly upon next application startup
+        camera_id = getattr(self, "_camera_map", {}).get(camera_name, camera_name)
+        
         return {
             "excel": (self.excel_var.get() or "").strip(),
             "region": (self.region_var.get() or "").strip(),
@@ -1097,7 +1111,7 @@ class VerifyStringGUI:
             "tag": (self.tag_var.get() or "").strip(),
             "index": (self.index_var.get() or "").strip(),
             "model_path": (self.model_path_var.get() or "").strip(),
-            "camera_id": (self.camera_id_var.get() or "").strip(),
+            "camera_id": camera_id,
             "save_log": bool(self.save_log_var.get()),
             "log_path": (self.log_path_var.get() or "").strip(),
             "integration_enable": bool(self.integration_enable_var.get()),
@@ -1114,7 +1128,18 @@ class VerifyStringGUI:
         self._settings = self._current_settings()
         _save_settings(self._settings)
 
-    def _on_close(self):
+    def _on_close(self, skip_prompt=False):
+        # -- NEW: Confirmation warning for closing --
+        if not skip_prompt:
+            if not messagebox.askyesno("Confirm Exit", "Are you sure you want to close the application?"):
+                return
+        
+        # Call stop silently to clean up background ports/sockets properly before exit
+        try: 
+            self.stop(skip_prompt=True)
+        except Exception: 
+            pass
+
         try: self._persist_settings()
         except Exception: pass
         try:
@@ -1128,18 +1153,47 @@ class VerifyStringGUI:
             if self.proc and self.proc.poll() is None:
                 self.proc.terminate()
         except Exception: pass
+        
         self.root.destroy()
 
     def refresh_cameras(self):
-        cams = _probe_camera_ids(max_id=8)
-        if not cams: cams = ["0", "1", "2"]
-        try:
-            self.camera_combo["values"] = cams
-            cur = (self.camera_id_var.get() or "").strip()
-            if cur not in cams:
-                if "1" in cams: self.camera_id_var.set("1")
-                else: self.camera_id_var.set(cams[0])
+        try: self.btn_run.configure(state=tk.DISABLED)
         except Exception: pass
+        self.root.update()
+
+        cam_data = _probe_camera_ids(max_id=8)
+        
+        if not cam_data: 
+            cam_data = [("0", "Default Camera"), ("1", "External Camera"), ("2", "Virtual Camera")]
+            
+        self._camera_map = {}
+        display_names = []
+        
+        for cid, cname in cam_data:
+            # If two cameras have the exact same name, add the ID just to tell them apart
+            if cname in self._camera_map:
+                cname = f"{cname} (ID: {cid})"
+            
+            # Save to hidden dictionary
+            self._camera_map[cname] = cid
+            display_names.append(cname)
+            
+        try:
+            self.camera_combo["values"] = display_names
+            cur = (self.camera_id_var.get() or "").strip()
+            
+            if cur in display_names:
+                self.camera_id_var.set(cur)
+            elif display_names:
+                self.camera_id_var.set(display_names[0])
+                
+            messagebox.showinfo("Camera Search", f"Successfully completed - Found {len(display_names)} camera(s)!")
+            
+        except Exception: 
+            pass
+        finally:
+            try: self.btn_run.configure(state=tk.NORMAL)
+            except Exception: pass
 
     def refresh_languages(self):
         excel = (self.excel_var.get() or "").strip()
@@ -1219,12 +1273,7 @@ class VerifyStringGUI:
         except Exception: pass
 
     def close(self):
-        try: self.stop()
-        except Exception: pass
-        try: self.root.destroy()
-        except Exception:
-            try: self.root.quit()
-            except Exception: pass
+        self._on_close()
 
     def _set_running(self, running: bool):
         try:
@@ -1260,8 +1309,12 @@ class VerifyStringGUI:
         except Exception: pass
         if model_path: cmd += ["--model-path", model_path]
 
-        camera_id = self.camera_id_var.get().strip()
-        if camera_id: cmd += ["--camera-id", camera_id]
+        # -- NEW: Look up the real numeric ID from the selected name --
+        camera_name = self.camera_id_var.get().strip()
+        if camera_name:
+            # Fallback to whatever is in the box if it isn't in the map (e.g., user typed manually)
+            camera_id = getattr(self, "_camera_map", {}).get(camera_name, camera_name)
+            cmd += ["--camera-id", str(camera_id)]
 
         return cmd
 
@@ -1404,23 +1457,29 @@ class VerifyStringGUI:
         self._run_subprocess(cmd, is_verification=False)
 
     def init_and_run(self):
+        # -- NEW: Immediately disable start button --
+        self.btn_run.configure(state=tk.DISABLED)
+        
         # Setup Automation Batch if enabled
         if self.integration_enable_var.get() and HAS_PYWINAUTO:
             
             if not list(self.ip_listbox.get(0, tk.END)):
                 messagebox.showwarning("No IPs", "Please add at least one IP address to the list before starting!")
+                self.btn_run.configure(state=tk.NORMAL) # Re-enable on error
                 return
 
             if self.commg_mode_var.get() == "Single":
                 c = self.commg_custom_cmd_var.get().strip()
                 if not c:
                     messagebox.showerror("Error", "Please enter a Custom Command.")
+                    self.btn_run.configure(state=tk.NORMAL) # Re-enable on error
                     return
                 self._commg_pending_queue = [c]
             else:
                 bf = self.commg_batch_file_var.get().strip()
                 if not bf or not os.path.exists(bf):
                     messagebox.showerror("Error", "Please select a valid Batch File.")
+                    self.btn_run.configure(state=tk.NORMAL) # Re-enable on error
                     return
                 try:
                     if bf.lower().endswith('.csv'): df = pd.read_csv(bf, header=None)
@@ -1435,17 +1494,19 @@ class VerifyStringGUI:
                         
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to load Batch File: {e}")
+                    self.btn_run.configure(state=tk.NORMAL) # Re-enable on error
                     return
                     
             if not self._commg_pending_queue:
                 messagebox.showwarning("Warning", "No commands found in the batch file.")
+                self.btn_run.configure(state=tk.NORMAL) # Re-enable on error
                 return
             
             self._commg_is_active_run = True
             tool = self.integration_type_var.get()
             self.q.put(f"[{tool}] Initialized batch with {len(self._commg_pending_queue)} commands.\n", ("commg",))
 
-            # --- NEW: Create a single log folder for the whole batch ---
+            # Create a single log folder for the whole batch
             if self.save_log_var.get():
                 d = (self.log_path_var.get() or "").strip()
                 if not d:
@@ -1457,16 +1518,18 @@ class VerifyStringGUI:
                     Path(self._batch_log_dir).mkdir(parents=True, exist_ok=True)
                 except Exception:
                     self._batch_log_dir = d
-            # -----------------------------------------------------------
         else:
             self._commg_pending_queue = []
             self._commg_is_active_run = False
-            self._batch_log_dir = None  # Reset batch dir if not running batch
+            self._batch_log_dir = None
 
         self._auto_start_verify = True
         self.init_genai()
 
     def run(self):
+        # -- NEW: Immediately disable start button --
+        self.btn_run.configure(state=tk.DISABLED)
+        
         try: cmd = self._build_cmd()
         except Exception as e:
             messagebox.showerror("Invalid input", str(e))
@@ -1479,7 +1542,12 @@ class VerifyStringGUI:
 
         self._run_subprocess(cmd, is_verification=True)
 
-    def stop(self):
+    def stop(self, skip_prompt=False):
+        # -- NEW: Confirmation warning for stopping --
+        if not skip_prompt:
+            if not messagebox.askyesno("Confirm Stop", "Are you sure you want to stop the current process?"):
+                return
+                
         self._commg_pending_queue = []
         self._commg_is_active_run = False
         
