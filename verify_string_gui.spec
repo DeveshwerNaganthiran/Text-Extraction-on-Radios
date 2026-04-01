@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files
+
+datas = []
+datas += collect_data_files('ultralytics')
 
 
 a = Analysis(
     ['scripts\\verify_string_gui.py'],
-    pathex=[],
+    pathex=['.'],
     binaries=[],
-    datas=[],
-    hiddenimports=[],
+    datas=datas,
+    hiddenimports=['src'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

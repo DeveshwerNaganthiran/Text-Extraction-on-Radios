@@ -25,11 +25,14 @@ sys.coinit_flags = 2  # Forces COM initialization to STA mode to prevent Tkinter
 # --- ADD THESE FOR PYINSTALLER & OPTION A ---
 import runpy
 from contextlib import redirect_stdout, redirect_stderr
-import scripts.verify_string
-import scripts.init_genai_session
+import verify_string
+import init_genai_session
 
 # Also import the main camera script from the parent directory
 import os
+if getattr(sys, 'frozen', False):
+    # Forces the .exe to use its own folder as the working directory
+    os.chdir(os.path.dirname(sys.executable))
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import main_msi_genai
 
@@ -1173,10 +1176,10 @@ class VerifyStringGUI:
         except Exception: pass
         try: self._log_session_dir = None
         except Exception: pass
-        try:
-            if self.proc and self.proc.poll() is None:
-                self.proc.terminate()
-        except Exception: pass
+        # try:
+        #     if self.proc and self.proc.poll() is None:
+        #         self.proc.terminate()
+        # except Exception: pass
         
         self.root.destroy()
 
@@ -1450,7 +1453,7 @@ class VerifyStringGUI:
         # --- OPTION A THREAD WORKER ---
         def _worker():
             # Figure out which embedded module to run
-            module_name = 'scripts.verify_string' if is_verification else 'scripts.init_genai_session'
+            module_name = 'verify_string' if is_verification else 'init_genai_session'
             
             # Mock sys.argv so argparse in the target scripts still works perfectly
             old_argv = sys.argv
@@ -1510,12 +1513,23 @@ class VerifyStringGUI:
         # --- OPTION A THREAD WORKER ---
         def _cam_worker():
             old_argv = sys.argv
+            
+            # --- NEW FIX: Actually pass the model path to the camera test! ---
+            model_p = self.model_path_var.get().strip()
             sys.argv = ['main_msi_genai']
+            if model_p:
+                sys.argv.extend(['--model-path', model_p])
+            # -----------------------------------------------------------------
+            
             old_env = os.environ.copy()
             os.environ.update(env)
             
+            # --- NEW FIX: Catch print statements so we can see YOLO errors! ---
+            q_stream = _QueueStream(self.q)
+            
             try:
-                runpy.run_module('main_msi_genai', run_name="__main__")
+                with redirect_stdout(q_stream), redirect_stderr(q_stream):
+                    runpy.run_module('main_msi_genai', run_name="__main__")
             except SystemExit:
                 pass
             except Exception as e:
@@ -1682,11 +1696,13 @@ class VerifyStringGUI:
                     pass
             self.active_sockets = []
 
-        if self.proc and self.proc.poll() is None:
-            try:
-                self.proc.terminate()
-                self._append("\n[INFO] Stopping process...\n")
-            except Exception: pass
+        # if self.proc and self.proc.poll() is None:
+        #     try:
+        #         self.proc.terminate()
+        #         self._append("\n[INFO] Stopping process...\n")
+        #     except Exception: pass
+        if hasattr(self, "proc_thread") and self.proc_thread and self.proc_thread.is_alive():
+            self._append("\n[WARNING] Note: Background script is still finishing its current execution loop.\n")
             
     def _drain_queue(self):
         try:
