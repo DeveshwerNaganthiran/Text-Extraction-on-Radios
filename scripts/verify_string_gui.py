@@ -1585,9 +1585,51 @@ class VerifyStringGUI:
         self._run_subprocess(cmd, is_verification=True)
 
     def stop(self, skip_prompt=False):
-        # -- NEW: Confirmation warning for stopping --
         if not skip_prompt:
-            if not messagebox.askyesno("Confirm Stop", "Are you sure you want to stop the current process?"):
+            # Create a custom popup dialog
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Process Control")
+            dialog.transient(self.root) # Make it stay on top of the main window
+            dialog.grab_set()           # Block interactions with the main window
+            
+            # Try to center the dialog over the main window
+            try:
+                x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 150
+                y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 60
+                dialog.geometry(f"300x120+{x}+{y}")
+            except Exception:
+                dialog.geometry("300x120")
+                
+            tk.Label(dialog, text="Process is currently running.\nWhat would you like to do?", font=('Arial', 10)).pack(pady=15)
+            
+            action = {"result": "continue"}
+            
+            def on_continue():
+                # User chose to continue; dismiss dialog and do nothing else
+                action["result"] = "continue"
+                dialog.destroy()
+                
+            def on_stop():
+                # User chose to stop; confirm with a secondary warning
+                if messagebox.askyesno("Confirm Stop", "Are you sure to stop?", parent=dialog):
+                    action["result"] = "stop"
+                    dialog.destroy()
+                    
+            btn_frame = tk.Frame(dialog)
+            btn_frame.pack(fill=tk.BOTH, expand=True)
+            
+            # Add the Continue and Stop buttons
+            tk.Button(btn_frame, text="Continue", command=on_continue, width=10, bg="#90EE90", font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=30)
+            tk.Button(btn_frame, text="Stop", command=on_stop, width=10, bg="#FFCCCB", font=('Arial', 9, 'bold')).pack(side=tk.RIGHT, padx=30)
+            
+            # If the user clicks the 'X' to close the window, treat it as "Continue"
+            dialog.protocol("WM_DELETE_WINDOW", on_continue)
+            
+            # Wait for the user to make a choice
+            self.root.wait_window(dialog)
+            
+            # If the result isn't exactly "stop", we just return and let the app continue
+            if action["result"] != "stop":
                 return
                 
         self._commg_pending_queue = []
