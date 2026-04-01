@@ -20,7 +20,29 @@ from openpyxl import load_workbook
 
 import sys
 sys.coinit_flags = 2  # Forces COM initialization to STA mode to prevent Tkinter crashes
-# ---------------------------
+
+
+# --- ADD THESE FOR PYINSTALLER & OPTION A ---
+import runpy
+from contextlib import redirect_stdout, redirect_stderr
+import scripts.verify_string
+import scripts.init_genai_session
+
+# Also import the main camera script from the parent directory
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import main_msi_genai
+
+# A helper class to redirect print() statements into your GUI Textbox
+class _QueueStream:
+    def __init__(self, queue):
+        self.queue = queue
+    def write(self, text):
+        if text:
+            self.queue.put(text)
+    def flush(self):
+        pass
+# --------------------------------------------
 
 try:
     from pywinauto import Desktop
@@ -1321,8 +1343,9 @@ class VerifyStringGUI:
         return cmd
 
     def _run_subprocess(self, cmd, *, is_verification: bool = True):
-        if self.proc and self.proc.poll() is None:
-            messagebox.showinfo("Running", "A process is already running. Click Stop first.")
+        # Prevent multiple threads running at once
+        if hasattr(self, "proc_thread") and self.proc_thread and self.proc_thread.is_alive():
+            messagebox.showinfo("Running", "A process is already running. Wait for it to finish.")
             return
 
         try: self._last_run_is_verification = bool(is_verification)
@@ -1332,7 +1355,7 @@ class VerifyStringGUI:
         self.last_expected = ""   
         self.last_actual = ""     
         self.last_error_msg = ""  
-        self._is_recording_log = False # <--- ADD THIS LINE HERE
+        self._is_recording_log = False 
         
         self.status_var.set("Running Verify...")
         try: self.status_label.configure(fg="black")
@@ -1424,57 +1447,56 @@ class VerifyStringGUI:
                 json.dump({"devices": devices}, f, indent=2, ensure_ascii=False)
         except Exception: pass
 
+        # --- OPTION A THREAD WORKER ---
         def _worker():
+            # Figure out which embedded module to run
+            module_name = 'scripts.verify_string' if is_verification else 'scripts.init_genai_session'
+            
+            # Mock sys.argv so argparse in the target scripts still works perfectly
+            old_argv = sys.argv
+            sys.argv = [module_name] + cmd[2:]
+            
+            # Setup environment variables for this thread
+            old_env = os.environ.copy()
+            os.environ.update(env)
+            
+            q_stream = _QueueStream(self.q)
+            
             try:
-                # --- AUTOMATION UPDATE: Hide subprocess terminal window ---
-                kwargs = {}
-                if os.name == 'nt':
-                    kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
-                # ----------------------------------------------------------
-                
-                self.proc = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=False, bufsize=0, env=env, **kwargs
-                )
-                assert self.proc.stdout is not None
-                for raw in iter(self.proc.stdout.readline, b""):
-                    try: line = raw.decode("utf-8", errors="replace")
-                    except Exception:
-                        try: line = raw.decode(errors="replace")
-                        except Exception: line = str(raw)
-                    self.q.put(line)
-
-                try: rc = self.proc.wait(timeout=1)
-                except Exception: rc = None
+                # Intercept print() and route it to the GUI queue
+                with redirect_stdout(q_stream), redirect_stderr(q_stream):
+                    # Run the bundled script as if it was executed from terminal
+                    runpy.run_module(module_name, run_name="__main__")
+                self.q.put((_EVT_FINISHED, 0))
+            except SystemExit as e:
+                rc = e.code if e.code is not None else 0
                 self.q.put((_EVT_FINISHED, rc))
             except Exception as e:
                 self.q.put(f"[GUI ERROR] {e}\n")
-                self.q.put((_EVT_FINISHED, None))
+                self.q.put((_EVT_FINISHED, 1))
+            finally:
+                sys.argv = old_argv
+                os.environ.clear()
+                os.environ.update(old_env)
 
-        t = threading.Thread(target=_worker, daemon=True)
-        t.start()
+        # Launching thread instead of subprocess
+        self.proc = None
+        self.proc_thread = threading.Thread(target=_worker, daemon=True)
+        self.proc_thread.start()
 
     def run_camera_test(self):
-        # Path to main_msi_genai.py in the main folder
-        script_path = Path(__file__).resolve().parents[1] / "main_msi_genai.py"
-        
-        # Command WITHOUT --gui so it jumps straight into the live camera feed
-        cmd = [_python_exe(), str(script_path)]
-        
-        # Grab the camera currently selected in your Verification GUI
         env = os.environ.copy()
         camera_name = self.camera_id_var.get().strip()
         if camera_name:
             camera_id = getattr(self, "_camera_map", {}).get(camera_name, camera_name)
             env["WALKIE_CAMERA_ID"] = str(camera_id)
 
-        # --- NEW: Extract live device names from the UI and pass them to the preview ---
         try:
             devices = []
             for r in self.device_rows:
                 did = int(r.get("id"))
                 nm = str(r.get("var_name").get() if r.get("var_name") else "").strip()
                 devices.append({"id": did, "name": nm})
-            
             env["WALKIE_DEVICE_PROFILES_JSON"] = json.dumps({"devices": devices}, ensure_ascii=False)
             cfgp = Path(__file__).resolve().parents[1] / "configs" / "device_profiles.json"
             cfgp.parent.mkdir(parents=True, exist_ok=True)
@@ -1482,16 +1504,28 @@ class VerifyStringGUI:
                 json.dump({"devices": devices}, f, indent=2, ensure_ascii=False)
         except Exception as e:
             self.q.put(f"[GUI WARNING] Failed to pass device profiles: {e}\n", ("warn",))
-        # -------------------------------------------------------------------------------
             
-        self.q.put("\n[INFO] Launching Live Camera Preview...\n")
-        self.q.put("$ " + " ".join(cmd) + f" (Camera: {camera_name})\n\n", ("cmd",))
+        self.q.put(f"\n[INFO] Launching Live Camera Preview... (Camera: {camera_name})\n")
         
-        try:
-            # Open the camera preview in a separate background process
-            subprocess.Popen(cmd, env=env)
-        except Exception as e:
-            self.q.put(f"[GUI ERROR] Failed to launch camera test: {e}\n", ("error",))
+        # --- OPTION A THREAD WORKER ---
+        def _cam_worker():
+            old_argv = sys.argv
+            sys.argv = ['main_msi_genai']
+            old_env = os.environ.copy()
+            os.environ.update(env)
+            
+            try:
+                runpy.run_module('main_msi_genai', run_name="__main__")
+            except SystemExit:
+                pass
+            except Exception as e:
+                self.q.put(f"[GUI ERROR] Failed to launch camera test: {e}\n", ("error",))
+            finally:
+                sys.argv = old_argv
+                os.environ.clear()
+                os.environ.update(old_env)
+
+        threading.Thread(target=_cam_worker, daemon=True).start()
 
     def init_genai(self):
         script_path = Path(__file__).resolve().parent / "init_genai_session.py"
