@@ -657,36 +657,6 @@ def _draw_camera_overlay(img_bgr: np.ndarray, overlay: dict) -> np.ndarray:
         overlay["layout"][lab] = {"x1": int(slider_left), "x2": int(slider_right), "y": int(y)}
     return out
 
-def _attach_camera_overlay_mouse(window_name: str, overlay: dict) -> None:
-    if not window_name or not overlay: return
-    def _set_value(label: str, x: int) -> None:
-        try:
-            lay = (overlay.get("layout") or {}).get(label) or {}
-            x1, x2 = int(lay.get("x1") or 0), int(lay.get("x2") or 0)
-            if x2 <= x1: return
-            xx, vmax = max(x1, min(x2, int(x))), float({"Brightness": 255, "Sharpness": 255, "Focus": 50}.get(label, 255))
-            v = int(round((float(xx - x1) / float(x2 - x1)) * vmax))
-            overlay.setdefault("values", {})[label] = max(0, min(int(vmax), v))
-        except Exception: return
-    def _hit_label(x: int, y: int) -> str:
-        try:
-            for lab, lay in (overlay.get("layout") or {}).items():
-                yy, x1, x2 = int(lay.get("y") or 0), int(lay.get("x1") or 0), int(lay.get("x2") or 0)
-                if x1 <= x <= x2 and (yy - 12) <= y <= (yy + 12): return str(lab)
-        except Exception: return ""
-        return ""
-    def _on_mouse(event, x, y, flags, _userdata):
-        try:
-            if not overlay.get("enabled"): return
-            if event == cv2.EVENT_LBUTTONDOWN:
-                lab = _hit_label(int(x), int(y))
-                if lab: overlay["drag"] = lab; _set_value(lab, int(x))
-            elif event == cv2.EVENT_MOUSEMOVE:
-                if (flags & cv2.EVENT_FLAG_LBUTTON) and overlay.get("drag"): _set_value(str(overlay.get("drag")), int(x))
-            elif event == cv2.EVENT_LBUTTONUP: overlay["drag"] = None
-        except Exception: return
-    try: cv2.setMouseCallback(window_name, _on_mouse)
-    except Exception: pass
 
 def _apply_camera_env_tuning(cap: cv2.VideoCapture) -> None:
     try:
@@ -1068,7 +1038,6 @@ def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float
     return last, rois
 
 def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, confidence: float = 0.25, model_path: str = "", window_name: str = "Verify Preview", profiles: dict = None):
-    # New code using DirectShow backend
     cap = cv2.VideoCapture(int(camera_id), cv2.CAP_DSHOW)
     if not cap.isOpened(): raise RuntimeError(f"Could not open camera {camera_id}")
 
@@ -1094,6 +1063,79 @@ def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, co
     overlay = _create_camera_overlay_state(cap) if cap else None
     zoom, did_tune = 1.0, False
 
+    # --- Load previously saved mapping if it exists ---
+    saved_mapping = {}
+    try:
+        map_file = Path(__file__).resolve().parents[1] / "configs" / "box_mapping.json"
+        if map_file.exists():
+            with open(map_file, "r") as f:
+                raw_mapping = json.load(f)
+                # Convert JSON string keys back to integers
+                saved_mapping = {int(k): int(v) for k, v in raw_mapping.items()}
+    except Exception: pass
+
+    # STATE TO KEEP TRACK OF ASSIGNMENTS
+    box_state = {
+        "assignments": [],  
+        "selected_idx": None,
+        "sorted_boxes": []
+    }
+
+    def _unified_mouse_callback(event, x, y, flags, param):
+        # 1. Check Overlay First
+        if overlay and overlay.get("enabled"):
+            def _hit(lx, ly):
+                for lab, lay in (overlay.get("layout") or {}).items():
+                    yy, x1, x2 = int(lay.get("y") or 0), int(lay.get("x1") or 0), int(lay.get("x2") or 0)
+                    if x1 <= lx <= x2 and (yy - 12) <= ly <= (yy + 12): return str(lab)
+                return ""
+            def _set(lab, lx):
+                lay = (overlay.get("layout") or {}).get(lab) or {}
+                x1, x2 = int(lay.get("x1") or 0), int(lay.get("x2") or 0)
+                if x2 > x1:
+                    xx, vmax = max(x1, min(x2, int(lx))), float({"Brightness": 255, "Sharpness": 255, "Focus": 50}.get(lab, 255))
+                    v = int(round((float(xx - x1) / float(x2 - x1)) * vmax))
+                    overlay.setdefault("values", {})[lab] = max(0, min(int(vmax), v))
+
+            if event == cv2.EVENT_LBUTTONDOWN:
+                lab = _hit(int(x), int(y))
+                if lab: 
+                    overlay["drag"] = lab
+                    _set(lab, int(x))
+                    return
+            elif event == cv2.EVENT_MOUSEMOVE:
+                if (flags & cv2.EVENT_FLAG_LBUTTON) and overlay.get("drag"):
+                    _set(str(overlay.get("drag")), int(x))
+                    return
+            elif event == cv2.EVENT_LBUTTONUP:
+                if overlay.get("drag"):
+                    overlay["drag"] = None
+                    return
+        
+        # 2. Check Click-To-Assign Boxes
+        if event == cv2.EVENT_LBUTTONDOWN:
+            for i, (bx1, by1, bx2, by2) in enumerate(box_state["sorted_boxes"]):
+                if bx1 <= x <= bx2 and by1 <= y <= by2:
+                    if box_state["selected_idx"] is None:
+                        # Select this box
+                        box_state["selected_idx"] = i
+                    else:
+                        # If a box is already selected and we clicked a different box, SWAP them
+                        if box_state["selected_idx"] != i:
+                            try:
+                                s_idx = box_state["selected_idx"]
+                                temp = box_state["assignments"][s_idx]
+                                box_state["assignments"][s_idx] = box_state["assignments"][i]
+                                box_state["assignments"][i] = temp
+                            except Exception: pass
+                        # Clear selection
+                        box_state["selected_idx"] = None
+                    return
+            # Clicked outside any box, clear selection
+            box_state["selected_idx"] = None
+
+    cv2.setMouseCallback(window_name, _unified_mouse_callback)
+
     try:
         while True:
             if overlay is not None: _apply_camera_overlay_settings(cap, overlay)
@@ -1114,27 +1156,53 @@ def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, co
             last_frame = frame
 
             try:
-                if det_holder.get("det") is not None: last_boxes, last_screens = det_holder.get("det").detect_with_screens(frame, confidence)
+                if det_holder.get("det") is not None: 
+                    last_boxes, last_screens = det_holder.get("det").detect_with_screens(frame, confidence)
             except Exception: pass
             
+            sorted_boxes = sorted(last_boxes or [], key=lambda b: (b[0], b[1]))
+            box_state["sorted_boxes"] = sorted_boxes
+            
+            # Keep assignment array in sync with the number of boxes dynamically
+            if len(sorted_boxes) > 0:
+                # Initial load from saved mapping
+                if not box_state["assignments"]:
+                    for i in range(len(sorted_boxes)):
+                        box_state["assignments"].append(saved_mapping.get(i, i))
+                
+                # If boxes flutter (e.g. 3 boxes -> 2 boxes -> 3 boxes), pad the array safely
+                while len(box_state["assignments"]) < len(sorted_boxes):
+                    assigned = set(box_state["assignments"])
+                    nxt = 0
+                    while nxt in assigned: nxt += 1
+                    box_state["assignments"].append(nxt)
+                while len(box_state["assignments"]) > len(sorted_boxes):
+                    box_state["assignments"].pop()
+
             vis = frame.copy()
-            for i, (x1, y1, x2, y2) in enumerate(sorted(last_boxes or [], key=lambda b: (b[0], b[1]))):
-                dev_name = get_device_name(profiles, i + 1) if profiles else f"Device {i + 1}"
-                cv2.rectangle(vis, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(vis, dev_name, (x1, max(0, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
-                cv2.putText(vis, dev_name, (x1, max(0, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1)
+            for i, (x1, y1, x2, y2) in enumerate(sorted_boxes):
+                dev_idx = box_state["assignments"][i] if i < len(box_state["assignments"]) else i
+                dev_name = get_device_name(profiles, dev_idx + 1) if profiles else f"Device {dev_idx + 1}"
+                
+                # Draw selection box logic
+                color = (0, 255, 255) if box_state["selected_idx"] == i else (0, 255, 0)
+                cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
+                
+                cv2.rectangle(vis, (x1, max(0, y1 - 25)), (x1 + 180, y1), color, -1)
+                cv2.putText(vis, dev_name, (x1 + 5, max(0, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
 
             for (sx1, sy1, sx2, sy2) in last_screens or []:
                 cv2.rectangle(vis, (sx1, sy1), (sx2, sy2), (0, 0, 255), 1)
 
-            cv2.putText(vis, "SPACE=capture  T=settings  +/-=zoom  X=cancel", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
-            if det_holder.get("det") is None: cv2.putText(vis, "Loading detector...", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(vis, "SPACE=Save & Exit  T=settings  +/-=zoom  X=cancel", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+            cv2.putText(vis, "Click one box, then click another to SWAP their Device Name", (10, 55), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+            
+            if det_holder.get("det") is None: cv2.putText(vis, "Loading detector...", (10, 85), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             if overlay is not None: vis = _draw_camera_overlay(vis, overlay)
             
             cv2.imshow(window_name, vis)
             
             if hasattr(cv2, "getWindowProperty") and hasattr(cv2, "WND_PROP_VISIBLE") and cv2.getWindowProperty(window_name, cv2.WND_PROP_VISIBLE) < 1: raise RuntimeError("Cancelled")
-            if overlay is not None and overlay.get("enabled"): _attach_camera_overlay_mouse(window_name, overlay)
 
             k = cv2.waitKey(1) & 0xFF
             if k in [ord('x'), ord('X')]: raise RuntimeError("Cancelled")
@@ -1150,6 +1218,17 @@ def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, co
 
     if last_frame is None: raise RuntimeError("Failed to capture frame")
     if not last_boxes: raise RuntimeError("No device detected. Try adjusting lighting/camera angle or lower --confidence (e.g. 0.15).")
+
+    # Before exiting, export the custom mapping user designed
+    mapping = {str(i): int(dev_idx) for i, dev_idx in enumerate(box_state["assignments"])}
+    try:
+        map_file = Path(__file__).resolve().parents[1] / "configs" / "box_mapping.json"
+        map_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(map_file, "w") as f:
+            json.dump(mapping, f)
+        print(f"\n[INFO] Saved custom layout mapping: {mapping}")
+    except Exception as e:
+        print(f"\n[WARNING] Failed to save custom layout mapping: {e}")
 
     rois = []
     for (x1, y1, x2, y2) in sorted(last_boxes, key=lambda b: (b[0], b[1])):
@@ -1211,41 +1290,95 @@ def main():
     if args.preview:
         t0_preview = time.time()
         full_frame, rois = capture_screen_roi_preview(None, camera_id=camera_id, confidence=confidence, model_path=model_path, profiles=profiles)
-        t1_preview = t0_cap = t1_cap = time.time()
+        print("\n[INFO] Preview Closed. (Verification string tests will run via Start button).")
+        return  # Safely terminate since we don't need to do OCR logic right now.
+        
     else:
         detector = FastDetector(model_path)
         t0_cap = time.time()
         full_frame, rois = capture_screen_roi(detector, camera_id=camera_id, confidence=confidence)
         t1_cap = time.time()
 
-    expected = load_expected(args.excel, args.region, args.language, index=args.index, tag=args.tag)
+    # Create mapping of multi-commands (indices, tags)
+    indices = [x.strip() for x in args.index.split(",")] if args.index else []
+    tags = [x.strip() for x in args.tag.split(",")] if args.tag else []
+
+    expected_list = []
+    max_len = max(len(indices), len(tags), 1)
+    
+    for i in range(max_len):
+        idx_val = indices[i] if i < len(indices) else (indices[-1] if indices else "")
+        tag_val = tags[i] if i < len(tags) else (tags[-1] if tags else "")
+
+        if tag_val == "SKIP_VERIFY" or idx_val == "SKIP_VERIFY":
+            expected_list.append({"index": "SKIP_VERIFY", "tag": "SKIP_VERIFY", "expected_en": "SKIP", "expected_local": "SKIP"})
+            continue
+
+        try:
+            exp = load_expected(args.excel, args.region, args.language, index=idx_val, tag=tag_val)
+            expected_list.append(exp)
+        except Exception as e:
+            # Handle empty load
+            expected_list.append({"index": idx_val, "tag": tag_val, "expected_en": "", "expected_local": ""})
 
     print("=" * 70)
     print(f"RADIO STRING VERIFICATION - DETECTED {len(rois)} DEVICES")
     print("=" * 70)
-    print(f"Index: {expected['index']}")
-    if expected.get("tag"): print(f"Tag: {expected['tag']}")
-    print(f"Expected (English): {expected['expected_en']}")
-    print(f"Expected ({args.region}/{args.language}): {expected['expected_local']}")
 
     ocr = MSIGenAIOCR()
     try: threading.Thread(target=lambda: ocr.get_or_init_session(), daemon=True).start()
+    except Exception: pass
+
+    # --- Read Box Custom Mapping dynamically generated during preview ---
+    box_mapping = {}
+    try:
+        map_file = Path(__file__).resolve().parents[1] / "configs" / "box_mapping.json"
+        if map_file.exists():
+            with open(map_file, "r") as f:
+                box_mapping = json.load(f)
     except Exception: pass
 
     total_ocr_time = 0.0
     all_results = []
     
     for idx, roi in enumerate(rois):
-        device_id = idx + 1
+        
+        # Dynamically map the detected bounding box index to the correct Command Index
+        mapped_idx = int(box_mapping.get(str(idx), idx))
+        device_id = mapped_idx + 1
         dev_name = get_device_name(profiles, device_id)
+        
+        # Select specific expected values assigned per device based on its newly loaded custom position mapping
+        exp_dict = expected_list[mapped_idx] if mapped_idx < len(expected_list) else expected_list[-1]
         
         print("\n" + "=" * 70)
         print(f"Device: {dev_name} (Extracting text...)")
         print("=" * 70)
+        
+        if exp_dict.get("tag") == "SKIP_VERIFY" or exp_dict.get("index") == "SKIP_VERIFY":
+            print("Skipping verification for this device as requested via Automation Command.")
+            continue
+
+        print(f"Index: {exp_dict.get('index', '')}")
+        if exp_dict.get('tag'): print(f"Tag: {exp_dict.get('tag', '')}")
+        print(f"Expected (English): {exp_dict.get('expected_en', '')}")
+        print(f"Expected ({args.region}/{args.language}): {exp_dict.get('expected_local', '')}")
 
         if args.save_roi:
             outp = Path(args.save_roi)
-            new_outp = outp.with_name(f"{outp.stem}_D{device_id}{outp.suffix}")
+            # Create a safe string out of the device name/IP address (replace spaces/slashes with underscores)
+            safe_dev_name = re.sub(r'[\\/*?:"<>| ]', '_', dev_name)
+            
+            # Grab the specific index for this device
+            dev_idx = str(exp_dict.get('index', '')).strip()
+            
+            # Construct the file name (e.g. roi_0528_192.168.10.1.jpg)
+            if dev_idx and dev_idx != "SKIP_VERIFY":
+                new_filename = f"roi_{dev_idx}_{safe_dev_name}{outp.suffix}"
+            else:
+                new_filename = f"{outp.stem}_{safe_dev_name}{outp.suffix}"
+                
+            new_outp = outp.with_name(new_filename)
             new_outp.parent.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(new_outp), roi)
 
@@ -1355,7 +1488,7 @@ def main():
         eng_text = parsed.get("english") or ""
 
         observed_n = _norm_text(orig_text)
-        expected_local_n = _norm_text(expected["expected_local"])
+        expected_local_n = _norm_text(exp_dict.get("expected_local", ""))
 
         ok, warn = False, False
         if expected_local_n:
@@ -1369,11 +1502,10 @@ def main():
 
         verdict = "PASS" if ok else ("WARN" if warn else "FAIL")
         exp_lines = [
-            f"Expected (English): {expected.get('expected_en','')}",
-            f"Expected ({args.region}/{args.language}): {expected.get('expected_local','')}"
+            f"Expected (English): {exp_dict.get('expected_en','')}",
+            f"Expected ({args.region}/{args.language}): {exp_dict.get('expected_local','')}"
         ]
         
-        # --- NEW: Print the raw detected text on a single line ---
         detected_flat = " ".join([ln.strip() for ln in str(orig_text).splitlines() if ln.strip()])
         print(f"Detected: '{detected_flat}'")
         
@@ -1391,13 +1523,11 @@ def main():
             
             err_type_str = str(final_error_type or "STRING").upper()
             
-            # If specific tokens/words were found, display them. Otherwise, show the first line of the evidence.
             if error_words:
                 words_str = ", ".join(error_words)
             else:
                 words_str = final_error_evidence.splitlines()[0] if final_error_evidence else "Error detected"
             
-            # Build the dynamic string: e.g. [MISALIGNMENT ERROR: Misalignment error detected]
             error_msg_display = f"[{err_type_str} ERROR: {words_str}]"
             print(error_msg_display)
         
@@ -1417,13 +1547,6 @@ def main():
     for res in all_results:
         try: _show_ocr_result_window(res["roi"], res["orig_text"], res["eng_text"], res["lang_detected"], res["verdict"], expected_lines=res["exp_lines"], device_name=res["dev_name"], error_msg=res.get("error_msg", ""))
         except Exception: pass
-
-    # try:
-    #     total_s = time.time() - t0_total
-    #     cap_s = t1_cap - t0_cap
-    #     if args.preview: print(f"\n[TIMING] Preview: {(t1_preview - t0_preview):.2f}s | Capture: {cap_s:.2f}s | OCR: {total_ocr_time:.2f}s | Total: {total_s:.2f}s")
-    #     else: print(f"\n[TIMING] Capture: {cap_s:.2f}s | OCR: {total_ocr_time:.2f}s | Total: {total_s:.2f}s")
-    # except Exception: pass
 
 if __name__ == "__main__":
     main()

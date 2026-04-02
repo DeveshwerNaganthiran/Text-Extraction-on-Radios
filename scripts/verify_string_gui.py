@@ -129,7 +129,7 @@ def _probe_camera_ids(max_id: int = 5) -> list[tuple[str, str]]:
 def _norm_col(s: str) -> str:
     v = str(s or "").strip().lower().replace("_", " ")
     v = re.sub(r"[\(\)\[\]\{\}:,;/\\\-]+", " ", v)
-    v = " ".join(v.split())
+    v = "join(v.split())"
     if v.startswith("string "):
         v = v[len("string ") :].strip()
     if v.startswith("str "):
@@ -387,11 +387,11 @@ class VerifyStringGUI:
         self.q = queue.Queue()
         self.last_result = ""
         self.last_expected = ""
-        self.last_actual = ""       # <-- NEW: Track actual extracted string
-        self.last_error_msg = ""    # <-- NEW: Track error messages
+        self.last_actual = ""       
+        self.last_error_msg = ""    
         self._pending_expected_norm = False
-        self._pending_actual_norm = False # <-- NEW: Flag for actual normalization
-        self._batch_log_dir = None  # <-- NEW: Track single folder for batch runs
+        self._pending_actual_norm = False 
+        self._batch_log_dir = None  
 
         self._settings = _load_settings()
 
@@ -558,10 +558,9 @@ class VerifyStringGUI:
 
         dev_btns = tk.Frame(self.lf_devices)
         dev_btns.grid(row=0, column=3, rowspan=5, sticky="ne", padx=(12, 0))
-        tk.Button(dev_btns, text="Add", command=self._on_add_device).pack(fill="x", pady=(2, 2))
-        tk.Button(dev_btns, text="Remove", command=self._on_remove_device).pack(fill="x", pady=(2, 2))
+        tk.Label(dev_btns, text="Devices auto-sync\nwith IP addresses", fg="gray", font=("Arial", 8)).pack(fill="x", pady=(8, 2))
 
-        self._load_devices_from_env_or_defaults()
+        self._sync_devices_to_ips(initial_load=True)
         row += 1
 
         # -------------------------------------------------------------
@@ -627,6 +626,7 @@ class VerifyStringGUI:
             
         self.ip_listbox.insert(tk.END, new_ip)
         self.new_ip_entry.delete(0, tk.END)
+        self._sync_devices_to_ips()
 
     def _commg_remove_ip(self):
         selected = self.ip_listbox.curselection()
@@ -642,6 +642,7 @@ class VerifyStringGUI:
         
         if confirm:
             self.ip_listbox.delete(selected[0])
+            self._sync_devices_to_ips()
 
     def _commg_browse_batch(self):
         p = filedialog.askopenfilename(
@@ -700,7 +701,7 @@ class VerifyStringGUI:
         self.q.put("[CommG] Successfully hooked into CommuniGATOR.\n")
         return True
 
-    def _commg_send_command_thread_impl(self, payload):
+    def _commg_send_command_thread_impl(self, payloads):
         ips = list(self.ip_listbox.get(0, tk.END))
         if not ips:
             self.q.put("[CommG] No IPs configured!\n")
@@ -719,7 +720,8 @@ class VerifyStringGUI:
             toolbar = main_win.child_window(auto_id="59392", control_type="ToolBar")
             input_field = main_win.child_window(auto_id="1004", control_type="Edit")
             
-            for ip in ips:
+            for i, ip in enumerate(ips):
+                payload = payloads[i] if i < len(payloads) else payloads[-1]
                 self.q.put(f"[CommG] Ping check {ip}...\n")
                 if not self._commg_ping_ip(ip):
                     self.q.put(f"[CommG] WARNING: {ip} is offline.\n")
@@ -769,7 +771,7 @@ class VerifyStringGUI:
 
         self.q.put((_EVT_COMMG_DONE, None))
 
-    def _cmd_telnet_thread(self, payload):
+    def _cmd_telnet_thread(self, payloads):
         import socket
         
         ips = [ip.strip() for ip in self.ip_listbox.get(0, tk.END) if ip.strip()]
@@ -788,7 +790,8 @@ class VerifyStringGUI:
         if not hasattr(self, "active_sockets"):
             self.active_sockets = []
 
-        for ip in ips:
+        for i, ip in enumerate(ips):
+            payload = payloads[i] if i < len(payloads) else payloads[-1]
             self.q.put(f"[CMD] Ping check {ip}...\n")
             if not self._commg_ping_ip(ip):
                 self.q.put(f"[CMD] WARNING: {ip} is offline.\n")
@@ -829,12 +832,12 @@ class VerifyStringGUI:
         time.sleep(3.0) 
         self.q.put((_EVT_COMMG_DONE, None))
 
-    def _integration_send_command_thread(self, payload):
+    def _integration_send_command_thread(self, payloads):
         integration_type = self.integration_type_var.get()
         if integration_type == "CMD":
-            self._cmd_telnet_thread(payload)
+            self._cmd_telnet_thread(payloads)
         else:
-            self._commg_send_command_thread_impl(payload)
+            self._commg_send_command_thread_impl(payloads)
 
     def _run_next_commg_step(self):
         if not self._commg_pending_queue:
@@ -844,66 +847,76 @@ class VerifyStringGUI:
             self.status_label.configure(fg="green")
             return
 
-        item = self._commg_pending_queue.pop(0)
-        cmd = item
-        tag = ""
-        if isinstance(item, tuple):
-            cmd, tag = item
-            
-        self._current_batch_cmd = str(cmd).strip()  # <-- ADD THIS LINE to track the current command
-            
-        # Clean up tag (pandas might read empty cells as 'nan')
-        tag = str(tag).strip()
-        if tag.lower() == 'nan':
-            tag = ""
+        ips = list(self.ip_listbox.get(0, tk.END))
+        num_ips = len(ips) if ips else 1
+        mode = self.commg_mode_var.get()
         
-        if tag.upper() in ["SKIP", "NO_VERIFY", "NONE"]:
-            self.tag_var.set("SKIP_VERIFY")
-            self.index_var.set("SKIP_VERIFY")
-            tool = self.integration_type_var.get()
-            self.q.put(f"\n[{tool}] Non-verification command detected: {cmd}\n", ("commg",))
-        elif tag:
-            self.tag_var.set(tag)
-            self.index_var.set("")
-            tool = self.integration_type_var.get()
-            self.q.put(f"\n[{tool}] Switching String Tag to: {tag}\n", ("commg",))
+        batch_items = []
+        if mode == "Batch" and num_ips > 1:
+            for _ in range(num_ips):
+                if self._commg_pending_queue:
+                    batch_items.append(self._commg_pending_queue.pop(0))
         else:
-            # Auto-extract index from the command (e.g., STR_TEST:FIX:0052:0030 -> 0030)
-            if ":" in cmd:
-                extracted_idx = cmd.split(":")[-1].strip()
-            else:
-                extracted_idx = cmd.strip()
-            
-            # Clean index for dictionary lookup (strip leading zeros)
-            clean_idx = extracted_idx
-            if clean_idx.isdigit():
-                clean_idx = str(int(clean_idx))
+            batch_items.append(self._commg_pending_queue.pop(0))
+
+        if not batch_items:
+            return
+
+        cmds = []
+        tags = []
+        indices = []
+
+        for item in batch_items:
+            cmd = item
+            tag = ""
+            if isinstance(item, tuple):
+                cmd, tag = item
                 
-            # Lookup the tag dynamically from the Excel file
-            if not getattr(self, "_index_to_tag_cache", None):
-                self.q.put("[GUI] Caching Excel index-to-tag mapping...\n", ("commg",))
-                try:
-                    self._index_to_tag_cache = _build_index_to_tag_map(self.excel_var.get().strip())
-                except Exception:
-                    self._index_to_tag_cache = {}
-
-            found_tag = self._index_to_tag_cache.get(clean_idx, "")
-
-            self.index_var.set(extracted_idx)
-            tool = self.integration_type_var.get()
+            cmds.append(str(cmd).strip())
             
-            if found_tag:
-                self.tag_var.set(found_tag)
-                self.q.put(f"\n[{tool}] Extracted Index '{extracted_idx}' (Found Tag: {found_tag})\n", ("commg",))
+            # Clean up tag
+            tag = str(tag).strip()
+            if tag.lower() == 'nan':
+                tag = ""
+            
+            if tag.upper() in ["SKIP", "NO_VERIFY", "NONE"]:
+                tags.append("SKIP_VERIFY")
+                indices.append("SKIP_VERIFY")
+            elif tag:
+                tags.append(tag)
+                indices.append("")
             else:
-                self.tag_var.set("")  # Clear it only if no tag exists for that index
-                self.q.put(f"\n[{tool}] Extracted Index '{extracted_idx}'\n", ("commg",))
+                if ":" in cmd:
+                    extracted_idx = cmd.split(":")[-1].strip()
+                else:
+                    extracted_idx = cmd.strip()
+                
+                clean_idx = extracted_idx
+                if clean_idx.isdigit():
+                    clean_idx = str(int(clean_idx))
+                    
+                if not getattr(self, "_index_to_tag_cache", None):
+                    try:
+                        self._index_to_tag_cache = _build_index_to_tag_map(self.excel_var.get().strip())
+                    except Exception:
+                        self._index_to_tag_cache = {}
 
-        self.status_var.set(f"Automation Running: {cmd}...")
+                found_tag = self._index_to_tag_cache.get(clean_idx, "")
+                tags.append(found_tag)
+                indices.append(extracted_idx)
+
+        self._current_batch_cmd = cmds[0]
+        self.tag_var.set(",".join(tags))
+        self.index_var.set(",".join(indices))
+        
+        tool = self.integration_type_var.get()
+        self.q.put(f"\n[{tool}] Dispatched Commands: {cmds}\n", ("commg",))
+
+        self.status_var.set(f"Automation Running: {cmds[0]}...")
         self.status_label.configure(fg="purple")
         self._set_running(True)
 
-        threading.Thread(target=self._integration_send_command_thread, args=(cmd,), daemon=True).start()
+        threading.Thread(target=self._integration_send_command_thread, args=(cmds,), daemon=True).start()
 
     # --- Device List Methods ---
     def _regrid_device_rows(self):
@@ -950,71 +963,35 @@ class VerifyStringGUI:
         if int(self.selected_device_id.get() or 0) == 0:
             self.selected_device_id.set(int(did))
 
-    def _on_remove_device(self):
-        if not self.device_rows: return
-        target_id = None
-        try: target_id = int(self.selected_device_id.get())
-        except Exception: target_id = None
-
-        idx = None
-        if target_id is not None:
-            for i, r in enumerate(self.device_rows):
-                if int(r.get("id") or 0) == int(target_id):
-                    idx = i
-                    break
-        if idx is None: idx = len(self.device_rows) - 1
-
-        row = self.device_rows.pop(int(idx))
-        for w in row.get("widgets") or []:
-            try: w.destroy()
+    def _sync_devices_to_ips(self, initial_load=False):
+        ips = list(self.ip_listbox.get(0, tk.END))
+        
+        names_dict = {}
+        if initial_load:
+            try:
+                cfgp = Path(__file__).resolve().parents[1] / "configs" / "device_profiles.json"
+                if cfgp.exists():
+                    with open(cfgp, "r", encoding="utf-8") as f:
+                        obj = json.load(f) or {}
+                    for d in obj.get("devices", []):
+                        names_dict[int(d.get("id"))] = d.get("name", "")
             except Exception: pass
 
-        self._renumber_device_rows()
+        while len(self.device_rows) > len(ips):
+            row = self.device_rows.pop()
+            for w in row.get("widgets", []):
+                try: w.destroy()
+                except: pass
+
+        while len(self.device_rows) < len(ips):
+            next_id = len(self.device_rows) + 1
+            name = names_dict.get(next_id, f"Device {next_id}") if initial_load else f"Device {next_id}"
+            self._add_device_row(next_id, name)
+
         self._regrid_device_rows()
-
-        if self.device_rows:
-            self.selected_device_id.set(int(self.device_rows[min(int(idx), len(self.device_rows) - 1)].get("id") or 0))
-        else:
-            self.selected_device_id.set(0)
-
-    def _on_add_device(self):
-        next_id = len(self.device_rows) + 1
-        self._add_device_row(next_id, "")
-
-    def _load_devices_from_env_or_defaults(self):
-        try:
-            raw = str(os.getenv("WALKIE_DEVICE_PROFILES_JSON", "") or "").strip()
-            if raw:
-                obj = json.loads(raw)
-                devices = obj.get("devices") if isinstance(obj, dict) else None
-                if isinstance(devices, list) and devices:
-                    for d in devices:
-                        if not isinstance(d, dict): continue
-                        try: did = int(d.get("id"))
-                        except Exception: continue
-                        nm = str(d.get("name") or "")
-                        self._add_device_row(did, nm)
-                    return
-        except Exception: pass
-
-        try:
-            cfgp = Path(__file__).resolve().parents[1] / "configs" / "device_profiles.json"
-            if cfgp.exists():
-                with open(cfgp, "r", encoding="utf-8") as f:
-                    obj = json.load(f) or {}
-                devices = obj.get("devices") if isinstance(obj, dict) else None
-                if isinstance(devices, list) and devices:
-                    for d in devices:
-                        if not isinstance(d, dict): continue
-                        try: did = int(d.get("id"))
-                        except Exception: continue
-                        nm = str(d.get("name") or "")
-                        self._add_device_row(did, nm)
-                    return
-        except Exception: pass
-
-        for i in range(2):
-            self._add_device_row(i + 1, "")
+        self._renumber_device_rows()
+        if self.device_rows and int(self.selected_device_id.get() or 0) == 0:
+            self.selected_device_id.set(1)
 
     # --- Directory Handlers ---
     def browse_excel(self):
@@ -1048,12 +1025,10 @@ class VerifyStringGUI:
     def _append(self, s: str):
         self.output.insert(tk.END, s)
         self.output.see(tk.END)
-        # We removed the self._log_fp.write() from here to keep logs clean
 
     def _append_cmd(self, s: str):
         self.output.insert(tk.END, s, ("cmd",))
         self.output.see(tk.END)
-        # We removed the self._log_fp.write() from here to keep logs clean
 
     def _append_line_with_result_color(self, line: str):
         stripped = (line or "").strip()
@@ -1099,17 +1074,9 @@ class VerifyStringGUI:
             
         self.output.see(tk.END)
         
-        # --- NEW LOGIC: Only write to the log file if it's pure script output ---
         is_gui_msg = stripped.startswith("[CommG]") or stripped.startswith("[CMD]") or stripped.startswith("[GUI")
         # Trigger recording only when the main verification block starts
         if "RADIO STRING VERIFICATION - DETECTED" in stripped:
-            
-            # (OPTIONAL) If you STRICTLY want to save logs ONLY when exactly 3 devices are found, uncomment the next 4 lines:
-            # import re
-            # match = re.search(r"DETECTED (\d+) DEVICES", stripped)
-            # if match and int(match.group(1)) != 3: 
-            #     return 
-            
             self._is_recording_log = True
             try:
                 if self._log_fp is not None:
@@ -1128,7 +1095,6 @@ class VerifyStringGUI:
 
     def _current_settings(self) -> dict:
         camera_name = (self.camera_id_var.get() or "").strip()
-        # Save the numeric ID so it works cleanly upon next application startup
         camera_id = getattr(self, "_camera_map", {}).get(camera_name, camera_name)
         
         return {
@@ -1156,12 +1122,10 @@ class VerifyStringGUI:
         _save_settings(self._settings)
 
     def _on_close(self, skip_prompt=False):
-        # -- NEW: Confirmation warning for closing --
         if not skip_prompt:
             if not messagebox.askyesno("Confirm Exit", "Are you sure you want to close the application?"):
                 return
         
-        # Call stop silently to clean up background ports/sockets properly before exit
         try: 
             self.stop(skip_prompt=True)
         except Exception: 
@@ -1176,10 +1140,6 @@ class VerifyStringGUI:
         except Exception: pass
         try: self._log_session_dir = None
         except Exception: pass
-        # try:
-        #     if self.proc and self.proc.poll() is None:
-        #         self.proc.terminate()
-        # except Exception: pass
         
         self.root.destroy()
 
@@ -1197,11 +1157,8 @@ class VerifyStringGUI:
         display_names = []
         
         for cid, cname in cam_data:
-            # If two cameras have the exact same name, add the ID just to tell them apart
             if cname in self._camera_map:
                 cname = f"{cname} (ID: {cid})"
-            
-            # Save to hidden dictionary
             self._camera_map[cname] = cid
             display_names.append(cname)
             
@@ -1226,7 +1183,6 @@ class VerifyStringGUI:
         excel = (self.excel_var.get() or "").strip()
         region = (self.region_var.get() or "").strip() or "APAC"
         
-        # --- NEW LOGIC: Force English language if English region is selected ---
         if region.lower() == "english":
             opts = ["English"]
         else:
@@ -1240,11 +1196,9 @@ class VerifyStringGUI:
             self.language_combo["values"] = opts
             cur = (self.language_var.get() or "").strip()
             
-            # If current language is valid for this region, keep it
             if cur and cur in opts: 
                 return
                 
-            # Otherwise, auto-select the first available language (which will be 'English' for the English region)
             if opts: 
                 self.language_var.set(opts[0])
         except Exception: pass
@@ -1336,10 +1290,8 @@ class VerifyStringGUI:
         except Exception: pass
         if model_path: cmd += ["--model-path", model_path]
 
-        # -- NEW: Look up the real numeric ID from the selected name --
         camera_name = self.camera_id_var.get().strip()
         if camera_name:
-            # Fallback to whatever is in the box if it isn't in the map (e.g., user typed manually)
             camera_id = getattr(self, "_camera_map", {}).get(camera_name, camera_name)
             cmd += ["--camera-id", str(camera_id)]
 
@@ -1371,17 +1323,17 @@ class VerifyStringGUI:
         self._log_fp = None
 
         if self.save_log_var.get() and bool(is_verification):
-            # --- NEW: Check if part of a batch, reuse folder if so ---
             if getattr(self, "_commg_is_active_run", False) and getattr(self, "_batch_log_dir", None):
                 import re
-                # Get the command name, default to "Unknown" if missing
-                cmd_name = getattr(self, "_current_batch_cmd", "Unknown_Command")
-                # Clean invalid Windows folder characters (like colons) into underscores
-                safe_folder_name = re.sub(r'[\\/*?:"<>|]', '_', cmd_name)
-                
-                # Append the safe command name as a subfolder inside the batch directory
+                # Use the indices of the commands to name the folder instead of the raw command
+                idx_str = (self.index_var.get() or "Unknown").strip()
+                # Clean invalid characters and replace commas with underscores (e.g. "0528_1243_1093")
+                safe_folder_name = re.sub(r'[\\/*?:"<>|, ]', '_', idx_str)
+                # Fallback if no indices are found
+                if not safe_folder_name.strip('_'):
+                    safe_folder_name = "Unknown_Command"
+                    
                 self._log_session_dir = str(Path(self._batch_log_dir) / safe_folder_name)
-                
                 try: 
                     Path(self._log_session_dir).mkdir(parents=True, exist_ok=True)
                 except Exception: 
@@ -1402,7 +1354,6 @@ class VerifyStringGUI:
                 self._log_session_dir = str(Path(d) / f"verified_{sess}")
                 try: Path(self._log_session_dir).mkdir(parents=True, exist_ok=True)
                 except Exception: self._log_session_dir = d
-            # ---------------------------------------------------------
 
             ts = time.strftime("%Y%m%d_%H%M%S")
             safe_tag = (self.tag_var.get() or "").strip()
@@ -1412,7 +1363,6 @@ class VerifyStringGUI:
             try:
                 Path(p).parent.mkdir(parents=True, exist_ok=True)
                 self._log_fp = open(p, "a", encoding="utf-8")
-                # Deleted the hardcoded headers here so the file starts exactly at "RADIO STRING VERIFICATION..."
             except Exception: self._log_fp = None
 
         try:
@@ -1428,7 +1378,9 @@ class VerifyStringGUI:
                     safe_tag = (self.tag_var.get() or "").strip()
                     safe_tag = "".join([c for c in safe_tag if c.isalnum() or c in ["_", "-"]])[:40]
                     idx = (self.index_var.get() or "").strip()
-                    suffix = safe_tag or ("idx" + idx if idx else "roi")
+                    # Keep suffix safe if there are multiple indices
+                    safe_idx = idx.replace(",", "_").replace(" ", "")
+                    suffix = safe_tag or ("idx" + safe_idx if safe_idx else "roi")
                     roi_path = str(Path(self._log_session_dir) / f"roi_{suffix}_{ts}.jpg")
                     cmd = list(cmd) + ["--save-roi", roi_path]
         except Exception as e:
@@ -1490,6 +1442,7 @@ class VerifyStringGUI:
     def run_camera_test(self):
         env = os.environ.copy()
         camera_name = self.camera_id_var.get().strip()
+        camera_id = 0 # Default fallback
         if camera_name:
             camera_id = getattr(self, "_camera_map", {}).get(camera_name, camera_name)
             env["WALKIE_CAMERA_ID"] = str(camera_id)
@@ -1509,27 +1462,30 @@ class VerifyStringGUI:
             self.q.put(f"[GUI WARNING] Failed to pass device profiles: {e}\n", ("warn",))
             
         self.q.put(f"\n[INFO] Launching Live Camera Preview... (Camera: {camera_name})\n")
+        self.q.put("[INFO] 💡 LEFT-CLICK a box to select it, then LEFT-CLICK another box to SWAP their device names!\n")
         
         # --- OPTION A THREAD WORKER ---
         def _cam_worker():
             old_argv = sys.argv
-            
-            # --- NEW FIX: Actually pass the model path to the camera test! ---
             model_p = self.model_path_var.get().strip()
-            sys.argv = ['main_msi_genai']
+            
+            # Start verify_string in preview mode to use our custom mouse clicking
+            sys.argv = ['verify_string', '--preview', '--excel', 'dummy.xlsx', '--region', 'APAC', '--language', 'dummy']
+            
+            # FIX: Explicitly pass the selected camera ID to the background script!
+            sys.argv.extend(['--camera-id', str(camera_id)])
+            
             if model_p:
                 sys.argv.extend(['--model-path', model_p])
-            # -----------------------------------------------------------------
             
             old_env = os.environ.copy()
             os.environ.update(env)
             
-            # --- NEW FIX: Catch print statements so we can see YOLO errors! ---
             q_stream = _QueueStream(self.q)
             
             try:
                 with redirect_stdout(q_stream), redirect_stderr(q_stream):
-                    runpy.run_module('main_msi_genai', run_name="__main__")
+                    runpy.run_module('verify_string', run_name="__main__")
             except SystemExit:
                 pass
             except Exception as e:
@@ -1594,7 +1550,7 @@ class VerifyStringGUI:
             
             self._commg_is_active_run = True
             tool = self.integration_type_var.get()
-            self.q.put(f"[{tool}] Initialized batch with {len(self._commg_pending_queue)} commands.\n", ("commg",))
+            self.q.put(f"[{tool}] Initialized batch with {len(self._commg_pending_queue)} items.\n", ("commg",))
 
             # Create a single log folder for the whole batch
             if self.save_log_var.get():
@@ -1687,20 +1643,13 @@ class VerifyStringGUI:
         if getattr(self, "active_sockets", []):
             for s in self.active_sockets:
                 try:
-                    # 1. Send the device closing command
                     s.sendall(b"STR_TEST:CLOSE\r\n")
                     time.sleep(0.2)
-                    # 2. Close gracefully
                     s.close()
                 except Exception:
                     pass
             self.active_sockets = []
 
-        # if self.proc and self.proc.poll() is None:
-        #     try:
-        #         self.proc.terminate()
-        #         self._append("\n[INFO] Stopping process...\n")
-        #     except Exception: pass
         if hasattr(self, "proc_thread") and self.proc_thread and self.proc_thread.is_alive():
             self._append("\n[WARNING] Note: Background script is still finishing its current execution loop.\n")
             
@@ -1712,16 +1661,20 @@ class VerifyStringGUI:
                 # Intercept Automation Command Done
                 if isinstance(s, tuple) and len(s) == 2 and s[0] == _EVT_COMMG_DONE:
                     if s[1] == "ABORT":
-                        # If user aborted, cancel the active run and reset UI
                         self._commg_is_active_run = False
                         self._commg_pending_queue = []
                         self.status_var.set("Automation Sequence Aborted")
                         self.status_label.configure(fg="red")
                         self._set_running(False)
                     else:
-                        # Check if skipping verification
-                        if self.index_var.get() == "SKIP_VERIFY" or self.tag_var.get() == "SKIP_VERIFY":
-                            self.q.put("[GUI] Skipping verification phase as requested.\n", ("commg",))
+                        all_skip = True
+                        for t, idx in zip(self.tag_var.get().split(","), self.index_var.get().split(",")):
+                            if t.strip() != "SKIP_VERIFY" and idx.strip() != "SKIP_VERIFY":
+                                all_skip = False
+                                break
+                                
+                        if all_skip:
+                            self.q.put("[GUI] Skipping verification phase as requested for all.\n", ("commg",))
                             if self._commg_pending_queue:
                                 self._run_next_commg_step()
                             else:
@@ -1730,7 +1683,6 @@ class VerifyStringGUI:
                                 self.status_label.configure(fg="green")
                                 self._set_running(False)
                         else:
-                            # After successfully sending the command, run Verify
                             self.run()
                     continue
 
@@ -1741,11 +1693,11 @@ class VerifyStringGUI:
                     # --- Close background sockets after verification completes ---
                     if is_verify and getattr(self, "active_sockets", []):
                         self.q.put("[CMD] Verification complete. Sending close command and terminating sessions...\n")
-                        for s in self.active_sockets:
+                        for soc in self.active_sockets:
                             try:
-                                s.sendall(b"STR_TEST:CLOSE\r\n")
+                                soc.sendall(b"STR_TEST:CLOSE\r\n")
                                 time.sleep(0.2)
-                                s.close()
+                                soc.close()
                             except Exception:
                                 pass
                         self.active_sockets = []
@@ -1789,7 +1741,6 @@ class VerifyStringGUI:
 
                     try:
                         if self._log_fp is not None:
-                            # self._log_fp.write(f"Finished: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
                             self._log_fp.flush()
                             self._log_fp.close()
                             self._log_fp = None
