@@ -19,10 +19,10 @@ class MSIGenAIOCR:
     def __init__(self):
         # Get configuration from environment or use credentials from genai_client.py
         self.host = os.getenv('MSI_HOST', "https://genai-service.stage.commandcentral.com/app-gateway/api/v2")
-        self.api_key = os.getenv('MSI_API_KEY', "nD(oMl:FZ7u@@nspwywa4kTJOQ64,;EX*9oQEIm!")
-        self.user_id = os.getenv('MSI_USER_ID', 'wqm764@motorolasolutions.com')
+        self.api_key = os.getenv('MSI_API_KEY', "GTy:YsSiQSt,cxCGOLsj(ZkjCZDFTh!OkML9WrEn")
+        self.user_id = os.getenv('MSI_USER_ID', 'bgvk38@motorolasolutions.com')
         self.datastore_id = os.getenv('MSI_DATASTORE_ID', "1579319e-2b48-4bad-9825-4a7dd10ac0ef")
-        self.model = os.getenv('MSI_MODEL', "Claude-Sonnet-4")
+        self.model = os.getenv('MSI_MODEL', "ChatGPT4o")
         
         if not self.api_key:
             raise ValueError("MSI_API_KEY not found in environment variables")
@@ -494,7 +494,10 @@ class MSIGenAIOCR:
                 prompt = (
                     "Extract all visible text from this walkie-talkie screen image. "
                     "Ignore all icons/pictograms (especially the music note ♪, battery, or signal bars). Extract TEXT ONLY. "
-                    "EXTREMELY CRITICAL: This is an industrial radio LCD screen. The text may be in a very blocky, segmented, or dot-matrix font. Do NOT mistake large, stylized letters (like 'AF', 'H', or zone indicators) for icons or geometric shapes. You MUST read ALL visible characters, no matter how blocky they look. "
+                    "EXTREMELY CRITICAL: This is an industrial radio LCD screen. The text may be in a very blocky, segmented, or dot-matrix font. "
+                    "Do NOT mistake large, stylized letters (like 'H', or zone indicators) for icons or geometric shapes. "
+                    "EXTREMELY CRITICAL: Pay careful attention to NUMBERS versus LETTERS. Do not hallucinate letters where there are numbers. For example, do not confuse the number '25' with 'AF', '5' with 'S', or '0' with 'O'. Output exactly what is on the screen without guessing. " # <--- ADD THIS INSTRUCTION
+                    "You MUST read ALL visible characters, no matter how blocky they look. "
                     "CRITICAL: You MUST preserve exact leading spaces and indentation for every line! "
                     "CRITICAL: Preserve column separators and layout exactly. "
                     "EXTREMELY CRITICAL: Carefully inspect the text for ANY upside-down or inverted characters. "
@@ -757,15 +760,12 @@ class MSIGenAIOCR:
         
         lines = [line.rstrip() for line in text.split('\n') if line.strip()]
         filtered_lines = []
-        
         for line in lines:
-            if len(line.strip()) < 2:
-                continue
-            alnum_count = sum(1 for c in line if c.isalnum())
-            num_count = sum(1 for c in line if c.isdigit())
-            
-            if alnum_count >= 2 or num_count >= 1:
-                filtered_lines.append(line)
+                alnum_count = sum(1 for c in line if c.isalnum())
+                
+                # Keep the line as long as it contains at least ONE letter or number
+                if alnum_count >= 1:
+                    filtered_lines.append(line)
         
         return '\n'.join(filtered_lines) if filtered_lines else "NO_TEXT"
     
@@ -785,6 +785,8 @@ class MSIGenAIOCR:
             
             # --- VAPORIZE STATUS BAR ICON HALLUCINATIONS ---
             # "MAX" / "JMAX" Signal Indicator misreads
+            ("AF KHZ", "25 KHZ"), # <--- ADD THIS TO FORCE CORRECTION
+            ("AF kHz", "25 kHz"),
             ("JMAX", ""),
             ("MAX", ""),
             ("M A X", ""),

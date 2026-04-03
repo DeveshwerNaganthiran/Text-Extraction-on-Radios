@@ -918,6 +918,7 @@ class VerifyStringGUI:
             self._set_running(False)
             self.status_var.set("Automation Batch Complete")
             self.status_label.configure(fg="green")
+            self._update_summary_ui(self.current_filter)
             return
 
         ips = list(self.ip_listbox.get(0, tk.END))
@@ -1108,7 +1109,18 @@ class VerifyStringGUI:
                 ), tags=(v,))
 
         tot = len(self.all_results_data)
-        self.lbl_stats.config(text=f"Total: {tot} | PASS: {p} | FAIL: {f} | WARN: {w} | SKIP: {s}")
+        
+        time_taken_str = "0.0s"
+        if hasattr(self, 'batch_start_time'):
+            elapsed = time.time() - self.batch_start_time
+            if elapsed > 60:
+                mins = int(elapsed // 60)
+                secs = elapsed % 60
+                time_taken_str = f"{mins}m {secs:.1f}s"
+            else:
+                time_taken_str = f"{elapsed:.1f}s"
+                
+        self.lbl_stats.config(text=f"Total: {tot} | PASS: {p} | FAIL: {f} | WARN: {w} | SKIP: {s} | Time: {time_taken_str}")
 
     def clear_summary_data(self):
         self.all_results_data.clear()
@@ -1597,6 +1609,7 @@ class VerifyStringGUI:
 
     def init_and_run(self):
         self.btn_run.configure(state=tk.DISABLED)
+        self.batch_start_time = time.time()
         
         if self.integration_enable_var.get() and HAS_PYWINAUTO:
             
@@ -1668,6 +1681,8 @@ class VerifyStringGUI:
 
     def run(self):
         self.btn_run.configure(state=tk.DISABLED)
+        if not getattr(self, '_commg_is_active_run', False) or not hasattr(self, 'batch_start_time'):
+            self.batch_start_time = time.time()
         
         try: cmd = self._build_cmd()
         except Exception as e:
@@ -1874,7 +1889,9 @@ class VerifyStringGUI:
                         else: self.status_label.configure(fg="black")
                     except Exception: pass
 
-                    if not will_autostart: self._set_running(False)
+                    if not will_autostart: 
+                        self._set_running(False)
+                        self._update_summary_ui(self.current_filter)
 
                     try:
                         if self._log_fp is not None:

@@ -8,7 +8,8 @@ import unicodedata
 import re
 from pathlib import Path
 import threading
-
+import difflib
+from difflib import SequenceMatcher
 import cv2
 import numpy as np
 import yaml
@@ -918,11 +919,17 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
             except Exception: pass
         return s
 
-    if "index" in [_norm_col(c) for c in df_en.columns]: df_en["__index"] = df_en[next(c for c in df_en.columns if _norm_col(c) == "index")].apply(_coerce_index)
+    # 1. Standard Index Loading (NO ffill!)
+    if "index" in [_norm_col(c) for c in df_en.columns]: 
+        df_en["__index"] = df_en[next(c for c in df_en.columns if _norm_col(c) == "index")].apply(_coerce_index)
     else: raise ValueError("English sheet missing 'index' column")
-    if "index" in [_norm_col(c) for c in df_reg.columns]: df_reg["__index"] = df_reg[next(c for c in df_reg.columns if _norm_col(c) == "index")].apply(_coerce_index)
+
+    if "index" in [_norm_col(c) for c in df_reg.columns]: 
+        df_reg["__index"] = df_reg[next(c for c in df_reg.columns if _norm_col(c) == "index")].apply(_coerce_index)
     else: raise ValueError(f"Region sheet '{region_sheet}' missing 'index' column")
-    if "index" in [_norm_col(c) for c in df_cat.columns]: df_cat["__index"] = df_cat[next(c for c in df_cat.columns if _norm_col(c) == "index")].apply(_coerce_index)
+
+    if "index" in [_norm_col(c) for c in df_cat.columns]: 
+        df_cat["__index"] = df_cat[next(c for c in df_cat.columns if _norm_col(c) == "index")].apply(_coerce_index)
     else: raise ValueError("Category sheet missing 'index' column")
 
     idx = str(index).strip()
@@ -941,37 +948,74 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
             elif n == "tag" or "tag" in low: fallback.append(c)
         return preferred[0] if preferred else (fallback[0] if fallback else "")
 
+    en_tag_col = _find_tag_column(df_en)
+    reg_tag_col = _find_tag_column(df_reg)
+
     idx_region = ""
     if idx:
-        row_en, row_reg, row_cat = df_en[df_en["__index"] == idx], df_reg[df_reg["__index"] == idx], df_cat[df_cat["__index"] == idx]
+        row_en = df_en[df_en["__index"] == idx]
+        row_reg = df_reg[df_reg["__index"] == idx]
+        row_cat = df_cat[df_cat["__index"] == idx]
     elif tag:
-        tag_norm, en_tag_col = str(tag).strip().lower(), _find_tag_column(df_en)
+        tag_norm = str(tag).strip().lower()
         if not en_tag_col: raise ValueError("English sheet missing 'string tag' column")
         row_en_all = df_en[df_en[en_tag_col].astype(str).str.strip().str.lower() == tag_norm]
         if row_en_all.empty: raise ValueError(f"No row found for tag '{tag}' in English sheet")
-        if len(row_en_all) > 1: raise ValueError(f"Multiple rows found for tag '{tag}' in English sheet. Please rerun with --index.")
-        row_en = row_en_all
-        idx = str(row_en.iloc[0]["__index"]).strip()
+        idx = str(row_en_all.iloc[0]["__index"]).strip()
+        row_en = df_en[df_en["__index"] == idx]
         row_cat = df_cat[df_cat["__index"] == idx]
-        reg_tag_col = _find_tag_column(df_reg)
         if not reg_tag_col: row_reg = df_reg[df_reg["__index"] == "__no_match__"]
         else:
-            row_reg_all = df_reg[df_reg[reg_tag_col].astype(str).str.strip().str.lower() == tag_norm]
-            if len(row_reg_all) == 1: row_reg, idx_region = row_reg_all, str(row_reg_all.iloc[0].get("__index", "")).strip()
-            elif len(row_reg_all) > 1: raise ValueError(f"Multiple rows found for tag '{tag}' in region sheet '{region_sheet}'. Please rerun with --index")
-            else: row_reg = row_reg_all
+            row_reg = df_reg[df_reg["__index"] == idx]
+            if not row_reg.empty: idx_region = str(row_reg.iloc[0].get("__index", "")).strip()
     else: raise ValueError("Provide --index or --tag")
 
     if row_en.empty: raise ValueError(f"No English row found for index '{idx}'")
-    en_row, reg_row, cat_row = row_en.iloc[0].to_dict(), row_reg.iloc[0].to_dict() if not row_reg.empty else {}, row_cat.iloc[0].to_dict() if not row_cat.empty else {}
+
+    en_row = row_en.iloc[0].to_dict()
+    reg_row = row_reg.iloc[0].to_dict() if not row_reg.empty else {}
+    cat_row = row_cat.iloc[0].to_dict() if not row_cat.empty else {}
+
+    # 2. SMART SCANNER: Only grabs text from blank rows underneath if it belongs to the SAME tag
+    def _extract_merged_text_safely(df, target_idx, text_col_name, tag_col_name):
+        if not text_col_name or text_col_name not in df.columns: return ""
+        matching_rows = df.index[df["__index"] == target_idx].tolist()
+        if not matching_rows: return ""
+        
+        start_row = matching_rows[0]
+        lines = []
+        
+        # Grab the main row's text
+        val = df.iloc[start_row][text_col_name]
+        if pd.notna(val) and str(val).strip():
+            lines.append(str(val).strip())
+            
+        # Scan downwards for merged/empty continuation rows
+        for r in range(start_row + 1, len(df)):
+            r_idx = df.iloc[r].get("__index", "")
+            r_tag = df.iloc[r].get(tag_col_name, "") if tag_col_name else ""
+            
+            # If we hit a row that has its OWN index or its OWN tag, STOP! We reached the next item.
+            if (pd.notna(r_idx) and str(r_idx).strip() != "") or (pd.notna(r_tag) and str(r_tag).strip() != ""):
+                break
+                
+            # Otherwise, it's a blank continuation row. Grab its text.
+            val = df.iloc[r].get(text_col_name, "")
+            if pd.notna(val) and str(val).strip():
+                lines.append(str(val).strip())
+                
+        return " ".join(lines)
+
     en_text_col = next((c for c in df_en.columns if _norm_col(c) in ["string (english)", "string english", "english", "string"]), None)
     if en_text_col is None: raise ValueError("English sheet missing 'string (english)' column")
 
-    expected_en = "" if pd.isna(en_row.get(en_text_col)) else str(en_row.get(en_text_col) or "")
-    if _norm_col(region_sheet) == _norm_col(english_sheet): expected_local = expected_en
+    expected_en = _extract_merged_text_safely(df_en, idx, en_text_col, en_tag_col)
+    
+    if _norm_col(region_sheet) == _norm_col(english_sheet): 
+        expected_local = expected_en
     else:
         lang_col = _pick_language_column(df_reg, region, language)
-        expected_local = "" if pd.isna(reg_row.get(lang_col)) else str(reg_row.get(lang_col) or "")
+        expected_local = _extract_merged_text_safely(df_reg, idx, lang_col, reg_tag_col)
 
     tag_val = next(("" if pd.isna(en_row.get(c)) else str(en_row.get(c) or "")) for c in df_en.columns if _norm_col(c) in ["string tag", "tag", "stringtag"]) if any(_norm_col(c) in ["string tag", "tag", "stringtag"] for c in df_en.columns) else ""
     cat_val = next(("" if pd.isna(en_row.get(c)) else str(en_row.get(c) or "")) for c in df_en.columns if _norm_col(c) in ["string category", "category"]) if any(_norm_col(c) in ["string category", "category"] for c in df_en.columns) else ""
@@ -1312,6 +1356,7 @@ def main():
 
     total_ocr_time = 0.0
     all_results = []
+    summary_counts = {"PASS": 0, "FAIL": 0, "WARN": 0, "SKIP": 0} # <--- ADD THIS
     
     for idx, roi in enumerate(rois):
         
@@ -1326,6 +1371,7 @@ def main():
         print("=" * 70)
         
         if exp_dict.get("tag") == "SKIP_VERIFY" or exp_dict.get("index") == "SKIP_VERIFY":
+            summary_counts["SKIP"] += 1
             print("Skipping verification for this device as requested via Automation Command.")
             
             if args.summary_excel:
@@ -1339,6 +1385,7 @@ def main():
                         ws.title = "Batch Summary"
                         headers = ["Timestamp", "Device", "Region", "Language", "Index", "Tag", "Expected (English)", "Expected (Local)", "Actual Detected", "Verdict", "Error Message", "ROI Image"]
                         ws.append(headers)
+                        ws.freeze_panes = "A2"
                         
                         header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
                         header_font = Font(color="FFFFFF", bold=True)
@@ -1489,27 +1536,55 @@ def main():
         observed_n = _norm_text(orig_text)
         expected_local_n = _norm_text(exp_dict.get("expected_local", ""))
 
-        ok, warn = False, False
-        if expected_local_n:
-            ok = observed_n == expected_local_n or expected_local_n in observed_n
-            if not ok:
-                try: ok = "".join(observed_n.split()) == "".join(expected_local_n.split()) or "".join(expected_local_n.split()) in "".join(observed_n.split())
-                except Exception: pass
-            if not ok and args.language and str(args.language).strip().lower() in ["japanese", "ja"]:
-                try: warn = _jp_strip_diacritics(observed_n) == _jp_strip_diacritics(expected_local_n)
-                except Exception: pass
+        # 1. Flatten both strings (convert newlines/tabs to single spaces)
+        flat_obs = " ".join(observed_n.split())
+        flat_exp = " ".join(expected_local_n.split())
 
-        verdict = "PASS" if ok else ("WARN" if warn else "FAIL")
+        confidence_pct = 0.0
+        verdict = "FAIL"
+
+        if flat_exp:
+            # 2. Calculate strict confidence percentage using FLATTENED text
+            
+            similarity = difflib.SequenceMatcher(None, flat_exp.lower(), flat_obs.lower()).ratio()
+            confidence_pct = round(similarity * 100, 1)
+
+            # 3. Strict 100% Pass condition (Case-Insensitive Included)
+            if confidence_pct == 100.0 or flat_obs == flat_exp:
+                verdict = "PASS"
+                confidence_pct = 100.0
+            else:
+                # Japanese diacritics warning fallback
+                warn_jp = False
+                if args.language and str(args.language).strip().lower() in ["japanese", "ja"]:
+                    try: warn_jp = _jp_strip_diacritics(flat_obs) == _jp_strip_diacritics(flat_exp)
+                    except Exception: pass
+
+                # Threshold logic: >= 70% is WARN, < 70% is FAIL
+                if warn_jp:
+                    verdict = "WARN"
+                elif confidence_pct >= 70.0:
+                    verdict = "WARN"
+                else:
+                    verdict = "FAIL"
+        else:
+            verdict = "PASS" if not flat_obs else "FAIL"
+
+        # Bundle the confidence into the Actual text so it shows everywhere
+        observed_display = f"{flat_obs} (Conf: {confidence_pct}%)"
+        # --- ADD THIS MISSING BLOCK BACK ---
         exp_lines = [
             f"Expected (English): {exp_dict.get('expected_en','')}",
             f"Expected ({args.region}/{args.language}): {exp_dict.get('expected_local','')}"
         ]
-        
+        # -----------------------------------
         detected_flat = " ".join([ln.strip() for ln in str(orig_text).splitlines() if ln.strip()])
         print(f"Detected: '{detected_flat}'")
         
         print("-" * 70)
-        print(f"Observed (normalized): {observed_n}")
+        print(f"Observed (normalized): {flat_obs}")
+        print(f"Expected (normalized): {flat_exp}")
+        print(f"Match Confidence:      {confidence_pct}%")
         print("-" * 70)
         
         error_msg_display = ""
@@ -1529,13 +1604,63 @@ def main():
             error_msg_display = f"[{err_type_str} ERROR: {words_str}]"
             print(error_msg_display)
         
-        if ok: print("PASS")
-        elif warn: print("WARN")
-        else: print("FAIL")
+        # Populate the Error Message for Excel and GUI
+        if verdict in ["FAIL", "WARN"]:
+            mismatch_reason = ""
+            # Check if there is extra text (e.g. Expected "TXT", Actual "TXT HARM")
+            if len(observed_n) > len(expected_local_n) and expected_local_n in observed_n:
+                extra_text = observed_n.replace(expected_local_n, "").strip()
+                mismatch_reason = f"Extra text detected: '{extra_text}'"
+            # Check if text is missing
+            elif len(observed_n) < len(expected_local_n) and observed_n in expected_local_n:
+                mismatch_reason = "Missing part of the expected text."
+            # Otherwise it's a spelling or hallucination error
+            else:
+                mismatch_reason = "Text misspelled or completely changed."
 
-        if not ok and not warn:
-            print("Expected (normalized):")
-            print(expected_local_n)
+            text_err = f"Mismatch (Conf: {confidence_pct}%): {mismatch_reason}"
+            
+            # Combine with existing layout errors if any exist
+            if error_msg_display:
+                error_msg_display += f" | {text_err}"
+            else:
+                error_msg_display = text_err
+                
+            print(f"[VERDICT REASON] {text_err}")
+
+        if verdict == "PASS": print("PASS")
+        elif verdict == "WARN": print("WARN")
+        else: print("FAIL")
+        summary_counts[verdict] += 1
+
+        # Populate the Error Message for Excel and GUI
+        if verdict in ["FAIL", "WARN"]:
+            mismatch_reason = ""
+            # Check if there is extra text
+            if len(flat_obs) > len(flat_exp) and flat_exp.lower() in flat_obs.lower():
+                
+                extra_text = re.sub(re.escape(flat_exp), "", flat_obs, flags=re.IGNORECASE).strip()
+                mismatch_reason = f"Extra text detected: '{extra_text}'"
+            # Check if text is missing
+            elif len(flat_obs) < len(flat_exp) and flat_obs.lower() in flat_exp.lower():
+                mismatch_reason = "Missing part of the expected text."
+            # Otherwise it's a spelling or hallucination error
+            else:
+                mismatch_reason = "Text misspelled or completely changed."
+
+            text_err = f"Mismatch (Conf: {confidence_pct}%): {mismatch_reason}"
+            
+            # Combine with existing layout errors if any exist
+            if error_msg_display:
+                error_msg_display += f" | {text_err}"
+            else:
+                error_msg_display = text_err
+                
+            print(f"[VERDICT REASON] {text_err}")
+
+        if verdict == "PASS": print("PASS")
+        elif verdict == "WARN": print("WARN")
+        else: print("FAIL")
 
         # -------------------------------------------------------------
         # NEW BATCH SAVING & SORTING LOGIC
@@ -1597,9 +1722,9 @@ def main():
                     args.language,
                     exp_dict.get('index', ''),
                     exp_dict.get('tag', ''),
-                    exp_dict.get('expected_en', ''),
-                    expected_local_n,
-                    observed_n,
+                    " ".join(str(exp_dict.get('expected_en', '')).split()), # Flatten English too
+                    flat_exp, # <--- USE FLATTENED LOCAL EXPECTED
+                    observed_display,
                     verdict,
                     error_msg_display,
                     "" # Blank cell to hold the image
@@ -1646,8 +1771,8 @@ def main():
             "device": dev_name,
             "index": exp_dict.get('index', ''),
             "tag": exp_dict.get('tag', ''),
-            "expected": expected_local_n,
-            "actual": observed_n,
+            "expected": flat_exp, # <--- USE FLATTENED EXPECTED
+            "actual": observed_display,
             "verdict": verdict,
             "error": error_msg_display
         }
@@ -1657,6 +1782,60 @@ def main():
             "roi": roi, "orig_text": orig_text, "eng_text": eng_text, "lang_detected": lang_detected,
             "verdict": verdict, "exp_lines": exp_lines, "dev_name": dev_name, "error_msg": error_msg_display
         })
+        
+    # --- END OF ROI LOOP ---
+    
+    t_end_total = time.time()
+    time_taken = round(t_end_total - t0_total, 2)
+
+    # 1. Print to Terminal (This automatically writes to the .log file)
+    print("\n" + "=" * 70)
+    print("EXECUTION SUMMARY")
+    print("=" * 70)
+    print(f"Total Devices Checked: {len(rois)}")
+    print(f"PASS: {summary_counts['PASS']} | FAIL: {summary_counts['FAIL']} | WARN: {summary_counts['WARN']} | SKIP: {summary_counts['SKIP']}")
+    print(f"Total Time Taken: {time_taken} seconds")
+    print("=" * 70 + "\n")
+
+    # 2. Write Summary to Excel
+    if args.summary_excel:
+        xl_p = Path(args.summary_excel)
+        try:
+            from openpyxl import load_workbook
+            from openpyxl.styles import PatternFill, Font, Alignment
+            if xl_p.exists():
+                wb = load_workbook(xl_p)
+                ws = wb.active
+                
+                # Append a blank row as a visual separator
+                ws.append([])
+                
+                # Create the summary row
+                summary_row = [
+                    f"Summary ({time.strftime('%H:%M:%S')})", 
+                    f"Time: {time_taken}s", 
+                    f"PASS: {summary_counts['PASS']}", 
+                    f"FAIL: {summary_counts['FAIL']}", 
+                    f"WARN: {summary_counts['WARN']}", 
+                    f"SKIP: {summary_counts['SKIP']}",
+                    "", "", "", "", "", ""
+                ]
+                ws.append(summary_row)
+                
+                row_idx = ws.max_row
+                summary_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+                summary_font = Font(bold=True)
+                
+                # Apply styling to the summary cells (Cols 1 to 6)
+                for col_num in range(1, 7):
+                    cell = ws.cell(row=row_idx, column=col_num)
+                    cell.fill = summary_fill
+                    cell.font = summary_font
+                    cell.alignment = Alignment(horizontal="center", vertical="center")
+                    
+                wb.save(xl_p)
+        except Exception as e:
+            print(f"[WARNING] Failed to write summary to Excel: {e}")
 
     for res in all_results:
         try: _show_ocr_result_window(res["roi"], res["orig_text"], res["eng_text"], res["lang_detected"], res["verdict"], expected_lines=res["exp_lines"], device_name=res["dev_name"], error_msg=res.get("error_msg", ""))
