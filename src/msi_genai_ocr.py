@@ -889,7 +889,11 @@ class MSIGenAIOCR:
             ("HI AX", ""),
             ("M1 A", ""),
             ("FMAS", ""),
+            ("M A", ""),
             ("||4", ""),
+            ("CH A5", ""),
+            ("CH 3 []", ""),
+            ("M A F", ""),
             ("14▲", ""),    # number 1
             ("l4▲", ""),    # lowercase L
             ("I4▲", ""),    # capital I

@@ -16,7 +16,8 @@ import re
 import yaml
 import pandas as pd
 
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
+from openpyxl.styles import PatternFill, Font, Alignment
 
 import sys
 sys.coinit_flags = 2  # Forces COM initialization to STA mode to prevent Tkinter crashes
@@ -126,10 +127,11 @@ def _probe_camera_ids(max_id: int = 5) -> list[tuple[str, str]]:
             except Exception: pass
     return found
 
+
 def _norm_col(s: str) -> str:
     v = str(s or "").strip().lower().replace("_", " ")
     v = re.sub(r"[\(\)\[\]\{\}:,;/\\\-]+", " ", v)
-    v = "join(v.split())"
+    v = " ".join(v.split())
     if v.startswith("string "):
         v = v[len("string ") :].strip()
     if v.startswith("str "):
@@ -224,7 +226,6 @@ def _build_index_to_tag_map(excel_path: str) -> dict:
     try:
         xls = pd.ExcelFile(excel_path, engine="openpyxl")
         
-        # 1. Find the English sheet dynamically
         target = "english"
         sheet_name = None
         for s in xls.sheet_names:
@@ -240,10 +241,8 @@ def _build_index_to_tag_map(excel_path: str) -> dict:
             
         df = pd.read_excel(xls, sheet_name=sheet_name, engine="openpyxl")
         
-        # 2. Find Index Column
         idx_col = next((c for c in df.columns if _norm_col(c) == "index"), None)
         
-        # 3. Find Tag Column
         preferred, fallback = [], []
         for c in df.columns:
             low, n = str(c or "").strip().lower(), _norm_col(c)
@@ -254,7 +253,6 @@ def _build_index_to_tag_map(excel_path: str) -> dict:
         if not idx_col or not tag_col: 
             return {}
             
-        # 4. Build Dictionary mapping Index -> Tag
         mapping = {}
         for _, row in df.iterrows():
             idx_val = row[idx_col]
@@ -269,7 +267,6 @@ def _build_index_to_tag_map(excel_path: str) -> dict:
             if tv.lower() == 'nan' or not tv: 
                 continue
                 
-            # Clean up index to match
             if iv.endswith(".0"): 
                 try: iv = str(int(float(iv)))
                 except Exception: pass
@@ -277,7 +274,6 @@ def _build_index_to_tag_map(excel_path: str) -> dict:
                 try: iv = str(int(iv))
                 except Exception: pass
                 
-            # --- THE FIX: Only map the FIRST occurrence to match verify_string.py ---
             if iv not in mapping:
                 mapping[iv] = tv
             
@@ -379,7 +375,7 @@ class VerifyStringGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("Verify String (Walkie-Tracker + Automation Integration)")
-        self.root.minsize(1000, 850)
+        self.root.minsize(1050, 900)
 
         self._auto_start_verify = False
         self._last_run_is_verification = True
@@ -418,6 +414,8 @@ class VerifyStringGUI:
         self.language_var = tk.StringVar(value=str(self._settings.get("language") or "Japanese"))
         self.tag_var = tk.StringVar(value=str(self._settings.get("tag") or ""))
         self.index_var = tk.StringVar(value=str(self._settings.get("index") or ""))
+        
+        self.index_var.trace_add("write", self._on_index_changed)
         
         tk.Label(frm, text="Excel (.xlsm/.xlsx)").grid(row=row, column=0, sticky="w")
         tk.Entry(frm, textvariable=self.excel_var, width=60).grid(row=row, column=1, sticky="we", padx=(8, 8))
@@ -550,21 +548,19 @@ class VerifyStringGUI:
         self.lf_devices.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
 
         self.device_rows = []
-        self.selected_device_id = tk.IntVar(value=0)
 
-        tk.Label(self.lf_devices, text="").grid(row=0, column=0, sticky="w")
-        tk.Label(self.lf_devices, text="ID").grid(row=0, column=1, sticky="w")
-        tk.Label(self.lf_devices, text="Name").grid(row=0, column=2, sticky="w")
+        tk.Label(self.lf_devices, text="ID").grid(row=0, column=0, sticky="w", padx=(0, 10))
+        tk.Label(self.lf_devices, text="Name").grid(row=0, column=1, sticky="w")
 
         dev_btns = tk.Frame(self.lf_devices)
-        dev_btns.grid(row=0, column=3, rowspan=5, sticky="ne", padx=(12, 0))
+        dev_btns.grid(row=0, column=2, rowspan=5, sticky="ne", padx=(12, 0))
         tk.Label(dev_btns, text="Devices auto-sync\nwith IP addresses", fg="gray", font=("Arial", 8)).pack(fill="x", pady=(8, 2))
 
         self._sync_devices_to_ips(initial_load=True)
         row += 1
 
         # -------------------------------------------------------------
-        # ACTIONS & LOGS
+        # ACTIONS
         # -------------------------------------------------------------
         btns = tk.Frame(frm)
         btns.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
@@ -583,8 +579,21 @@ class VerifyStringGUI:
         self.status_label.grid(row=row, column=0, columnspan=3, sticky="we", pady=(8, 0))
         row += 1
 
-        self.output = tk.Text(frm, height=18, wrap=tk.WORD)
-        self.output.grid(row=row, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
+        # -------------------------------------------------------------
+        # TABBED LOGS & SUMMARY VIEW
+        # -------------------------------------------------------------
+        self.notebook = ttk.Notebook(frm)
+        self.notebook.grid(row=row, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
+
+        # --- TAB 1: Raw Execution Log ---
+        self.tab_log = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_log, text="Execution Log")
+        
+        self.output = tk.Text(self.tab_log, height=15, wrap=tk.WORD)
+        log_scroll = ttk.Scrollbar(self.tab_log, command=self.output.yview)
+        self.output.configure(yscrollcommand=log_scroll.set)
+        self.output.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         self.output.tag_configure("pass", foreground="#1B5E20")
         self.output.tag_configure("fail", foreground="#B71C1C")
@@ -592,6 +601,56 @@ class VerifyStringGUI:
         self.output.tag_configure("cmd", foreground="#1565C0")
         self.output.tag_configure("error", foreground="#B71C1C")
         self.output.tag_configure("commg", foreground="#800080")
+
+        # --- TAB 2: Results Summary ---
+        self.tab_summary = ttk.Frame(self.notebook)
+        self.notebook.add(self.tab_summary, text="Results Summary")
+
+        self.summary_top = tk.Frame(self.tab_summary)
+        self.summary_top.pack(fill=tk.X, padx=5, pady=5)
+        
+        self.lbl_stats = tk.Label(self.summary_top, text="Total: 0 | PASS: 0 | FAIL: 0 | WARN: 0 | SKIP: 0", font=('Arial', 10, 'bold'))
+        self.lbl_stats.pack(side=tk.LEFT)
+
+        self.current_filter = "ALL"
+        
+        tk.Button(self.summary_top, text="Clear Summary", command=self.clear_summary_data).pack(side=tk.RIGHT, padx=(10, 2))
+        tk.Button(self.summary_top, text="Show All", command=lambda: self.filter_tree("ALL")).pack(side=tk.RIGHT, padx=2)
+        tk.Button(self.summary_top, text="Show Fails", bg="#FFCCCB", command=lambda: self.filter_tree("FAIL")).pack(side=tk.RIGHT, padx=2)
+        tk.Button(self.summary_top, text="Show Passes", bg="#90EE90", command=lambda: self.filter_tree("PASS")).pack(side=tk.RIGHT, padx=2)
+
+        tree_columns = ("device", "index", "tag", "expected", "actual", "verdict", "error")
+        self.tree = ttk.Treeview(self.tab_summary, columns=tree_columns, show="headings", height=15)
+        
+        self.tree.heading("device", text="Device")
+        self.tree.heading("index", text="Index")
+        self.tree.heading("tag", text="Tag")
+        self.tree.heading("expected", text="Expected")
+        self.tree.heading("actual", text="Actual")
+        self.tree.heading("verdict", text="Verdict")
+        self.tree.heading("error", text="Error Details")
+
+        self.tree.column("device", width=120, anchor=tk.CENTER)
+        self.tree.column("index", width=80, anchor=tk.CENTER)
+        self.tree.column("tag", width=120)
+        self.tree.column("expected", width=200)
+        self.tree.column("actual", width=200)
+        self.tree.column("verdict", width=80, anchor=tk.CENTER)
+        self.tree.column("error", width=250)
+
+        tree_scroll = ttk.Scrollbar(self.tab_summary, command=self.tree.yview)
+        self.tree.configure(yscrollcommand=tree_scroll.set)
+        self.tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        tree_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.tree.tag_configure("PASS", background="#E8F5E9") 
+        self.tree.tag_configure("FAIL", background="#FFEBEE") 
+        self.tree.tag_configure("WARN", background="#FFF3E0") 
+        self.tree.tag_configure("SKIP", background="#EEEEEE")
+
+        self.tree.bind("<Double-1>", self.on_tree_double_click)
+
+        self.all_results_data = []
 
         frm.grid_columnconfigure(1, weight=1)
         frm.grid_rowconfigure(row, weight=1)
@@ -612,7 +671,25 @@ class VerifyStringGUI:
 
         self.root.after(50, self._drain_queue)
 
-    # --- Automation / CommG / CMD Specific Methods ---
+    def _on_index_changed(self, *args):
+        if getattr(self, "_commg_is_active_run", False): return
+        
+        idx = self.index_var.get().strip()
+        if not idx or "," in idx: return
+        
+        if not getattr(self, "_index_to_tag_cache", None):
+            try:
+                self._index_to_tag_cache = _build_index_to_tag_map(self.excel_var.get().strip())
+            except Exception:
+                self._index_to_tag_cache = {}
+                
+        clean_idx = idx
+        if clean_idx.isdigit(): clean_idx = str(int(clean_idx))
+        
+        tag = self._index_to_tag_cache.get(clean_idx, "")
+        if tag and self.tag_var.get() != tag:
+            self.tag_var.set(tag)
+
     def _commg_add_ip(self):
         new_ip = self.new_ip_entry.get().strip()
         if not new_ip:
@@ -805,19 +882,15 @@ class VerifyStringGUI:
             try:
                 self.q.put(f"[CMD] Opening background connection to {ip}...\n")
                 
-                # 1. Connect natively in the background (No CMD window opens)
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(5.0)
                 s.connect((ip, port))
                 
-                # Wait briefly for the prompt to be ready
                 time.sleep(1.0)
                 
-                # 2. Inject payload directly over the network
                 s.sendall(f"{payload}\r\n".encode('ascii'))
                 self.q.put(f"[CMD] Sent {payload} to {ip} (Session running invisibly)\n")
                 
-                # Track the socket so we can close it later
                 self.active_sockets.append(s)
             
             except Exception as inner_e:
@@ -874,7 +947,6 @@ class VerifyStringGUI:
                 
             cmds.append(str(cmd).strip())
             
-            # Clean up tag
             tag = str(tag).strip()
             if tag.lower() == 'nan':
                 tag = ""
@@ -918,50 +990,38 @@ class VerifyStringGUI:
 
         threading.Thread(target=self._integration_send_command_thread, args=(cmds,), daemon=True).start()
 
-    # --- Device List Methods ---
     def _regrid_device_rows(self):
         for idx, row in enumerate(self.device_rows):
             row_idx = idx + 1
             widgets = row.get("widgets") or ()
-            if len(widgets) >= 3:
-                rb, lbl_id, ent_name = widgets[:3]
-                rb.grid(row=row_idx, column=0, sticky="w", padx=(0, 6), pady=2)
-                lbl_id.grid(row=row_idx, column=1, sticky="w", padx=(0, 10), pady=2)
-                ent_name.grid(row=row_idx, column=2, sticky="ew", pady=2)
+            if len(widgets) >= 2:
+                lbl_id, ent_name = widgets[:2]
+                lbl_id.grid(row=row_idx, column=0, sticky="w", padx=(0, 10), pady=2)
+                ent_name.grid(row=row_idx, column=1, sticky="ew", pady=2)
 
     def _renumber_device_rows(self):
         for idx, row in enumerate(self.device_rows):
             new_id = idx + 1
             row["id"] = int(new_id)
             widgets = row.get("widgets") or ()
-            if len(widgets) >= 2:
-                rb, lbl_id = widgets[0], widgets[1]
+            if len(widgets) >= 1:
+                lbl_id = widgets[0]
                 try:
-                    rb.configure(value=int(new_id))
                     lbl_id.configure(text=f"D{int(new_id)}")
                 except Exception:
                     pass
 
     def _add_device_row(self, did: int, name: str = ""):
-        row_idx = len(self.device_rows) + 1
         var_name = tk.StringVar(value=str(name or ""))
 
-        rb = tk.Radiobutton(self.lf_devices, variable=self.selected_device_id, value=int(did))
         lbl_id = tk.Label(self.lf_devices, text=f"D{int(did)}")
         ent_name = tk.Entry(self.lf_devices, textvariable=var_name, width=30)
-
-        rb.grid(row=row_idx, column=0, sticky="w", padx=(0, 6), pady=2)
-        lbl_id.grid(row=row_idx, column=1, sticky="w", padx=(0, 10), pady=2)
-        ent_name.grid(row=row_idx, column=2, sticky="ew", pady=2)
 
         self.device_rows.append({
             "id": int(did),
             "var_name": var_name,
-            "widgets": (rb, lbl_id, ent_name),
+            "widgets": (lbl_id, ent_name),
         })
-
-        if int(self.selected_device_id.get() or 0) == 0:
-            self.selected_device_id.set(int(did))
 
     def _sync_devices_to_ips(self, initial_load=False):
         ips = list(self.ip_listbox.get(0, tk.END))
@@ -990,10 +1050,7 @@ class VerifyStringGUI:
 
         self._regrid_device_rows()
         self._renumber_device_rows()
-        if self.device_rows and int(self.selected_device_id.get() or 0) == 0:
-            self.selected_device_id.set(1)
 
-    # --- Directory Handlers ---
     def browse_excel(self):
         p = filedialog.askopenfilename(
             title="Select Excel file",
@@ -1001,7 +1058,7 @@ class VerifyStringGUI:
         )
         if p:
             self.excel_var.set(p)
-            self._index_to_tag_cache = {}  # <-- ADD THIS LINE to clear the cache
+            self._index_to_tag_cache = {}  
             try:
                 self.refresh_languages()
                 self.refresh_tags()
@@ -1017,11 +1074,9 @@ class VerifyStringGUI:
     def browse_log(self):
         d = filedialog.askdirectory(title="Select Log Folder")
         if d:
-            # Convert to absolute path and normalize to prevent crashes during mkdir
             normalized_path = str(Path(d).resolve())
             self.log_path_var.set(normalized_path)
 
-    # --- Append Logs ---
     def _append(self, s: str):
         self.output.insert(tk.END, s)
         self.output.see(tk.END)
@@ -1030,8 +1085,78 @@ class VerifyStringGUI:
         self.output.insert(tk.END, s, ("cmd",))
         self.output.see(tk.END)
 
+    def filter_tree(self, filter_val):
+        self.current_filter = filter_val
+        self._update_summary_ui(filter_val)
+
+    def _update_summary_ui(self, filter_val="ALL"):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        p, f, w, s = 0, 0, 0, 0
+        for d in self.all_results_data:
+            v = d.get("verdict", "")
+            if v == "PASS": p += 1
+            elif v == "FAIL": f += 1
+            elif v == "WARN": w += 1
+            elif v == "SKIP": s += 1
+
+            if filter_val == "ALL" or filter_val == v:
+                self.tree.insert("", tk.END, values=(
+                    d.get("device"), d.get("index"), d.get("tag"),
+                    d.get("expected"), d.get("actual"), v, d.get("error")
+                ), tags=(v,))
+
+        tot = len(self.all_results_data)
+        self.lbl_stats.config(text=f"Total: {tot} | PASS: {p} | FAIL: {f} | WARN: {w} | SKIP: {s}")
+
+    def clear_summary_data(self):
+        self.all_results_data.clear()
+        self._update_summary_ui("ALL")
+
+    def on_tree_double_click(self, event):
+        item = self.tree.selection()
+        if not item: return
+        item = item[0]
+        values = self.tree.item(item, "values")
+        if not values: return
+
+        top = tk.Toplevel(self.root)
+        top.title(f"Details - {values[0]}")
+        top.geometry("600x400")
+
+        txt = tk.Text(top, wrap=tk.WORD, font=("Arial", 11), padx=10, pady=10)
+        txt.pack(fill=tk.BOTH, expand=True)
+
+        content = f"DEVICE: {values[0]}\n"
+        content += f"INDEX: {values[1]}\n"
+        content += f"TAG: {values[2]}\n"
+        content += f"VERDICT: {values[5]}\n"
+        content += "-" * 50 + "\n"
+        content += f"EXPECTED:\n{values[3]}\n"
+        content += "-" * 50 + "\n"
+        content += f"ACTUAL:\n{values[4]}\n"
+        if values[6] and values[6].strip():
+            content += "-" * 50 + "\n"
+            content += f"ERROR DETAILS:\n{values[6]}\n"
+
+        txt.insert(tk.END, content)
+        txt.config(state=tk.DISABLED)
+
     def _append_line_with_result_color(self, line: str):
         stripped = (line or "").strip()
+        
+        # Intercept the JSON payload sent by verify_string.py
+        if "[GUI_RESULT]" in stripped:
+            try:
+                json_str = stripped.split("[GUI_RESULT]")[1].strip()
+                data = json.loads(json_str)
+                self.all_results_data.append(data)
+                self._update_summary_ui(self.current_filter)
+            except Exception:
+                pass
+            return
+
         low = stripped.lower()
 
         if stripped.startswith("Expected (") and "):" in stripped:
@@ -1075,16 +1200,13 @@ class VerifyStringGUI:
         self.output.see(tk.END)
         
         is_gui_msg = stripped.startswith("[CommG]") or stripped.startswith("[CMD]") or stripped.startswith("[GUI")
-        # Trigger recording only when the main verification block starts
         if "RADIO STRING VERIFICATION - DETECTED" in stripped:
             self._is_recording_log = True
             try:
                 if self._log_fp is not None:
-                    # Manually write the top border line that precedes this trigger
                     self._log_fp.write("=" * 70 + "\n")
             except Exception: pass
 
-        # Write to the file only if the recording flag is True
         try:
             if self._log_fp is not None and getattr(self, "_is_recording_log", False) and not is_gui_msg:
                 self._log_fp.write(line)
@@ -1298,7 +1420,6 @@ class VerifyStringGUI:
         return cmd
 
     def _run_subprocess(self, cmd, *, is_verification: bool = True):
-        # Prevent multiple threads running at once
         if hasattr(self, "proc_thread") and self.proc_thread and self.proc_thread.is_alive():
             messagebox.showinfo("Running", "A process is already running. Wait for it to finish.")
             return
@@ -1324,20 +1445,7 @@ class VerifyStringGUI:
 
         if self.save_log_var.get() and bool(is_verification):
             if getattr(self, "_commg_is_active_run", False) and getattr(self, "_batch_log_dir", None):
-                import re
-                # Use the indices of the commands to name the folder instead of the raw command
-                idx_str = (self.index_var.get() or "Unknown").strip()
-                # Clean invalid characters and replace commas with underscores (e.g. "0528_1243_1093")
-                safe_folder_name = re.sub(r'[\\/*?:"<>|, ]', '_', idx_str)
-                # Fallback if no indices are found
-                if not safe_folder_name.strip('_'):
-                    safe_folder_name = "Unknown_Command"
-                    
-                self._log_session_dir = str(Path(self._batch_log_dir) / safe_folder_name)
-                try: 
-                    Path(self._log_session_dir).mkdir(parents=True, exist_ok=True)
-                except Exception: 
-                    self._log_session_dir = self._batch_log_dir
+                self._log_session_dir = self._batch_log_dir
             else:
                 d = (self.log_path_var.get() or "").strip()
                 if not d:
@@ -1356,9 +1464,13 @@ class VerifyStringGUI:
                 except Exception: self._log_session_dir = d
 
             ts = time.strftime("%Y%m%d_%H%M%S")
-            safe_tag = (self.tag_var.get() or "").strip()
-            safe_tag = "".join([c for c in safe_tag if c.isalnum() or c in ["_", "-"]])[:40]
-            name = f"verify_string_{ts}.log" if not safe_tag else f"verify_string_{safe_tag}_{ts}.log"
+            if getattr(self, "_commg_is_active_run", False):
+                name = "batch_execution_full.log"
+            else:
+                safe_tag = (self.tag_var.get() or "").strip()
+                safe_tag = "".join([c for c in safe_tag if c.isalnum() or c in ["_", "-"]])[:40]
+                name = f"verify_string_{ts}.log" if not safe_tag else f"verify_string_{safe_tag}_{ts}.log"
+                
             p = str(Path(self._log_session_dir) / name)
             try:
                 Path(p).parent.mkdir(parents=True, exist_ok=True)
@@ -1372,19 +1484,11 @@ class VerifyStringGUI:
 
         try:
             if self.save_log_var.get() and bool(is_verification) and self._log_session_dir:
-                has_save_roi = "--save-roi" in cmd
-                if not has_save_roi:
-                    ts = time.strftime("%Y%m%d_%H%M%S")
-                    safe_tag = (self.tag_var.get() or "").strip()
-                    safe_tag = "".join([c for c in safe_tag if c.isalnum() or c in ["_", "-"]])[:40]
-                    idx = (self.index_var.get() or "").strip()
-                    # Keep suffix safe if there are multiple indices
-                    safe_idx = idx.replace(",", "_").replace(" ", "")
-                    suffix = safe_tag or ("idx" + safe_idx if safe_idx else "roi")
-                    roi_path = str(Path(self._log_session_dir) / f"roi_{suffix}_{ts}.jpg")
-                    cmd = list(cmd) + ["--save-roi", roi_path]
+                cmd = list(cmd) + ["--save-roi-dir", self._log_session_dir]
+                excel_path = str(Path(self._log_session_dir) / "Batch_Summary_Report.xlsx")
+                cmd = list(cmd) + ["--summary-excel", excel_path]
         except Exception as e:
-            self.q.put(f"[GUI ERROR] Failed to initialize log: {e}\n")
+            self.q.put(f"[GUI ERROR] Failed to initialize log paths: {e}\n")
             self._log_fp = None
 
         env = os.environ.copy()
@@ -1402,25 +1506,19 @@ class VerifyStringGUI:
                 json.dump({"devices": devices}, f, indent=2, ensure_ascii=False)
         except Exception: pass
 
-        # --- OPTION A THREAD WORKER ---
         def _worker():
-            # Figure out which embedded module to run
             module_name = 'verify_string' if is_verification else 'init_genai_session'
             
-            # Mock sys.argv so argparse in the target scripts still works perfectly
             old_argv = sys.argv
             sys.argv = [module_name] + cmd[2:]
             
-            # Setup environment variables for this thread
             old_env = os.environ.copy()
             os.environ.update(env)
             
             q_stream = _QueueStream(self.q)
             
             try:
-                # Intercept print() and route it to the GUI queue
                 with redirect_stdout(q_stream), redirect_stderr(q_stream):
-                    # Run the bundled script as if it was executed from terminal
                     runpy.run_module(module_name, run_name="__main__")
                 self.q.put((_EVT_FINISHED, 0))
             except SystemExit as e:
@@ -1434,7 +1532,6 @@ class VerifyStringGUI:
                 os.environ.clear()
                 os.environ.update(old_env)
 
-        # Launching thread instead of subprocess
         self.proc = None
         self.proc_thread = threading.Thread(target=_worker, daemon=True)
         self.proc_thread.start()
@@ -1442,7 +1539,7 @@ class VerifyStringGUI:
     def run_camera_test(self):
         env = os.environ.copy()
         camera_name = self.camera_id_var.get().strip()
-        camera_id = 0 # Default fallback
+        camera_id = 0
         if camera_name:
             camera_id = getattr(self, "_camera_map", {}).get(camera_name, camera_name)
             env["WALKIE_CAMERA_ID"] = str(camera_id)
@@ -1464,15 +1561,11 @@ class VerifyStringGUI:
         self.q.put(f"\n[INFO] Launching Live Camera Preview... (Camera: {camera_name})\n")
         self.q.put("[INFO] 💡 LEFT-CLICK a box to select it, then LEFT-CLICK another box to SWAP their device names!\n")
         
-        # --- OPTION A THREAD WORKER ---
         def _cam_worker():
             old_argv = sys.argv
             model_p = self.model_path_var.get().strip()
             
-            # Start verify_string in preview mode to use our custom mouse clicking
             sys.argv = ['verify_string', '--preview', '--excel', 'dummy.xlsx', '--region', 'APAC', '--language', 'dummy']
-            
-            # FIX: Explicitly pass the selected camera ID to the background script!
             sys.argv.extend(['--camera-id', str(camera_id)])
             
             if model_p:
@@ -1503,29 +1596,27 @@ class VerifyStringGUI:
         self._run_subprocess(cmd, is_verification=False)
 
     def init_and_run(self):
-        # -- NEW: Immediately disable start button --
         self.btn_run.configure(state=tk.DISABLED)
         
-        # Setup Automation Batch if enabled
         if self.integration_enable_var.get() and HAS_PYWINAUTO:
             
             if not list(self.ip_listbox.get(0, tk.END)):
                 messagebox.showwarning("No IPs", "Please add at least one IP address to the list before starting!")
-                self.btn_run.configure(state=tk.NORMAL) # Re-enable on error
+                self.btn_run.configure(state=tk.NORMAL) 
                 return
 
             if self.commg_mode_var.get() == "Single":
                 c = self.commg_custom_cmd_var.get().strip()
                 if not c:
                     messagebox.showerror("Error", "Please enter a Custom Command.")
-                    self.btn_run.configure(state=tk.NORMAL) # Re-enable on error
+                    self.btn_run.configure(state=tk.NORMAL) 
                     return
                 self._commg_pending_queue = [c]
             else:
                 bf = self.commg_batch_file_var.get().strip()
                 if not bf or not os.path.exists(bf):
                     messagebox.showerror("Error", "Please select a valid Batch File.")
-                    self.btn_run.configure(state=tk.NORMAL) # Re-enable on error
+                    self.btn_run.configure(state=tk.NORMAL) 
                     return
                 try:
                     if bf.lower().endswith('.csv'): df = pd.read_csv(bf, header=None)
@@ -1540,19 +1631,22 @@ class VerifyStringGUI:
                         
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to load Batch File: {e}")
-                    self.btn_run.configure(state=tk.NORMAL) # Re-enable on error
+                    self.btn_run.configure(state=tk.NORMAL) 
                     return
                     
             if not self._commg_pending_queue:
                 messagebox.showwarning("Warning", "No commands found in the batch file.")
-                self.btn_run.configure(state=tk.NORMAL) # Re-enable on error
+                self.btn_run.configure(state=tk.NORMAL) 
                 return
+            
+            # Start of a new batch -> clear the summary table & switch to it
+            self.clear_summary_data()
+            self.notebook.select(self.tab_summary)
             
             self._commg_is_active_run = True
             tool = self.integration_type_var.get()
             self.q.put(f"[{tool}] Initialized batch with {len(self._commg_pending_queue)} items.\n", ("commg",))
 
-            # Create a single log folder for the whole batch
             if self.save_log_var.get():
                 d = (self.log_path_var.get() or "").strip()
                 if not d:
@@ -1573,7 +1667,6 @@ class VerifyStringGUI:
         self.init_genai()
 
     def run(self):
-        # -- NEW: Immediately disable start button --
         self.btn_run.configure(state=tk.DISABLED)
         
         try: cmd = self._build_cmd()
@@ -1590,13 +1683,11 @@ class VerifyStringGUI:
 
     def stop(self, skip_prompt=False):
         if not skip_prompt:
-            # Create a custom popup dialog
             dialog = tk.Toplevel(self.root)
             dialog.title("Process Control")
-            dialog.transient(self.root) # Make it stay on top of the main window
-            dialog.grab_set()           # Block interactions with the main window
+            dialog.transient(self.root) 
+            dialog.grab_set()           
             
-            # Try to center the dialog over the main window
             try:
                 x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 150
                 y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 60
@@ -1609,12 +1700,10 @@ class VerifyStringGUI:
             action = {"result": "continue"}
             
             def on_continue():
-                # User chose to continue; dismiss dialog and do nothing else
                 action["result"] = "continue"
                 dialog.destroy()
                 
             def on_stop():
-                # User chose to stop; confirm with a secondary warning
                 if messagebox.askyesno("Confirm Stop", "Are you sure to stop?", parent=dialog):
                     action["result"] = "stop"
                     dialog.destroy()
@@ -1622,24 +1711,19 @@ class VerifyStringGUI:
             btn_frame = tk.Frame(dialog)
             btn_frame.pack(fill=tk.BOTH, expand=True)
             
-            # Add the Continue and Stop buttons
             tk.Button(btn_frame, text="Continue", command=on_continue, width=10, bg="#90EE90", font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=30)
             tk.Button(btn_frame, text="Stop", command=on_stop, width=10, bg="#FFCCCB", font=('Arial', 9, 'bold')).pack(side=tk.RIGHT, padx=30)
             
-            # If the user clicks the 'X' to close the window, treat it as "Continue"
             dialog.protocol("WM_DELETE_WINDOW", on_continue)
             
-            # Wait for the user to make a choice
             self.root.wait_window(dialog)
             
-            # If the result isn't exactly "stop", we just return and let the app continue
             if action["result"] != "stop":
                 return
                 
         self._commg_pending_queue = []
         self._commg_is_active_run = False
         
-        # Cleanup lingering background sockets if stopped midway
         if getattr(self, "active_sockets", []):
             for s in self.active_sockets:
                 try:
@@ -1658,7 +1742,6 @@ class VerifyStringGUI:
             while True:
                 s = self.q.get_nowait()
                 
-                # Intercept Automation Command Done
                 if isinstance(s, tuple) and len(s) == 2 and s[0] == _EVT_COMMG_DONE:
                     if s[1] == "ABORT":
                         self._commg_is_active_run = False
@@ -1675,6 +1758,63 @@ class VerifyStringGUI:
                                 
                         if all_skip:
                             self.q.put("[GUI] Skipping verification phase as requested for all.\n", ("commg",))
+                            
+                            ips = list(self.ip_listbox.get(0, tk.END))
+                            skip_records = []
+                            for i, (t, idx) in enumerate(zip(self.tag_var.get().split(","), self.index_var.get().split(","))):
+                                dev_nm = ips[i] if i < len(ips) else f"Device {i+1}"
+                                payload = {"device": dev_nm, "index": idx, "tag": t, "expected": "-", "actual": "-", "verdict": "SKIP", "error": ""}
+                                self.all_results_data.append(payload)
+                                skip_records.append(payload)
+                            self._update_summary_ui(self.current_filter)
+                            
+                            if getattr(self, "_log_session_dir", None):
+                                xl_p = Path(self._log_session_dir) / "Batch_Summary_Report.xlsx"
+                                try:
+                                    if not xl_p.exists():
+                                        wb = Workbook()
+                                        ws = wb.active
+                                        ws.title = "Batch Summary"
+                                        headers = ["Timestamp", "Device", "Region", "Language", "Index", "Tag", "Expected (English)", "Expected (Local)", "Actual Detected", "Verdict", "Error Message", "ROI Image"]
+                                        ws.append(headers)
+                                        
+                                        header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+                                        header_font = Font(color="FFFFFF", bold=True)
+                                        for col_num, cell in enumerate(ws[1], 1):
+                                            cell.fill = header_fill
+                                            cell.font = header_font
+                                            cell.alignment = Alignment(horizontal="center", vertical="center")
+                                        
+                                        widths = [20, 15, 12, 15, 10, 25, 35, 35, 35, 12, 35, 30]
+                                        for i, width in enumerate(widths, 1):
+                                            ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
+                                    else:
+                                        wb = load_workbook(xl_p)
+                                        ws = wb.active
+                                    for rec in skip_records:
+                                        ws.append([
+                                            time.strftime("%Y-%m-%d %H:%M:%S"),
+                                            rec["device"],
+                                            self.region_var.get().strip(),
+                                            self.language_var.get().strip(),
+                                            rec["index"], 
+                                            rec["tag"],
+                                            "-", "-", "-", "SKIP", "", ""
+                                        ])
+                                        
+                                        row_idx = ws.max_row
+                                        for col_num in range(1, 13):
+                                            cell = ws.cell(row=row_idx, column=col_num)
+                                            cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+                                            
+                                        verdict_cell = ws.cell(row=row_idx, column=10)
+                                        verdict_cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+                                        verdict_cell.font = Font(color="333333", bold=True)
+                                        ws.row_dimensions[row_idx].height = 80
+                                        
+                                    wb.save(xl_p)
+                                except Exception: pass
+
                             if self._commg_pending_queue:
                                 self._run_next_commg_step()
                             else:
@@ -1690,7 +1830,6 @@ class VerifyStringGUI:
                     rc = s[1]
                     is_verify = bool(self._last_run_is_verification)
 
-                    # --- Close background sockets after verification completes ---
                     if is_verify and getattr(self, "active_sockets", []):
                         self.q.put("[CMD] Verification complete. Sending close command and terminating sessions...\n")
                         for soc in self.active_sockets:
@@ -1701,7 +1840,6 @@ class VerifyStringGUI:
                             except Exception:
                                 pass
                         self.active_sockets = []
-                    # --------------------------------------------------------------------
 
                     will_autostart = False
                     try:
@@ -1709,7 +1847,6 @@ class VerifyStringGUI:
                     except Exception:
                         will_autostart = False
 
-                    # Hook Integration iteration logic
                     if self._commg_is_active_run:
                         if is_verify:
                             if self._commg_pending_queue:
@@ -1755,7 +1892,8 @@ class VerifyStringGUI:
                     continue
 
                 if isinstance(s, str):
-                    self._append_line_with_result_color(s)
+                    for line in s.splitlines(True):
+                        self._append_line_with_result_color(line)
                 else:
                     self._append(str(s))
         except queue.Empty:

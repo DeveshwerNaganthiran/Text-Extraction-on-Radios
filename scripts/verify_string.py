@@ -432,10 +432,6 @@ def _parse_structured_fields(block: str):
     info["english"] = "\n".join([x for x in buf_eng if x]).strip()
     return info
 
-# ---------------------------------------------------------------------------
-# Existing `verify_string.py` Display/Load Logic
-# ---------------------------------------------------------------------------
-
 def _ts_log(t0: float, msg: str):
     try:
         dt = time.time() - float(t0)
@@ -820,7 +816,6 @@ def _show_ocr_result_window(
             header_h = 100
             summary_h = 120 + (max(0, len(exp_draw_lines)) * 32) + 16
             
-            # Add extra vertical space if we have a red error message to display
             if error_msg:
                 summary_h += 40
 
@@ -837,17 +832,13 @@ def _show_ocr_result_window(
 
             start_y = 118
             
-            # 1. Draw the Expected lines first
             if exp_draw_lines:
                 for i, ln in enumerate(exp_draw_lines):
                     summary = _draw_text_unicode(summary, ln, (24, start_y + (i * 32)), 0.8, (255, 255, 255), 1)
                 
-                # Push the starting Y coordinate down past the expected lines
                 start_y += len(exp_draw_lines) * 32
 
-            # 2. Draw the Overlap Error message below them
             if error_msg:
-                # Add a 10px padding below the expected lines
                 summary = _draw_text_unicode(summary, error_msg, (24, start_y + 10), 1.1, (0, 0, 255), 3)
 
             disp = np.vstack([header, summary, out])
@@ -865,19 +856,15 @@ def _show_ocr_result_window(
         except Exception: pass
         cv2.imshow("OCR Result", disp)
         
-        # --- AUTOMATION UPDATE: Auto-close after 5 seconds ---
         start_time = time.time()
         while True:
             try:
                 if hasattr(cv2, "getWindowProperty") and hasattr(cv2, "WND_PROP_VISIBLE") and cv2.getWindowProperty("OCR Result", cv2.WND_PROP_VISIBLE) < 1: break
             except Exception: pass
             
-            # Break if a key is pressed manually
             if cv2.waitKey(50) not in [None, -1]: break
             
-            # Break automatically after 5 seconds
             if time.time() - start_time > 5.0: break
-        # -----------------------------------------------------
         
         try: cv2.destroyWindow("OCR Result")
         except Exception: pass
@@ -927,7 +914,7 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
             try: return str(int(float(s)))
             except Exception: pass
         if s.isdigit():
-            try: return str(int(s))  # Strip leading zeros for robust matching
+            try: return str(int(s))  
             except Exception: pass
         return s
 
@@ -943,7 +930,7 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
         try: idx = str(int(float(idx)))
         except Exception: pass
     if idx.isdigit():
-        try: idx = str(int(idx))  # Strip leading zeros from extracted GUI index 
+        try: idx = str(int(idx))  
         except Exception: pass
 
     def _find_tag_column(df: pd.DataFrame) -> str:
@@ -997,7 +984,6 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
     }
 
 def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float, warmup_sec: float = 0.7):
-    # New code using DirectShow backend
     cap = cv2.VideoCapture(int(camera_id), cv2.CAP_DSHOW)
     
     if not cap.isOpened(): raise RuntimeError(f"Could not open camera {camera_id}")
@@ -1063,18 +1049,15 @@ def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, co
     overlay = _create_camera_overlay_state(cap) if cap else None
     zoom, did_tune = 1.0, False
 
-    # --- Load previously saved mapping if it exists ---
     saved_mapping = {}
     try:
         map_file = Path(__file__).resolve().parents[1] / "configs" / "box_mapping.json"
         if map_file.exists():
             with open(map_file, "r") as f:
                 raw_mapping = json.load(f)
-                # Convert JSON string keys back to integers
                 saved_mapping = {int(k): int(v) for k, v in raw_mapping.items()}
     except Exception: pass
 
-    # STATE TO KEEP TRACK OF ASSIGNMENTS
     box_state = {
         "assignments": [],  
         "selected_idx": None,
@@ -1082,7 +1065,6 @@ def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, co
     }
 
     def _unified_mouse_callback(event, x, y, flags, param):
-        # 1. Check Overlay First
         if overlay and overlay.get("enabled"):
             def _hit(lx, ly):
                 for lab, lay in (overlay.get("layout") or {}).items():
@@ -1112,15 +1094,12 @@ def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, co
                     overlay["drag"] = None
                     return
         
-        # 2. Check Click-To-Assign Boxes
         if event == cv2.EVENT_LBUTTONDOWN:
             for i, (bx1, by1, bx2, by2) in enumerate(box_state["sorted_boxes"]):
                 if bx1 <= x <= bx2 and by1 <= y <= by2:
                     if box_state["selected_idx"] is None:
-                        # Select this box
                         box_state["selected_idx"] = i
                     else:
-                        # If a box is already selected and we clicked a different box, SWAP them
                         if box_state["selected_idx"] != i:
                             try:
                                 s_idx = box_state["selected_idx"]
@@ -1128,10 +1107,8 @@ def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, co
                                 box_state["assignments"][s_idx] = box_state["assignments"][i]
                                 box_state["assignments"][i] = temp
                             except Exception: pass
-                        # Clear selection
                         box_state["selected_idx"] = None
                     return
-            # Clicked outside any box, clear selection
             box_state["selected_idx"] = None
 
     cv2.setMouseCallback(window_name, _unified_mouse_callback)
@@ -1163,14 +1140,11 @@ def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, co
             sorted_boxes = sorted(last_boxes or [], key=lambda b: (b[0], b[1]))
             box_state["sorted_boxes"] = sorted_boxes
             
-            # Keep assignment array in sync with the number of boxes dynamically
             if len(sorted_boxes) > 0:
-                # Initial load from saved mapping
                 if not box_state["assignments"]:
                     for i in range(len(sorted_boxes)):
                         box_state["assignments"].append(saved_mapping.get(i, i))
                 
-                # If boxes flutter (e.g. 3 boxes -> 2 boxes -> 3 boxes), pad the array safely
                 while len(box_state["assignments"]) < len(sorted_boxes):
                     assigned = set(box_state["assignments"])
                     nxt = 0
@@ -1184,7 +1158,6 @@ def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, co
                 dev_idx = box_state["assignments"][i] if i < len(box_state["assignments"]) else i
                 dev_name = get_device_name(profiles, dev_idx + 1) if profiles else f"Device {dev_idx + 1}"
                 
-                # Draw selection box logic
                 color = (0, 255, 255) if box_state["selected_idx"] == i else (0, 255, 0)
                 cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
                 
@@ -1219,7 +1192,6 @@ def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, co
     if last_frame is None: raise RuntimeError("Failed to capture frame")
     if not last_boxes: raise RuntimeError("No device detected. Try adjusting lighting/camera angle or lower --confidence (e.g. 0.15).")
 
-    # Before exiting, export the custom mapping user designed
     mapping = {str(i): int(dev_idx) for i, dev_idx in enumerate(box_state["assignments"])}
     try:
         map_file = Path(__file__).resolve().parents[1] / "configs" / "box_mapping.json"
@@ -1252,7 +1224,10 @@ def main():
     parser.add_argument("--model-path", default="")
     parser.add_argument("--epoch", type=int, default=None)
     parser.add_argument("--camera-id", type=int, default=None)
-    parser.add_argument("--save-roi", default="")
+    
+    parser.add_argument("--save-roi-dir", default="")
+    parser.add_argument("--summary-excel", default="")
+    
     parser.add_argument("--preview", action="store_true")
 
     args = parser.parse_args()
@@ -1291,7 +1266,7 @@ def main():
         t0_preview = time.time()
         full_frame, rois = capture_screen_roi_preview(None, camera_id=camera_id, confidence=confidence, model_path=model_path, profiles=profiles)
         print("\n[INFO] Preview Closed. (Verification string tests will run via Start button).")
-        return  # Safely terminate since we don't need to do OCR logic right now.
+        return  
         
     else:
         detector = FastDetector(model_path)
@@ -1299,7 +1274,6 @@ def main():
         full_frame, rois = capture_screen_roi(detector, camera_id=camera_id, confidence=confidence)
         t1_cap = time.time()
 
-    # Create mapping of multi-commands (indices, tags)
     indices = [x.strip() for x in args.index.split(",")] if args.index else []
     tags = [x.strip() for x in args.tag.split(",")] if args.tag else []
 
@@ -1318,7 +1292,6 @@ def main():
             exp = load_expected(args.excel, args.region, args.language, index=idx_val, tag=tag_val)
             expected_list.append(exp)
         except Exception as e:
-            # Handle empty load
             expected_list.append({"index": idx_val, "tag": tag_val, "expected_en": "", "expected_local": ""})
 
     print("=" * 70)
@@ -1329,7 +1302,6 @@ def main():
     try: threading.Thread(target=lambda: ocr.get_or_init_session(), daemon=True).start()
     except Exception: pass
 
-    # --- Read Box Custom Mapping dynamically generated during preview ---
     box_mapping = {}
     try:
         map_file = Path(__file__).resolve().parents[1] / "configs" / "box_mapping.json"
@@ -1343,12 +1315,10 @@ def main():
     
     for idx, roi in enumerate(rois):
         
-        # Dynamically map the detected bounding box index to the correct Command Index
         mapped_idx = int(box_mapping.get(str(idx), idx))
         device_id = mapped_idx + 1
         dev_name = get_device_name(profiles, device_id)
         
-        # Select specific expected values assigned per device based on its newly loaded custom position mapping
         exp_dict = expected_list[mapped_idx] if mapped_idx < len(expected_list) else expected_list[-1]
         
         print("\n" + "=" * 70)
@@ -1357,30 +1327,59 @@ def main():
         
         if exp_dict.get("tag") == "SKIP_VERIFY" or exp_dict.get("index") == "SKIP_VERIFY":
             print("Skipping verification for this device as requested via Automation Command.")
+            
+            if args.summary_excel:
+                xl_p = Path(args.summary_excel)
+                try:
+                    from openpyxl import load_workbook, Workbook
+                    from openpyxl.styles import PatternFill, Font, Alignment
+                    if not xl_p.exists():
+                        wb = Workbook()
+                        ws = wb.active
+                        ws.title = "Batch Summary"
+                        headers = ["Timestamp", "Device", "Region", "Language", "Index", "Tag", "Expected (English)", "Expected (Local)", "Actual Detected", "Verdict", "Error Message", "ROI Image"]
+                        ws.append(headers)
+                        
+                        header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+                        header_font = Font(color="FFFFFF", bold=True)
+                        for col_num, cell in enumerate(ws[1], 1):
+                            cell.fill = header_fill
+                            cell.font = header_font
+                            cell.alignment = Alignment(horizontal="center", vertical="center")
+                        
+                        widths = [20, 15, 12, 15, 10, 25, 35, 35, 35, 12, 35, 30]
+                        for i, width in enumerate(widths, 1):
+                            ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
+                    else:
+                        wb = load_workbook(xl_p)
+                        ws = wb.active
+                        
+                    ws.append([
+                        time.strftime("%Y-%m-%d %H:%M:%S"),
+                        dev_name, args.region, args.language, "SKIP", "SKIP", "-", "-", "-", "SKIP", "", ""
+                    ])
+                    
+                    row_idx = ws.max_row
+                    for col_num in range(1, 13):
+                        cell = ws.cell(row=row_idx, column=col_num)
+                        cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
+                        
+                    verdict_cell = ws.cell(row=row_idx, column=10)
+                    verdict_cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
+                    verdict_cell.font = Font(color="333333", bold=True)
+                    ws.row_dimensions[row_idx].height = 80
+                    
+                    wb.save(xl_p)
+                except Exception: pass
+
+            payload = {"device": dev_name, "index": "SKIP", "tag": "SKIP", "expected": "-", "actual": "-", "verdict": "SKIP", "error": ""}
+            print(f"[GUI_RESULT] {json.dumps(payload)}")
             continue
 
         print(f"Index: {exp_dict.get('index', '')}")
         if exp_dict.get('tag'): print(f"Tag: {exp_dict.get('tag', '')}")
         print(f"Expected (English): {exp_dict.get('expected_en', '')}")
         print(f"Expected ({args.region}/{args.language}): {exp_dict.get('expected_local', '')}")
-
-        if args.save_roi:
-            outp = Path(args.save_roi)
-            # Create a safe string out of the device name/IP address (replace spaces/slashes with underscores)
-            safe_dev_name = re.sub(r'[\\/*?:"<>| ]', '_', dev_name)
-            
-            # Grab the specific index for this device
-            dev_idx = str(exp_dict.get('index', '')).strip()
-            
-            # Construct the file name (e.g. roi_0528_192.168.10.1.jpg)
-            if dev_idx and dev_idx != "SKIP_VERIFY":
-                new_filename = f"roi_{dev_idx}_{safe_dev_name}{outp.suffix}"
-            else:
-                new_filename = f"{outp.stem}_{safe_dev_name}{outp.suffix}"
-                
-            new_outp = outp.with_name(new_filename)
-            new_outp.parent.mkdir(parents=True, exist_ok=True)
-            cv2.imwrite(str(new_outp), roi)
 
         t0_ocr = time.time()
         text, _conf = ocr.extract_text(roi, expected_language=args.language)
@@ -1513,7 +1512,6 @@ def main():
         print(f"Observed (normalized): {observed_n}")
         print("-" * 70)
         
-        # --- Format the Error String (for ANY error) ---
         error_msg_display = ""
         if final_error_red:
             error_words = []
@@ -1538,6 +1536,122 @@ def main():
         if not ok and not warn:
             print("Expected (normalized):")
             print(expected_local_n)
+
+        # -------------------------------------------------------------
+        # NEW BATCH SAVING & SORTING LOGIC
+        # -------------------------------------------------------------
+        roi_saved_path = ""
+        if args.save_roi_dir:
+            out_dir = Path(args.save_roi_dir) / verdict
+            out_dir.mkdir(parents=True, exist_ok=True)
+            
+            safe_dev_name = re.sub(r'[\\/*?:"<>| ]', '_', dev_name)
+            dev_idx = str(exp_dict.get('index', '')).strip()
+            ts_suffix = time.strftime("%H%M%S")
+            
+            if dev_idx and dev_idx != "SKIP_VERIFY":
+                new_filename = f"roi_{dev_idx}_{safe_dev_name}_{ts_suffix}.jpg"
+            else:
+                new_filename = f"roi_{safe_dev_name}_{ts_suffix}.jpg"
+                
+            full_roi_path = out_dir / new_filename
+            cv2.imwrite(str(full_roi_path), roi)
+            roi_saved_path = str(full_roi_path.resolve())
+
+        # -------------------------------------------------------------
+        # WRITE TO RICH EXCEL FORMAT (WITH IMAGES)
+        # -------------------------------------------------------------
+        if args.summary_excel:
+            xl_p = Path(args.summary_excel)
+            try:
+                from openpyxl import load_workbook, Workbook
+                from openpyxl.styles import PatternFill, Font, Alignment
+                from openpyxl.drawing.image import Image as OpenpyxlImage
+
+                if not xl_p.exists():
+                    wb = Workbook()
+                    ws = wb.active
+                    ws.title = "Batch Summary"
+                    headers = ["Timestamp", "Device", "Region", "Language", "Index", "Tag", "Expected (English)", "Expected (Local)", "Actual Detected", "Verdict", "Error Message", "ROI Image"]
+                    ws.append(headers)
+                    
+                    header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
+                    header_font = Font(color="FFFFFF", bold=True)
+                    for col_num, cell in enumerate(ws[1], 1):
+                        cell.fill = header_fill
+                        cell.font = header_font
+                        cell.alignment = Alignment(horizontal="center", vertical="center")
+                    
+                    # Fine-tune column widths to replicate a clean layout
+                    widths = [20, 15, 12, 15, 10, 25, 35, 35, 35, 12, 35, 30]
+                    for i, width in enumerate(widths, 1):
+                        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
+                else:
+                    wb = load_workbook(xl_p)
+                    ws = wb.active
+                    
+                ws.append([
+                    time.strftime("%Y-%m-%d %H:%M:%S"),
+                    dev_name,
+                    args.region,
+                    args.language,
+                    exp_dict.get('index', ''),
+                    exp_dict.get('tag', ''),
+                    exp_dict.get('expected_en', ''),
+                    expected_local_n,
+                    observed_n,
+                    verdict,
+                    error_msg_display,
+                    "" # Blank cell to hold the image
+                ])
+                
+                row_idx = ws.max_row
+                
+                # Set alignment (wrap text, vertically centered)
+                for col_num in range(1, 13):
+                    cell = ws.cell(row=row_idx, column=col_num)
+                    # For long text columns (Expected, Actual, Error), align left. Otherwise, center.
+                    h_align = "left" if col_num in [7, 8, 9, 11] else "center"
+                    cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal=h_align)
+
+                # Highlight the Verdict Column in Excel natively!
+                verdict_cell = ws.cell(row=row_idx, column=10) # 10 is the 'Verdict' column
+                if verdict == "PASS":
+                    verdict_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
+                    verdict_cell.font = Font(color="006100", bold=True)
+                elif verdict == "FAIL":
+                    verdict_cell.fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+                    verdict_cell.font = Font(color="9C0006", bold=True)
+                elif verdict == "WARN":
+                    verdict_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+                    verdict_cell.font = Font(color="9C6500", bold=True)
+                
+                # Make the row tall enough to hold the ROI image
+                ws.row_dimensions[row_idx].height = 80
+                
+                # Insert the actual image into the cell!
+                if roi_saved_path and os.path.exists(roi_saved_path):
+                    img = OpenpyxlImage(roi_saved_path)
+                    img.height = 95
+                    img.width = 200
+                    # Position image at the corresponding row in column L (the 12th column)
+                    img.anchor = f"L{row_idx}"
+                    ws.add_image(img)
+
+                wb.save(xl_p)
+            except Exception as e:
+                print(f"[WARNING] Failed to write to summary Excel: {e}")
+
+        payload = {
+            "device": dev_name,
+            "index": exp_dict.get('index', ''),
+            "tag": exp_dict.get('tag', ''),
+            "expected": expected_local_n,
+            "actual": observed_n,
+            "verdict": verdict,
+            "error": error_msg_display
+        }
+        print(f"[GUI_RESULT]{json.dumps(payload)}")
 
         all_results.append({
             "roi": roi, "orig_text": orig_text, "eng_text": eng_text, "lang_detected": lang_detected,
