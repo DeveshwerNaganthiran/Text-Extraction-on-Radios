@@ -22,22 +22,17 @@ from openpyxl.styles import PatternFill, Font, Alignment
 import sys
 sys.coinit_flags = 2  # Forces COM initialization to STA mode to prevent Tkinter crashes
 
-
-# --- ADD THESE FOR PYINSTALLER & OPTION A ---
 import runpy
 from contextlib import redirect_stdout, redirect_stderr
 import verify_string
 import init_genai_session
 
-# Also import the main camera script from the parent directory
 import os
 if getattr(sys, 'frozen', False):
-    # Forces the .exe to use its own folder as the working directory
     os.chdir(os.path.dirname(sys.executable))
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import main_msi_genai
 
-# A helper class to redirect print() statements into your GUI Textbox
 class _QueueStream:
     def __init__(self, queue):
         self.queue = queue
@@ -46,7 +41,6 @@ class _QueueStream:
             self.queue.put(text)
     def flush(self):
         pass
-# --------------------------------------------
 
 try:
     from pywinauto import Desktop
@@ -67,7 +61,6 @@ def _settings_path() -> Path:
     base = Path(os.getenv("APPDATA") or Path.home())
     return base / "walkie_tracker_verify_string_gui.json"
 
-
 def _load_settings() -> dict:
     p = _settings_path()
     try:
@@ -77,7 +70,6 @@ def _load_settings() -> dict:
         return {}
     return {}
 
-
 def _save_settings(data: dict) -> None:
     p = _settings_path()
     try:
@@ -85,7 +77,6 @@ def _save_settings(data: dict) -> None:
         p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
-
 
 def _probe_camera_ids(max_id: int = 5) -> list[tuple[str, str]]:
     cam_names = []
@@ -115,7 +106,6 @@ def _probe_camera_ids(max_id: int = 5) -> list[tuple[str, str]]:
             if not ok or frame is None or getattr(frame, "size", 0) == 0:
                 continue
             
-            # Return a tuple of (ID, Name)
             name = cam_names[i] if i < len(cam_names) else f"Camera {i}"
             found.append((str(i), name))
             
@@ -127,7 +117,6 @@ def _probe_camera_ids(max_id: int = 5) -> list[tuple[str, str]]:
             except Exception: pass
     return found
 
-
 def _norm_col(s: str) -> str:
     v = str(s or "").strip().lower().replace("_", " ")
     v = re.sub(r"[\(\)\[\]\{\}:,;/\\\-]+", " ", v)
@@ -137,7 +126,6 @@ def _norm_col(s: str) -> str:
     if v.startswith("str "):
         v = v[len("str ") :].strip()
     return v
-
 
 def _sheet_name_for_region(xls_path: str, region: str) -> str:
     wb = load_workbook(filename=xls_path, read_only=True, data_only=True)
@@ -160,7 +148,6 @@ def _sheet_name_for_region(xls_path: str, region: str) -> str:
             wb.close()
         except Exception:
             pass
-
 
 def _tag_options_from_excel(excel_path: str) -> list[str]:
     if not excel_path:
@@ -328,17 +315,14 @@ def _language_options_from_excel(excel_path: str, region: str) -> list[str]:
         except Exception:
             pass
 
-
 def _default_excel_path() -> str:
     p = os.getenv("VERIFY_EXCEL", "").strip()
     if p:
         return p
     return ""
 
-
 def _python_exe() -> str:
     return sys.executable or "python"
-
 
 def _default_model_path() -> str:
     try:
@@ -356,7 +340,6 @@ def _default_model_path() -> str:
         return str(pp)
     except Exception:
         return ""
-
 
 def _resolve_path(p: str) -> str:
     v = (p or "").strip()
@@ -391,18 +374,15 @@ class VerifyStringGUI:
 
         self._settings = _load_settings()
 
-        # CommG specific variables
         self.COMMG_PATH = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Motorola\CommG_LTD\CommG_LTD.lnk"
         self.WINDOW_SEARCH_TERM = "CommuniGATOR"
         self.commg_handles = []
         self.type_lock = threading.Lock()
         
-        # Automation queues & windows
         self._commg_pending_queue = []
         self._commg_is_active_run = False
         self.active_cmd_windows = []
 
-        # Build Main UI Frame
         frm = tk.Frame(root, padx=10, pady=10)
         frm.pack(fill=tk.BOTH, expand=True)
 
@@ -410,8 +390,9 @@ class VerifyStringGUI:
 
         # --- EXCEL & STRING CONFIG ---
         self.excel_var = tk.StringVar(value=str(self._settings.get("excel") or _default_excel_path()))
-        self.region_var = tk.StringVar(value=str(self._settings.get("region") or "APAC"))
-        self.language_var = tk.StringVar(value=str(self._settings.get("language") or "Japanese"))
+        # Set default to Auto
+        self.region_var = tk.StringVar(value=str(self._settings.get("region") or "Auto"))
+        self.language_var = tk.StringVar(value=str(self._settings.get("language") or "Auto"))
         self.tag_var = tk.StringVar(value=str(self._settings.get("tag") or ""))
         self.index_var = tk.StringVar(value=str(self._settings.get("index") or ""))
         
@@ -423,7 +404,8 @@ class VerifyStringGUI:
         row += 1
 
         tk.Label(frm, text="Region").grid(row=row, column=0, sticky="w", pady=(6, 0))
-        self.region_combo = ttk.Combobox(frm, textvariable=self.region_var, width=20, state="normal", values=["APAC", "EMEA", "LACR", "English"])
+        # Added Auto to values
+        self.region_combo = ttk.Combobox(frm, textvariable=self.region_var, width=20, state="normal", values=["Auto", "APAC", "EMEA", "LACR", "English"])
         self.region_combo.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
         self.region_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_languages())
         self.region_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_tags(), add=True)
@@ -476,9 +458,7 @@ class VerifyStringGUI:
         tk.Button(frm, text="Browse...", command=self.browse_model).grid(row=row, column=2, sticky="e", pady=(6, 0))
         row += 1
 
-        # -------------------------------------------------------------
-        # ADDED COMMG/CMD INTEGRATION SECTION
-        # -------------------------------------------------------------
+        # --- AUTOMATION & DEVICES ---
         self.lf_commg = tk.LabelFrame(frm, text=" Automation Integration (CommG / CMD) ", padx=10, pady=5, fg="#00008B", font=('Arial', 10, 'bold'))
         self.lf_commg.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
         
@@ -500,7 +480,6 @@ class VerifyStringGUI:
         tk.Label(top_frame, text="Port (CMD):").pack(side=tk.LEFT, padx=(10, 2))
         tk.Entry(top_frame, textvariable=self.telnet_port_var, width=5).pack(side=tk.LEFT)
 
-        # Target IPs
         ip_frame = tk.Frame(self.lf_commg)
         ip_frame.grid(row=1, column=0, sticky="nw", padx=(0, 20))
         tk.Label(ip_frame, text="Target IPs").pack(anchor="w")
@@ -518,7 +497,6 @@ class VerifyStringGUI:
         tk.Button(ip_btns, text="Add IP", command=self._commg_add_ip).pack(fill="x", pady=1)
         tk.Button(ip_btns, text="Remove", command=self._commg_remove_ip).pack(fill="x", pady=1)
 
-        # Execution Type
         cmd_frame = tk.Frame(self.lf_commg)
         cmd_frame.grid(row=1, column=1, sticky="nw")
         
@@ -541,9 +519,6 @@ class VerifyStringGUI:
                 except Exception: pass
         row += 1
 
-        # -------------------------------------------------------------
-        # ADDED DEVICES SECTION
-        # -------------------------------------------------------------
         self.lf_devices = tk.LabelFrame(frm, text="Devices", padx=10, pady=5)
         self.lf_devices.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
 
@@ -559,9 +534,7 @@ class VerifyStringGUI:
         self._sync_devices_to_ips(initial_load=True)
         row += 1
 
-        # -------------------------------------------------------------
-        # ACTIONS
-        # -------------------------------------------------------------
+        # --- ACTIONS ---
         btns = tk.Frame(frm)
         btns.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
         self.btn_cam_test = tk.Button(btns, text="Camera Test", command=self.run_camera_test, bg="#ADD8E6", font=('Arial', 10, 'bold'))
@@ -579,13 +552,10 @@ class VerifyStringGUI:
         self.status_label.grid(row=row, column=0, columnspan=3, sticky="we", pady=(8, 0))
         row += 1
 
-        # -------------------------------------------------------------
-        # TABBED LOGS & SUMMARY VIEW
-        # -------------------------------------------------------------
+        # --- LOGS & SUMMARY ---
         self.notebook = ttk.Notebook(frm)
         self.notebook.grid(row=row, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
 
-        # --- TAB 1: Raw Execution Log ---
         self.tab_log = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_log, text="Execution Log")
         
@@ -602,7 +572,6 @@ class VerifyStringGUI:
         self.output.tag_configure("error", foreground="#B71C1C")
         self.output.tag_configure("commg", foreground="#800080")
 
-        # --- TAB 2: Results Summary ---
         self.tab_summary = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_summary, text="Results Summary")
 
@@ -857,13 +826,11 @@ class VerifyStringGUI:
             self.q.put((_EVT_COMMG_DONE, "ABORT"))
             return
 
-        # Get port safely
         try:
             port = int(self.telnet_port_var.get().strip() or 23)
         except ValueError:
             port = 23
             
-        # Prepare list to track background sockets
         if not hasattr(self, "active_sockets"):
             self.active_sockets = []
 
@@ -1158,7 +1125,6 @@ class VerifyStringGUI:
     def _append_line_with_result_color(self, line: str):
         stripped = (line or "").strip()
         
-        # Intercept the JSON payload sent by verify_string.py
         if "[GUI_RESULT]" in stripped:
             try:
                 json_str = stripped.split("[GUI_RESULT]")[1].strip()
@@ -1315,9 +1281,11 @@ class VerifyStringGUI:
 
     def refresh_languages(self):
         excel = (self.excel_var.get() or "").strip()
-        region = (self.region_var.get() or "").strip() or "APAC"
+        region = (self.region_var.get() or "").strip() or "Auto"
         
-        if region.lower() == "english":
+        if region.lower() == "auto":
+            opts = ["Auto"]
+        elif region.lower() == "english":
             opts = ["English"]
         else:
             try: opts = _language_options_from_excel(excel, region)
@@ -1409,8 +1377,8 @@ class VerifyStringGUI:
         tag = self.tag_var.get().strip()
         idx = self.index_var.get().strip()
 
-        if not region: raise ValueError("Region is required (e.g., APAC/EMEA/LACR/English)")
-        if not language: raise ValueError("Language is required (e.g., Japanese)")
+        if not region: raise ValueError("Region is required (e.g., Auto/APAC/EMEA/LACR/English)")
+        if not language: raise ValueError("Language is required (e.g., Auto/Japanese)")
         if not tag and not idx: raise ValueError("Provide either String Tag or Index")
 
         script_path = Path(__file__).resolve().parent / "verify_string.py"
@@ -1652,7 +1620,6 @@ class VerifyStringGUI:
                 self.btn_run.configure(state=tk.NORMAL) 
                 return
             
-            # Start of a new batch -> clear the summary table & switch to it
             self.clear_summary_data()
             self.notebook.select(self.tab_summary)
             
@@ -1917,7 +1884,6 @@ class VerifyStringGUI:
             pass
 
         self.root.after(50, self._drain_queue)
-
 
 def main():
     root = tk.Tk()
