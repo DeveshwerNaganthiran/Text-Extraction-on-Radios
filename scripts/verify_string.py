@@ -6,6 +6,7 @@ import sys
 import time
 import unicodedata
 import re
+import hanzidentifier
 from pathlib import Path
 import threading
 import difflib
@@ -724,10 +725,53 @@ def get_device_name(profiles: dict, device_id: int) -> str:
     name = str(d.get("name") or "").strip()
     return name if name else f"Device {device_id}"
 
-def map_language_to_region(lang: str) -> tuple[str, str]:
+def map_language_to_region(lang: str, text: str = "") -> tuple[str, str]:
     """Smart mapping of detected language string to exact Region & Language Column"""
     l = str(lang).lower().strip()
-    if not l or "english" in l or l == "en": return "english", "English"
+    t = str(text)
+    
+    # 1. HARD UNICODE BLOCK DETECTION (Overrides AI if AI forgets to explicitly name the language)
+    has_hiragana = any('\u3040' <= c <= '\u309F' for c in t)
+    has_katakana = any('\u30A0' <= c <= '\u30FF' for c in t)
+    has_hangul = any('\uAC00' <= c <= '\uD7A3' for c in t)
+    has_cyrillic = any('\u0400' <= c <= '\u04FF' for c in t)
+    has_arabic = any('\u0600' <= c <= '\u06FF' for c in t)
+    has_hebrew = any('\u0590' <= c <= '\u05FF' for c in t)
+    has_thai = any('\u0E00' <= c <= '\u0E7F' for c in t)
+    
+    if has_hiragana or has_katakana:
+        return "apac", "Japanese"
+    
+    if has_hangul:
+        return "apac", "Korean"
+        
+    if has_cyrillic:
+        return "emea", "Russian"
+        
+    if has_arabic:
+        return "emea", "Arabic"
+        
+    if has_hebrew:
+        return "emea", "Hebrew"
+        
+    if has_thai:
+        return "apac", "Thai"
+
+    # If it has CJK ideographs but no Hiragana/Katakana/Hangul, it is Chinese.
+    has_cjk = any('\u4E00' <= c <= '\u9FFF' for c in text)
+    if has_cjk:
+        # Physically analyze the characters in the text
+        if hanzidentifier.is_traditional(text):
+            return "apac", "Traditional Chinese"
+        elif hanzidentifier.is_simplified(text):
+            return "apac", "Simplified Chinese"
+        else:
+            # If the text is identical in both (e.g., "中"), fall back to AI's guess
+            if "traditional" in lang.lower() or "zh-tw" in lang.lower():
+                return "apac", "Traditional Chinese"
+            return "apac", "Simplified Chinese"
+
+    # 2. Fallback to AI's Detected Language String
     if "korean" in l or l == "ko": return "apac", "Korean"
     if "japanese" in l or l == "ja": return "apac", "Japanese"
     if "simplified chinese" in l or "zh-cn" in l: return "apac", "Simplified Chinese"
@@ -745,6 +789,7 @@ def map_language_to_region(lang: str) -> tuple[str, str]:
     if "hebrew" in l or l == "he" or l == "iw": return "emea", "Hebrew"
     if "czech" in l or l == "cs": return "emea", "Czech"
     
+    # 3. Default to English ONLY if no foreign characters/languages were mentioned
     return "english", "English"
 
 def _show_ocr_result_window(
@@ -1351,7 +1396,6 @@ def main():
             
         if args.region.lower() == "auto":
              try:
-                 # Fetch English baseline to get the text layout/tags before we know local lang
                  exp = load_expected(args.excel, "english", "english", index=idx_val, tag=tag_val)
                  expected_list.append(exp)
              except Exception as e:
@@ -1560,12 +1604,11 @@ def main():
         orig_text = parsed.get("original") or text
         eng_text = parsed.get("english") or ""
 
-        # --- AUTO DETECT MAPPING OVERRIDE ---
         final_region = args.region
         final_language = args.language
         
         if args.region.lower() == "auto":
-            final_region, final_language = map_language_to_region(lang_detected)
+            final_region, final_language = map_language_to_region(lang_detected, orig_text)
             print(f"\n[AUTO DETECT] Mapped detected language '{lang_detected}' to Region: {final_region.upper()}, Column: {final_language}")
             try:
                 new_exp = load_expected(args.excel, final_region, final_language, index=exp_dict.get("index"), tag=exp_dict.get("tag"))
@@ -1574,9 +1617,8 @@ def main():
                 print(f"Expected ({final_region.upper()}/{final_language}): {exp_dict['expected_local']}")
             except Exception as e:
                 print(f"[WARNING] Failed to auto-load expected text for {final_region}/{final_language}: {e}")
-                exp_dict["expected_local"] = "" # Fallback
-        # ------------------------------------
-
+                exp_dict["expected_local"] = ""
+        
         observed_n = _norm_text(orig_text)
         expected_local_n = _norm_text(exp_dict.get("expected_local", ""))
 
@@ -1784,42 +1826,6 @@ def main():
     print(f"PASS: {summary_counts['PASS']} | FAIL: {summary_counts['FAIL']} | WARN: {summary_counts['WARN']} | SKIP: {summary_counts['SKIP']}")
     print(f"Total Time Taken: {time_taken} seconds")
     print("=" * 70 + "\n")
-
-    if args.summary_excel:
-        xl_p = Path(args.summary_excel)
-        try:
-            from openpyxl import load_workbook
-            from openpyxl.styles import PatternFill, Font, Alignment
-            if xl_p.exists():
-                wb = load_workbook(xl_p)
-                ws = wb.active
-                
-                ws.append([])
-                
-                summary_row = [
-                    f"Summary ({time.strftime('%H:%M:%S')})", 
-                    f"Time: {time_taken}s", 
-                    f"PASS: {summary_counts['PASS']}", 
-                    f"FAIL: {summary_counts['FAIL']}", 
-                    f"WARN: {summary_counts['WARN']}", 
-                    f"SKIP: {summary_counts['SKIP']}",
-                    "", "", "", "", "", ""
-                ]
-                ws.append(summary_row)
-                
-                row_idx = ws.max_row
-                summary_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
-                summary_font = Font(bold=True)
-                
-                for col_num in range(1, 7):
-                    cell = ws.cell(row=row_idx, column=col_num)
-                    cell.fill = summary_fill
-                    cell.font = summary_font
-                    cell.alignment = Alignment(horizontal="center", vertical="center")
-                    
-                wb.save(xl_p)
-        except Exception as e:
-            print(f"[WARNING] Failed to write summary to Excel: {e}")
 
     for res in all_results:
         try: _show_ocr_result_window(res["roi"], res["orig_text"], res["eng_text"], res["lang_detected"], res["verdict"], expected_lines=res["exp_lines"], device_name=res["dev_name"], error_msg=res.get("error_msg", ""))

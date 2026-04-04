@@ -388,9 +388,7 @@ class VerifyStringGUI:
 
         row = 0
 
-        # --- EXCEL & STRING CONFIG ---
         self.excel_var = tk.StringVar(value=str(self._settings.get("excel") or _default_excel_path()))
-        # Set default to Auto
         self.region_var = tk.StringVar(value=str(self._settings.get("region") or "Auto"))
         self.language_var = tk.StringVar(value=str(self._settings.get("language") or "Auto"))
         self.tag_var = tk.StringVar(value=str(self._settings.get("tag") or ""))
@@ -404,7 +402,6 @@ class VerifyStringGUI:
         row += 1
 
         tk.Label(frm, text="Region").grid(row=row, column=0, sticky="w", pady=(6, 0))
-        # Added Auto to values
         self.region_combo = ttk.Combobox(frm, textvariable=self.region_var, width=20, state="normal", values=["Auto", "APAC", "EMEA", "LACR", "English"])
         self.region_combo.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
         self.region_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_languages())
@@ -429,7 +426,6 @@ class VerifyStringGUI:
         tk.Entry(frm, textvariable=self.index_var, width=20).grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
         row += 1
 
-        # --- CAMERA, PREVIEW & LOGS ---
         self.camera_id_var = tk.StringVar(value=str(self._settings.get("camera_id") or "1"))
         self.save_log_var = tk.BooleanVar(value=bool(self._settings.get("save_log", False)))
         self.log_path_var = tk.StringVar(value=str(self._settings.get("log_path") or ""))
@@ -458,7 +454,6 @@ class VerifyStringGUI:
         tk.Button(frm, text="Browse...", command=self.browse_model).grid(row=row, column=2, sticky="e", pady=(6, 0))
         row += 1
 
-        # --- AUTOMATION & DEVICES ---
         self.lf_commg = tk.LabelFrame(frm, text=" Automation Integration (CommG / CMD) ", padx=10, pady=5, fg="#00008B", font=('Arial', 10, 'bold'))
         self.lf_commg.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
         
@@ -534,7 +529,6 @@ class VerifyStringGUI:
         self._sync_devices_to_ips(initial_load=True)
         row += 1
 
-        # --- ACTIONS ---
         btns = tk.Frame(frm)
         btns.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
         self.btn_cam_test = tk.Button(btns, text="Camera Test", command=self.run_camera_test, bg="#ADD8E6", font=('Arial', 10, 'bold'))
@@ -552,7 +546,6 @@ class VerifyStringGUI:
         self.status_label.grid(row=row, column=0, columnspan=3, sticky="we", pady=(8, 0))
         row += 1
 
-        # --- LOGS & SUMMARY ---
         self.notebook = ttk.Notebook(frm)
         self.notebook.grid(row=row, column=0, columnspan=3, sticky="nsew", pady=(10, 0))
 
@@ -1578,6 +1571,7 @@ class VerifyStringGUI:
     def init_and_run(self):
         self.btn_run.configure(state=tk.DISABLED)
         self.batch_start_time = time.time()
+        self._summary_written = False 
         
         if self.integration_enable_var.get() and HAS_PYWINAUTO:
             
@@ -1650,6 +1644,7 @@ class VerifyStringGUI:
         self.btn_run.configure(state=tk.DISABLED)
         if not getattr(self, '_commg_is_active_run', False) or not hasattr(self, 'batch_start_time'):
             self.batch_start_time = time.time()
+            self._summary_written = False 
         
         try: cmd = self._build_cmd()
         except Exception as e:
@@ -1719,6 +1714,71 @@ class VerifyStringGUI:
         if hasattr(self, "proc_thread") and self.proc_thread and self.proc_thread.is_alive():
             self._append("\n[WARNING] Note: Background script is still finishing its current execution loop.\n")
             
+    def _write_final_excel_summary(self):
+        """Writes exactly ONE final summary to the Excel sheet at the end without any blanks."""
+        if getattr(self, "_summary_written", False):
+            return
+        self._summary_written = True
+        
+        if not self.save_log_var.get() or not getattr(self, "_log_session_dir", None):
+            return
+            
+        xl_p = Path(self._log_session_dir) / "Batch_Summary_Report.xlsx"
+        if not xl_p.exists():
+            return
+            
+        try:
+            from openpyxl import load_workbook
+            from openpyxl.styles import PatternFill, Font, Alignment
+            import time
+            
+            wb = load_workbook(xl_p)
+            ws = wb.active
+            
+            p, f, w, s = 0, 0, 0, 0
+            for d in self.all_results_data:
+                v = d.get("verdict", "")
+                if v == "PASS": p += 1
+                elif v == "FAIL": f += 1
+                elif v == "WARN": w += 1
+                elif v == "SKIP": s += 1
+                
+            time_taken_str = "0.0s"
+            if hasattr(self, 'batch_start_time'):
+                elapsed = time.time() - self.batch_start_time
+                if elapsed > 60:
+                    mins = int(elapsed // 60)
+                    secs = elapsed % 60
+                    time_taken_str = f"{mins}m {secs:.1f}s"
+                else:
+                    time_taken_str = f"{elapsed:.1f}s"
+            
+            summary_row = [
+                f"FINAL SUMMARY", 
+                f"Total Time: {time_taken_str}", 
+                f"PASS: {p}", 
+                f"FAIL: {f}", 
+                f"WARN: {w}", 
+                f"SKIP: {s}",
+                "", "", "", "", "", ""
+            ]
+            ws.append(summary_row)
+            
+            row_idx = ws.max_row
+            summary_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
+            summary_font = Font(bold=True)
+            
+            for col_num in range(1, 7):
+                cell = ws.cell(row=row_idx, column=col_num)
+                cell.fill = summary_fill
+                cell.font = summary_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                
+            wb.save(xl_p)
+            self._append("\n[GUI] Successfully wrote Final Summary to Excel.\n", ("pass",))
+        except Exception as e:
+            self._append(f"\n[GUI ERROR] Failed to write final summary to Excel: {e}\n", ("error",))
+            
     def _drain_queue(self):
         try:
             while True:
@@ -1731,6 +1791,7 @@ class VerifyStringGUI:
                         self.status_var.set("Automation Sequence Aborted")
                         self.status_label.configure(fg="red")
                         self._set_running(False)
+                        self._write_final_excel_summary() 
                     else:
                         all_skip = True
                         for t, idx in zip(self.tag_var.get().split(","), self.index_var.get().split(",")):
@@ -1804,6 +1865,7 @@ class VerifyStringGUI:
                                 self.status_var.set("Automation Batch Complete")
                                 self.status_label.configure(fg="green")
                                 self._set_running(False)
+                                self._write_final_excel_summary() 
                         else:
                             self.run()
                     continue
@@ -1838,6 +1900,7 @@ class VerifyStringGUI:
                                 self.status_var.set("Automation Batch Complete")
                                 self.status_label.configure(fg="green")
                                 self._set_running(False)
+                                self._write_final_excel_summary() 
                             continue
                         elif will_autostart:
                             self._auto_start_verify = False 
@@ -1851,14 +1914,16 @@ class VerifyStringGUI:
                         else: msg = "Init GenAI finished" if rc in [0, None] else f"Init GenAI finished (exit={rc})"
                         self.status_var.set(msg)
 
-                    try:
-                        if rc not in [0, None]: self.status_label.configure(fg="#B71C1C")
-                        else: self.status_label.configure(fg="black")
-                    except Exception: pass
+                        try:
+                            if rc not in [0, None]: self.status_label.configure(fg="#B71C1C")
+                            else: self.status_label.configure(fg="black")
+                        except Exception: pass
 
-                    if not will_autostart: 
-                        self._set_running(False)
-                        self._update_summary_ui(self.current_filter)
+                        if not will_autostart: 
+                            self._set_running(False)
+                            self._update_summary_ui(self.current_filter)
+                            if is_verify:
+                                self._write_final_excel_summary() 
 
                     try:
                         if self._log_fp is not None:

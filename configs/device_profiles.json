@@ -2,7 +2,11 @@
   "devices": [
     {
       "id": 1,
-      "name": "ION"
+      "name": "ION1"
+    },
+    {
+      "id": 2,
+      "name": "ION30"
     }
   ]
 }
