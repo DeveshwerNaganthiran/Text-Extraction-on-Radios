@@ -726,7 +726,7 @@ def get_device_name(profiles: dict, device_id: int) -> str:
     return name if name else f"Device {device_id}"
 
 def map_language_to_region(lang: str, text: str = "", allowed_langs: str = "") -> tuple[str, str]:
-    """Smart mapping of detected language string to exact Region & Language Column, prioritizing foreign scripts."""
+    """Smart mapping that STRICTLY obeys allowed_langs."""
     l = str(lang).lower().strip()
     t = str(text)
     
@@ -740,7 +740,7 @@ def map_language_to_region(lang: str, text: str = "", allowed_langs: str = "") -
         if "english" in ln or "en" in ln: return "english"
         return "emea"
 
-    # 1. HARD UNICODE BLOCK DETECTION (Overrides AI, heavily prioritizes Foreign Scripts even if English letters exist)
+    # 1. HARD UNICODE BLOCK DETECTION (Absolute proof of foreign script)
     has_hiragana = any('\u3040' <= c <= '\u309F' for c in t)
     has_katakana = any('\u30A0' <= c <= '\u30FF' for c in t)
     has_hangul = any('\uAC00' <= c <= '\uD7A3' for c in t)
@@ -748,52 +748,31 @@ def map_language_to_region(lang: str, text: str = "", allowed_langs: str = "") -
     has_arabic = any('\u0600' <= c <= '\u06FF' for c in t)
     has_hebrew = any('\u0590' <= c <= '\u05FF' for c in t)
     has_thai = any('\u0E00' <= c <= '\u0E7F' for c in t)
-    
-    if has_hiragana or has_katakana: return "apac", "Japanese"
-    if has_hangul: return "apac", "Korean"
-    if has_cyrillic: return "emea", "Russian"
-    if has_arabic: return "emea", "Arabic"
-    if has_hebrew: return "emea", "Hebrew"
-    if has_thai: return "apac", "Thai"
+    has_cjk = any('\u4E00' <= c <= '\u9FFF' for c in t)
 
-    # CJK ideographs
-    has_cjk = any('\u4E00' <= c <= '\u9FFF' for c in text)
-    if has_cjk:
-        if hanzidentifier.is_traditional(text): return "apac", "Traditional Chinese"
-        elif hanzidentifier.is_simplified(text): return "apac", "Simplified Chinese"
-        else:
-            if "traditional" in l or "zh-tw" in l: return "apac", "Traditional Chinese"
-            return "apac", "Simplified Chinese"
+    # 2. STRICT ENFORCEMENT: If foreign characters exist, force it to the user's selected foreign language
+    if has_hiragana or has_katakana or has_hangul or has_cyrillic or has_arabic or has_hebrew or has_thai or has_cjk:
+        if len(foreign_allowed) == 1:
+            # If user ONLY selected "Traditional Chinese", force any CJK text to Traditional Chinese
+            return _get_region(foreign_allowed[0]), foreign_allowed[0]
+        elif foreign_allowed:
+            # If multiple foreign langs allowed, try to match AI output to allowed list
+            for fa in foreign_allowed:
+                if fa.lower() in l: return _get_region(fa), fa
+            # Fallback to first allowed foreign language
+            return _get_region(foreign_allowed[0]), foreign_allowed[0]
 
-    # 2. CHECK IF AI DETECTED ONE OF THE USER'S EXPLICIT FOREIGN LANGUAGES
+    # 3. CHECK IF AI DETECTED ONE OF THE EXPLICIT FOREIGN LANGUAGES
     if foreign_allowed:
         for fa in foreign_allowed:
             if fa.lower() in l:
                 return _get_region(fa), fa
 
-    # 3. EXPLICIT ENGLISH CHECK: If no foreign characters exist, and AI explicitly says "English"
+    # 4. EXPLICIT ENGLISH CHECK
     if "english" in l or l == "en":
         return "english", "English"
-
-    # 4. FALLBACK TO AI'S DETECTED LANGUAGE STRING
-    if "korean" in l or l == "ko": return "apac", "Korean"
-    if "japanese" in l or l == "ja": return "apac", "Japanese"
-    if "simplified chinese" in l or "zh-cn" in l: return "apac", "Simplified Chinese"
-    if "traditional chinese" in l or "zh-tw" in l: return "apac", "Traditional Chinese"
-    if "spanish" in l or l == "es": return "lacr", "Spanish"
-    if "portuguese" in l or l == "pt": return "lacr", "Portuguese"
-    if "french" in l or l == "fr": return "emea", "French"
-    if "german" in l or l == "de": return "emea", "German"
-    if "italian" in l or l == "it": return "emea", "Italian"
-    if "polish" in l or l == "pl": return "emea", "Polish"
-    if "russian" in l or l == "ru": return "emea", "Russian"
-    if "turkish" in l or l == "tr": return "emea", "Turkish"
-    if "arabic" in l or l == "ar": return "emea", "Arabic"
-    if "hungarian" in l or l == "hu": return "emea", "Hungarian"
-    if "hebrew" in l or l == "he" or l == "iw": return "emea", "Hebrew"
-    if "czech" in l or l == "cs": return "emea", "Czech"
-    
-    # 5. IF ALL ELSE FAILS, FORCE FALLBACK TO FIRST FOREIGN LANG (OR ENGLISH)
+        
+    # 5. ULTIMATE FALLBACK
     if foreign_allowed:
         return _get_region(foreign_allowed[0]), foreign_allowed[0]
         
@@ -1516,9 +1495,12 @@ def main():
         # ------------------------------------------------------------------
         max_retries = 15  # 1 initial + 14 retries = 15 total attempts
         
+        best_conf = -1.0
+        best_attempt_data = None
+        
         for attempt in range(max_retries):
             if attempt > 0:
-                print(f"\n[RETRY {attempt}/{max_retries-1}] Confidence below 40% or OCR error. Initiating completely new session...")
+                print(f"\n[RETRY {attempt}/{max_retries-1}] Verification was not a PASS. Initiating completely new session...")
                 # Re-instantiate the OCR object to completely wipe any requests.Session or cached tokens
                 ocr = MSIGenAIOCR()
                 
@@ -1680,12 +1662,29 @@ def main():
                 verdict = "PASS" if not flat_obs else "FAIL"
 
             # ------------------------------------------------------------------
-            # RETRY CONDITION CHECK
+            # SAVE BEST ATTEMPT
+            # ------------------------------------------------------------------
+            if confidence_pct > best_conf:
+                best_conf = confidence_pct
+                best_attempt_data = {
+                    "flat_obs": flat_obs,
+                    "confidence_pct": confidence_pct,
+                    "verdict": verdict,
+                    "orig_text": orig_text,
+                    "eng_text": eng_text,
+                    "lang_detected": lang_detected,
+                    "final_error_red": final_error_red,
+                    "final_error_evidence": final_error_evidence,
+                    "final_error_type": final_error_type
+                }
+
+            # ------------------------------------------------------------------
+            # RETRY CONDITION CHECK (Strict: Any non-PASS triggers a retry)
             # ------------------------------------------------------------------
             needs_retry = False
             
-            # Retry if confidence is less than 40% (even if it's a WARN or FAIL)
-            if verdict in ["FAIL", "WARN"] and confidence_pct < 40.0:
+            # Retry strictly if the verdict is NOT a perfect PASS
+            if verdict != "PASS":
                 needs_retry = True
             
             # Always retry on absolute errors
@@ -1702,6 +1701,19 @@ def main():
                 break
 
         # --- END OF RETRY LOOP ---
+
+        # If we failed to get a PASS after all 15 retries, restore the best attempt
+        if verdict != "PASS" and best_attempt_data is not None:
+            flat_obs = best_attempt_data["flat_obs"]
+            confidence_pct = best_attempt_data["confidence_pct"]
+            verdict = best_attempt_data["verdict"]
+            orig_text = best_attempt_data["orig_text"]
+            eng_text = best_attempt_data["eng_text"]
+            lang_detected = best_attempt_data["lang_detected"]
+            final_error_red = best_attempt_data["final_error_red"]
+            final_error_evidence = best_attempt_data["final_error_evidence"]
+            final_error_type = best_attempt_data["final_error_type"]
+            print(f"\n[INFO] Exhausted {max_retries} retries. Using best attempt with {confidence_pct}% confidence.")
 
         observed_display = f"{flat_obs} (Conf: {confidence_pct}%)"
         
@@ -1879,6 +1891,10 @@ def main():
     print(f"PASS: {summary_counts['PASS']} | FAIL: {summary_counts['FAIL']} | WARN: {summary_counts['WARN']} | SKIP: {summary_counts['SKIP']}")
     print(f"Total Time Taken: {time_taken} seconds")
     print("=" * 70 + "\n")
+
+    # Print out Token Usage and Remaining Limit
+    try: ocr.get_usage_and_cost()
+    except Exception: pass
 
     for res in all_results:
         try: _show_ocr_result_window(res["roi"], res["orig_text"], res["eng_text"], res["lang_detected"], res["verdict"], expected_lines=res["exp_lines"], device_name=res["dev_name"], error_msg=res.get("error_msg", ""))
