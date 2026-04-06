@@ -74,6 +74,9 @@ class MSIGenAIOCR:
         print(f"[MSI GenAI] User: {self.user_id}")
         print(f"[MSI GenAI] Datastore: {self.datastore_id[:10]}...")
         print(f"[MSI GenAI] Chat URL: {self.chat_url}")
+        # Add these two lines at the bottom of __init__:
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
     
     def encode_image_to_base64(self, image):
         """Convert image to base64 string"""
@@ -214,7 +217,19 @@ class MSIGenAIOCR:
             if response.status_code != 200:
                 raise RuntimeError(f"Prompt send failed {response.status_code}: {response.text}")
             
-            return response.json()
+            response_data = response.json()
+            
+            # Extract token usage from the response
+            try:
+                if "usage" in response_data:
+                    usage = response_data["usage"]
+                    # Handle both standard OpenAI naming and CamelCase gateway naming
+                    self.total_prompt_tokens += usage.get("promptTokens", usage.get("prompt_tokens", 0))
+                    self.total_completion_tokens += usage.get("completionTokens", usage.get("completion_tokens", 0))
+            except Exception:
+                pass
+                
+            return response_data
         except Exception as e:
             print(f"[ERROR] Failed to send prompt: {e}")
             raise
@@ -711,7 +726,7 @@ class MSIGenAIOCR:
             text = self.fix_ocr_errors(text)
 
             parsed2 = _parse_structured(text)
-            detected_summary = (parsed2.get("english") or "").strip() or (parsed2.get("original") or "").strip() or text
+            detected_summary = (parsed2.get("original") or "").strip() or (parsed2.get("english") or "").strip() or text
             detected_summary = " ".join([ln.strip() for ln in str(detected_summary).splitlines() if ln.strip()])
             
             _print_detected_line(detected_summary)
@@ -951,3 +966,29 @@ class MSIGenAIOCR:
             confidence += (sum(1 for c in text if c.isalnum() or c in '.-_ ') / total_chars) * 0.2
         
         return round(max(0.1, min(confidence, 0.95)) * 20) / 20
+    
+    def get_usage_and_cost(self):
+        """Prints the total token usage for the session so the GUI can display it."""
+        total = self.total_prompt_tokens + self.total_completion_tokens
+        
+        if total == 0:
+            print("\n[GenAI Tokens] No token usage tracked in this session.")
+            return
+            
+        print("\n" + "=" * 70)
+        print("GENAI API TOKEN USAGE SUMMARY")
+        print("=" * 70)
+        print(f"Prompt (Input) Tokens:     {self.total_prompt_tokens}")
+        print(f"Completion (Output) Tokens:{self.total_completion_tokens}")
+        print(f"Total Tokens Used:         {total}")
+        
+        # Estimate cost based on ChatGPT-4o pricing ($5.00 per 1M input / $15.00 per 1M output)
+        if "4o" in self.model.lower() and "mini" not in self.model.lower():
+            est_cost = (self.total_prompt_tokens / 1000000 * 5.00) + (self.total_completion_tokens / 1000000 * 15.00)
+            print(f"Estimated Session Cost:    ${est_cost:.4f}")
+        # Estimate cost based on ChatGPT-4o-mini pricing ($0.15 per 1M input / $0.60 per 1M output)
+        elif "mini" in self.model.lower():
+            est_cost = (self.total_prompt_tokens / 1000000 * 0.15) + (self.total_completion_tokens / 1000000 * 0.60)
+            print(f"Estimated Session Cost:    ${est_cost:.5f}")
+            
+        print("=" * 70 + "\n")

@@ -1106,8 +1106,11 @@ def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float
     boxes = sorted(boxes, key=lambda b: (b[0], b[1]))
     rois = []
     for (x1, y1, x2, y2) in boxes:
-        screen_box = next((s for s in screens if s[0] >= x1 and s[1] >= y1 and s[2] <= x2 and s[3] <= y2), None)
-        if screen_box is None: screen_box = (x1 + (x2 - x1) // 4, y1 + 10, x2 - (x2 - x1) // 4, y1 + (y2 - y1) // 3)
+        # Use the YOLO screen if its center point is inside the device (allows overlapping edges)
+        screen_box = next((s for s in screens if x1 <= (s[0]+s[2])/2 <= x2 and y1 <= (s[1]+s[3])/2 <= y2), None)
+        
+        # If YOLO completely failed to find a screen, just use the whole device box instead of a hardcoded crop
+        if screen_box is None: screen_box = (x1, y1, x2, y2)
         sx1, sy1, sx2, sy2 = max(0, screen_box[0]), max(0, screen_box[1]), min(last.shape[1], screen_box[2]), min(last.shape[0], screen_box[3])
         if sx2 <= sx1 or sy2 <= sy1: continue
         rois.append(last[sy1:sy2, sx1:sx2])
@@ -1296,8 +1299,8 @@ def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, co
 
     rois = []
     for (x1, y1, x2, y2) in sorted(last_boxes, key=lambda b: (b[0], b[1])):
-        screen_box = next((s for s in last_screens if s[0] >= x1 and s[1] >= y1 and s[2] <= x2 and s[3] <= y2), None)
-        if screen_box is None: screen_box = (x1 + (x2 - x1) // 4, y1 + 10, x2 - (x2 - x1) // 4, y1 + (y2 - y1) // 3)
+        screen_box = next((s for s in last_screens if x1 <= (s[0]+s[2])/2 <= x2 and y1 <= (s[1]+s[3])/2 <= y2), None)
+        if screen_box is None: screen_box = (x1, y1, x2, y2)
         sx1, sy1, sx2, sy2 = max(0, screen_box[0]), max(0, screen_box[1]), min(last_frame.shape[1], screen_box[2]), min(last_frame.shape[0], screen_box[3])
         if sx2 > sx1 and sy2 > sy1: rois.append(last_frame[sy1:sy2, sx1:sx2])
 
@@ -1493,7 +1496,7 @@ def main():
         # ------------------------------------------------------------------
         # RETRY LOGIC FOR OCR FAILURES/WARNINGS
         # ------------------------------------------------------------------
-        max_retries = 15  # 1 initial + 14 retries = 15 total attempts
+        max_retries = 5  # 1 initial + 14 retries = 15 total attempts
         
         best_conf = -1.0
         best_attempt_data = None
