@@ -725,12 +725,22 @@ def get_device_name(profiles: dict, device_id: int) -> str:
     name = str(d.get("name") or "").strip()
     return name if name else f"Device {device_id}"
 
-def map_language_to_region(lang: str, text: str = "") -> tuple[str, str]:
-    """Smart mapping of detected language string to exact Region & Language Column"""
+def map_language_to_region(lang: str, text: str = "", allowed_langs: str = "") -> tuple[str, str]:
+    """Smart mapping of detected language string to exact Region & Language Column, prioritizing foreign scripts."""
     l = str(lang).lower().strip()
     t = str(text)
     
-    # 1. HARD UNICODE BLOCK DETECTION (Overrides AI if AI forgets to explicitly name the language)
+    allowed = [x.strip() for x in allowed_langs.split(",") if x.strip()]
+    foreign_allowed = [x for x in allowed if x.lower() not in ["english", "en"]]
+    
+    def _get_region(lang_name: str) -> str:
+        ln = lang_name.lower()
+        if "korean" in ln or "japanese" in ln or "chinese" in ln or "thai" in ln: return "apac"
+        if "spanish" in ln or "portuguese" in ln: return "lacr"
+        if "english" in ln or "en" in ln: return "english"
+        return "emea"
+
+    # 1. HARD UNICODE BLOCK DETECTION (Overrides AI, heavily prioritizes Foreign Scripts even if English letters exist)
     has_hiragana = any('\u3040' <= c <= '\u309F' for c in t)
     has_katakana = any('\u30A0' <= c <= '\u30FF' for c in t)
     has_hangul = any('\uAC00' <= c <= '\uD7A3' for c in t)
@@ -739,39 +749,33 @@ def map_language_to_region(lang: str, text: str = "") -> tuple[str, str]:
     has_hebrew = any('\u0590' <= c <= '\u05FF' for c in t)
     has_thai = any('\u0E00' <= c <= '\u0E7F' for c in t)
     
-    if has_hiragana or has_katakana:
-        return "apac", "Japanese"
-    
-    if has_hangul:
-        return "apac", "Korean"
-        
-    if has_cyrillic:
-        return "emea", "Russian"
-        
-    if has_arabic:
-        return "emea", "Arabic"
-        
-    if has_hebrew:
-        return "emea", "Hebrew"
-        
-    if has_thai:
-        return "apac", "Thai"
+    if has_hiragana or has_katakana: return "apac", "Japanese"
+    if has_hangul: return "apac", "Korean"
+    if has_cyrillic: return "emea", "Russian"
+    if has_arabic: return "emea", "Arabic"
+    if has_hebrew: return "emea", "Hebrew"
+    if has_thai: return "apac", "Thai"
 
-    # If it has CJK ideographs but no Hiragana/Katakana/Hangul, it is Chinese.
+    # CJK ideographs
     has_cjk = any('\u4E00' <= c <= '\u9FFF' for c in text)
     if has_cjk:
-        # Physically analyze the characters in the text
-        if hanzidentifier.is_traditional(text):
-            return "apac", "Traditional Chinese"
-        elif hanzidentifier.is_simplified(text):
-            return "apac", "Simplified Chinese"
+        if hanzidentifier.is_traditional(text): return "apac", "Traditional Chinese"
+        elif hanzidentifier.is_simplified(text): return "apac", "Simplified Chinese"
         else:
-            # If the text is identical in both (e.g., "中"), fall back to AI's guess
-            if "traditional" in lang.lower() or "zh-tw" in lang.lower():
-                return "apac", "Traditional Chinese"
+            if "traditional" in l or "zh-tw" in l: return "apac", "Traditional Chinese"
             return "apac", "Simplified Chinese"
 
-    # 2. Fallback to AI's Detected Language String
+    # 2. CHECK IF AI DETECTED ONE OF THE USER'S EXPLICIT FOREIGN LANGUAGES
+    if foreign_allowed:
+        for fa in foreign_allowed:
+            if fa.lower() in l:
+                return _get_region(fa), fa
+
+    # 3. EXPLICIT ENGLISH CHECK: If no foreign characters exist, and AI explicitly says "English"
+    if "english" in l or l == "en":
+        return "english", "English"
+
+    # 4. FALLBACK TO AI'S DETECTED LANGUAGE STRING
     if "korean" in l or l == "ko": return "apac", "Korean"
     if "japanese" in l or l == "ja": return "apac", "Japanese"
     if "simplified chinese" in l or "zh-cn" in l: return "apac", "Simplified Chinese"
@@ -789,7 +793,10 @@ def map_language_to_region(lang: str, text: str = "") -> tuple[str, str]:
     if "hebrew" in l or l == "he" or l == "iw": return "emea", "Hebrew"
     if "czech" in l or l == "cs": return "emea", "Czech"
     
-    # 3. Default to English ONLY if no foreign characters/languages were mentioned
+    # 5. IF ALL ELSE FAILS, FORCE FALLBACK TO FIRST FOREIGN LANG (OR ENGLISH)
+    if foreign_allowed:
+        return _get_region(foreign_allowed[0]), foreign_allowed[0]
+        
     return "english", "English"
 
 def _show_ocr_result_window(
@@ -1339,9 +1346,9 @@ def main():
     args = parser.parse_args()
     try: args.region = _norm_col(args.region)
     except Exception: pass
-    region_map = {"auto": "auto", "english": "english", "en": "english", "apac": "apac", "emea": "emea", "lacr": "lacr", "lac": "lacr", "latam": "lacr"}
+    region_map = {"multiple": "multiple", "auto": "multiple", "english": "english", "en": "english", "apac": "apac", "emea": "emea", "lacr": "lacr", "lac": "lacr", "latam": "lacr"}
     args.region = region_map.get(args.region)
-    if not args.region: raise ValueError("--region must be one of: auto, english, apac, emea, lacr")
+    if not args.region: raise ValueError("--region must be one of: multiple, english, apac, emea, lacr")
 
     with open(args.config, "r", encoding="utf-8") as f: cfg = yaml.safe_load(f) or {}
 
@@ -1394,7 +1401,7 @@ def main():
             expected_list.append({"index": "SKIP_VERIFY", "tag": "SKIP_VERIFY", "expected_en": "SKIP", "expected_local": "SKIP"})
             continue
             
-        if args.region.lower() == "auto":
+        if args.region.lower() == "multiple":
              try:
                  exp = load_expected(args.excel, "english", "english", index=idx_val, tag=tag_val)
                  expected_list.append(exp)
@@ -1496,159 +1503,205 @@ def main():
         if exp_dict.get('tag'): print(f"Tag: {exp_dict.get('tag', '')}")
         print(f"Expected (English): {exp_dict.get('expected_en', '')}")
         
-        if args.region.lower() != "auto":
-            print(f"Expected ({args.region}/{args.language}): {exp_dict.get('expected_local', '')}")
-        else:
-            print("Expected (Local): [Will auto-detect from OCR]")
-
-        t0_ocr = time.time()
-        pass_lang = args.language if args.language.lower() != "auto" else None
-        text, _conf = ocr.extract_text(roi, expected_language=pass_lang)
-        t1_ocr = time.time()
-        total_ocr_time += (t1_ocr - t0_ocr)
-
-        parsed = _parse_structured_fields(text)
-        
-        parsed_doc_error = bool(parsed.get("error_red"))
-        parsed_doc_type = str(parsed.get("error_type") or "").strip().lower()
-        parsed_doc_evidence = str(parsed.get("error_evidence") or "").strip()
-
-        parsed["error_red"] = False
-        parsed["error_evidence"] = ""
-        parsed["error_type"] = ""
-
-        try:
-            sep_count = _strict_count_vertical_separators(roi)
-        except Exception:
-            sep_count = 0
-
-        try:
-            bridge = bool(_strict_separator_bridge_error(roi))
-        except Exception:
-            bridge = False
-
-        try:
-            if int(sep_count) >= 2 and bool(bridge):
-                src = parsed.get("original") or parsed.get("english") or text
-                ln = _strict_pick_column_line(src)
-                if not ln:
-                    try:
-                        candidates = [x.strip() for x in str(src or "").splitlines() if x.strip()]
-                        candidates.sort(key=len, reverse=True)
-                        ln = candidates[0] if candidates else ""
-                    except Exception: ln = ""
-                toks = _strict_pick_overlap_tokens_from_line(ln, top_k=3) if ln else []
-                if ln and toks:
-                    parsed["error_red"] = True
-                    lines = ["Overlap (bridge)", f"Line: {ln}"]
-                    for i, tok in enumerate(toks): lines.append(f"Token {i+1}: {tok}")
-                    parsed["error_evidence"] = "\n".join(lines)
-                    parsed["error_type"] = "overlap"
-        except Exception: pass
-
-        try:
-            exp_softkeys = 0
-            if profiles.get(device_id) and profiles[device_id].get("expected_softkeys"):
-                exp_softkeys = int(profiles[device_id]["expected_softkeys"])
-            if not exp_softkeys:
-                es = os.getenv(f"WALKIE_EXPECT_SOFTKEYS_D{device_id}", "").strip()
-                if es: exp_softkeys = int(es)
-
-            exp_seps = int(exp_softkeys) - 1 if int(exp_softkeys) > 0 else 0
-            if exp_seps > 0 and not bool(parsed.get("error_red")):
-                got_seps = int(sep_count)
-                src = parsed.get("original") or parsed.get("english") or text
-                ln = _strict_pick_column_line(src)
-                if ln: got_seps = max(int(got_seps), int(str(ln).count("|")))
-
-                if int(got_seps) < int(exp_seps):
-                    miss = int(exp_seps) - int(got_seps)
-                    top_k = min(3, max(1, miss))
-                    guesses = _strict_guess_overlap_from_missing_sep(ln, exp_softkeys, top_k=top_k) if ln else []
-                    if not guesses: guesses = _strict_guess_overlap_from_text_no_sep(src, top_k=top_k)
-                    if guesses:
-                        parsed["error_red"] = True
-                        lines = [f"Overlap: missing column (expected {int(exp_seps)} separators, got {int(got_seps)})"]
-                        if ln: lines.append(f"Line: {ln}")
-                        for i, g in enumerate(guesses): lines.append(f"Likely {i+1}: {g}")
-                        parsed["error_evidence"] = "\n".join(lines).strip()
-                        parsed["error_type"] = "overlap"
-        except Exception: pass
-
-        try:
-            if not parsed.get("error_red") and int(sep_count) > 0:
-                src = parsed.get("original") or parsed.get("english") or text
-                mixed_list = _strict_mixed_script_merge_tokens(src, top_k=3)
-                if mixed_list:
-                    parsed["error_red"] = True
-                    if not parsed.get("error_evidence"):
-                        ln = _strict_pick_column_line(src)
-                        lines = ["Overlap (mixed)"]
-                        if ln: lines.append(f"Line: {ln}")
-                        for i, tok in enumerate(mixed_list): lines.append(f"Token {i+1}: {tok}")
-                        parsed["error_evidence"] = "\n".join(lines).strip()
-                        parsed["error_type"] = "overlap"
-        except Exception: pass
-
-        final_error_red = bool(parsed.get("error_red"))
-        final_error_evidence = str(parsed.get("error_evidence") or "").strip()
-        final_error_type = str(parsed.get("error_type") or "").strip()
-
-        if (not final_error_red) and parsed_doc_error:
-            if parsed_doc_type in ["misalignment", "upside down", "overlap"]:
-                final_error_red = True
-                final_error_type = parsed_doc_type
-                if not final_error_evidence: final_error_evidence = parsed_doc_evidence
-
-        lang_detected = parsed.get("language") or ""
-        orig_text = parsed.get("original") or text
-        eng_text = parsed.get("english") or ""
-
         final_region = args.region
         final_language = args.language
         
-        if args.region.lower() == "auto":
-            final_region, final_language = map_language_to_region(lang_detected, orig_text)
-            print(f"\n[AUTO DETECT] Mapped detected language '{lang_detected}' to Region: {final_region.upper()}, Column: {final_language}")
-            try:
-                new_exp = load_expected(args.excel, final_region, final_language, index=exp_dict.get("index"), tag=exp_dict.get("tag"))
-                exp_dict["expected_local"] = new_exp.get("expected_local", "")
-                exp_dict["region_sheet"] = new_exp.get("region_sheet", final_region)
-                print(f"Expected ({final_region.upper()}/{final_language}): {exp_dict['expected_local']}")
-            except Exception as e:
-                print(f"[WARNING] Failed to auto-load expected text for {final_region}/{final_language}: {e}")
-                exp_dict["expected_local"] = ""
-        
-        observed_n = _norm_text(orig_text)
-        expected_local_n = _norm_text(exp_dict.get("expected_local", ""))
-
-        flat_obs = " ".join(observed_n.split())
-        flat_exp = " ".join(expected_local_n.split())
-
-        confidence_pct = 0.0
-        verdict = "FAIL"
-
-        if flat_exp:
-            similarity = difflib.SequenceMatcher(None, flat_exp.lower(), flat_obs.lower()).ratio()
-            confidence_pct = round(similarity * 100, 1)
-
-            if confidence_pct == 100.0 or flat_obs == flat_exp:
-                verdict = "PASS"
-                confidence_pct = 100.0
-            else:
-                warn_jp = False
-                if final_language and str(final_language).strip().lower() in ["japanese", "ja"]:
-                    try: warn_jp = _jp_strip_diacritics(flat_obs) == _jp_strip_diacritics(flat_exp)
-                    except Exception: pass
-
-                if warn_jp:
-                    verdict = "WARN"
-                elif confidence_pct >= 70.0:
-                    verdict = "WARN"
-                else:
-                    verdict = "FAIL"
+        if args.region.lower() == "multiple":
+            print("Expected (Local): [Will auto-detect from OCR based on selected languages]")
         else:
-            verdict = "PASS" if not flat_obs else "FAIL"
+            print(f"Expected ({final_region.upper()}/{final_language}): {exp_dict.get('expected_local', '')}")
+
+        # ------------------------------------------------------------------
+        # RETRY LOGIC FOR OCR FAILURES/WARNINGS
+        # ------------------------------------------------------------------
+        max_retries = 15  # 1 initial + 14 retries = 15 total attempts
+        
+        for attempt in range(max_retries):
+            if attempt > 0:
+                print(f"\n[RETRY {attempt}/{max_retries-1}] Confidence below 40% or OCR error. Initiating completely new session...")
+                # Re-instantiate the OCR object to completely wipe any requests.Session or cached tokens
+                ocr = MSIGenAIOCR()
+                
+            t0_ocr = time.time()
+            pass_lang = args.language if args.language.lower() != "multiple" else None
+            
+            # Anti-caching: Slightly alter a single pixel on retries so the image hash changes
+            # This completely bypasses any server-side or API gateway image caching.
+            retry_roi = roi.copy()
+            if attempt > 0:
+                try:
+                    retry_roi[-1, -1] = (retry_roi[-1, -1] + attempt) % 255
+                except Exception: pass
+
+            text, _conf = ocr.extract_text(retry_roi, expected_language=pass_lang)
+            t1_ocr = time.time()
+            
+            if attempt == 0:
+                total_ocr_time += (t1_ocr - t0_ocr)
+
+            parsed = _parse_structured_fields(text)
+            
+            parsed_doc_error = bool(parsed.get("error_red"))
+            parsed_doc_type = str(parsed.get("error_type") or "").strip().lower()
+            parsed_doc_evidence = str(parsed.get("error_evidence") or "").strip()
+
+            parsed["error_red"] = False
+            parsed["error_evidence"] = ""
+            parsed["error_type"] = ""
+
+            try:
+                sep_count = _strict_count_vertical_separators(roi)
+            except Exception:
+                sep_count = 0
+
+            try:
+                bridge = bool(_strict_separator_bridge_error(roi))
+            except Exception:
+                bridge = False
+
+            try:
+                if int(sep_count) >= 2 and bool(bridge):
+                    src = parsed.get("original") or parsed.get("english") or text
+                    ln = _strict_pick_column_line(src)
+                    if not ln:
+                        try:
+                            candidates = [x.strip() for x in str(src or "").splitlines() if x.strip()]
+                            candidates.sort(key=len, reverse=True)
+                            ln = candidates[0] if candidates else ""
+                        except Exception: ln = ""
+                    toks = _strict_pick_overlap_tokens_from_line(ln, top_k=3) if ln else []
+                    if ln and toks:
+                        parsed["error_red"] = True
+                        lines = ["Overlap (bridge)", f"Line: {ln}"]
+                        for i, tok in enumerate(toks): lines.append(f"Token {i+1}: {tok}")
+                        parsed["error_evidence"] = "\n".join(lines)
+                        parsed["error_type"] = "overlap"
+            except Exception: pass
+
+            try:
+                exp_softkeys = 0
+                if profiles.get(device_id) and profiles[device_id].get("expected_softkeys"):
+                    exp_softkeys = int(profiles[device_id]["expected_softkeys"])
+                if not exp_softkeys:
+                    es = os.getenv(f"WALKIE_EXPECT_SOFTKEYS_D{device_id}", "").strip()
+                    if es: exp_softkeys = int(es)
+
+                exp_seps = int(exp_softkeys) - 1 if int(exp_softkeys) > 0 else 0
+                if exp_seps > 0 and not bool(parsed.get("error_red")):
+                    got_seps = int(sep_count)
+                    src = parsed.get("original") or parsed.get("english") or text
+                    ln = _strict_pick_column_line(src)
+                    if ln: got_seps = max(int(got_seps), int(str(ln).count("|")))
+
+                    if int(got_seps) < int(exp_seps):
+                        miss = int(exp_seps) - int(got_seps)
+                        top_k = min(3, max(1, miss))
+                        guesses = _strict_guess_overlap_from_missing_sep(ln, exp_softkeys, top_k=top_k) if ln else []
+                        if not guesses: guesses = _strict_guess_overlap_from_text_no_sep(src, top_k=top_k)
+                        if guesses:
+                            parsed["error_red"] = True
+                            lines = [f"Overlap: missing column (expected {int(exp_seps)} separators, got {int(got_seps)})"]
+                            if ln: lines.append(f"Line: {ln}")
+                            for i, g in enumerate(guesses): lines.append(f"Likely {i+1}: {g}")
+                            parsed["error_evidence"] = "\n".join(lines).strip()
+                            parsed["error_type"] = "overlap"
+            except Exception: pass
+
+            try:
+                if not parsed.get("error_red") and int(sep_count) > 0:
+                    src = parsed.get("original") or parsed.get("english") or text
+                    mixed_list = _strict_mixed_script_merge_tokens(src, top_k=3)
+                    if mixed_list:
+                        parsed["error_red"] = True
+                        if not parsed.get("error_evidence"):
+                            ln = _strict_pick_column_line(src)
+                            lines = ["Overlap (mixed)"]
+                            if ln: lines.append(f"Line: {ln}")
+                            for i, tok in enumerate(mixed_list): lines.append(f"Token {i+1}: {tok}")
+                            parsed["error_evidence"] = "\n".join(lines).strip()
+                            parsed["error_type"] = "overlap"
+            except Exception: pass
+
+            final_error_red = bool(parsed.get("error_red"))
+            final_error_evidence = str(parsed.get("error_evidence") or "").strip()
+            final_error_type = str(parsed.get("error_type") or "").strip()
+
+            if (not final_error_red) and parsed_doc_error:
+                if parsed_doc_type in ["misalignment", "upside down", "overlap"]:
+                    final_error_red = True
+                    final_error_type = parsed_doc_type
+                    if not final_error_evidence: final_error_evidence = parsed_doc_evidence
+
+            lang_detected = parsed.get("language") or ""
+            orig_text = parsed.get("original") or text
+            eng_text = parsed.get("english") or ""
+
+            if args.region.lower() == "multiple":
+                final_region, final_language = map_language_to_region(lang_detected, orig_text, allowed_langs=args.language)
+                print(f"\n[MULTIPLE DETECT] Mapped detected language '{lang_detected}' to Region: {final_region.upper()}, Column: {final_language}")
+                try:
+                    new_exp = load_expected(args.excel, final_region, final_language, index=exp_dict.get("index"), tag=exp_dict.get("tag"))
+                    exp_dict["expected_local"] = new_exp.get("expected_local", "")
+                    exp_dict["region_sheet"] = new_exp.get("region_sheet", final_region)
+                    print(f"Expected ({final_region.upper()}/{final_language}): {exp_dict['expected_local']}")
+                except Exception as e:
+                    print(f"[WARNING] Failed to load expected text for {final_region}/{final_language}: {e}")
+                    exp_dict["expected_local"] = ""
+            
+            observed_n = _norm_text(orig_text)
+            expected_local_n = _norm_text(exp_dict.get("expected_local", ""))
+
+            flat_obs = " ".join(observed_n.split())
+            flat_exp = " ".join(expected_local_n.split())
+
+            confidence_pct = 0.0
+            verdict = "FAIL"
+
+            if flat_exp:
+                similarity = difflib.SequenceMatcher(None, flat_exp.lower(), flat_obs.lower()).ratio()
+                confidence_pct = round(similarity * 100, 1)
+
+                if confidence_pct == 100.0 or flat_obs == flat_exp:
+                    verdict = "PASS"
+                    confidence_pct = 100.0
+                else:
+                    warn_jp = False
+                    if final_language and str(final_language).strip().lower() in ["japanese", "ja"]:
+                        try: warn_jp = _jp_strip_diacritics(flat_obs) == _jp_strip_diacritics(flat_exp)
+                        except Exception: pass
+
+                    if warn_jp:
+                        verdict = "WARN"
+                    elif confidence_pct >= 70.0:
+                        verdict = "WARN"
+                    else:
+                        verdict = "FAIL"
+            else:
+                verdict = "PASS" if not flat_obs else "FAIL"
+
+            # ------------------------------------------------------------------
+            # RETRY CONDITION CHECK
+            # ------------------------------------------------------------------
+            needs_retry = False
+            
+            # Retry if confidence is less than 40% (even if it's a WARN or FAIL)
+            if verdict in ["FAIL", "WARN"] and confidence_pct < 40.0:
+                needs_retry = True
+            
+            # Always retry on absolute errors
+            if not text or text == "NO_TEXT" or "REQUEST_ERROR" in text or "EXTRACTION_ERROR" in text:
+                needs_retry = True
+                
+            # Retry if we expect text but got no alphanumeric characters
+            if flat_exp and not any(c.isalnum() for c in flat_obs):
+                needs_retry = True
+
+            if needs_retry and attempt < max_retries - 1:
+                continue
+            else:
+                break
+
+        # --- END OF RETRY LOOP ---
 
         observed_display = f"{flat_obs} (Conf: {confidence_pct}%)"
         

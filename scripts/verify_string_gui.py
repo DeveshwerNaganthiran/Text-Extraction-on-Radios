@@ -284,9 +284,10 @@ def _language_options_from_excel(excel_path: str, region: str) -> list[str]:
             headers = list(row)
             break
 
+        # Removed 'english' from ignore list to allow selection
         ignore = {
             "index", "string tag", "tag", "string category", "category",
-            "version", "ver", "english", "comment", "comments",
+            "version", "ver", "comment", "comments",
             "notes", "note", "description", "desc",
         }
 
@@ -389,8 +390,8 @@ class VerifyStringGUI:
         row = 0
 
         self.excel_var = tk.StringVar(value=str(self._settings.get("excel") or _default_excel_path()))
-        self.region_var = tk.StringVar(value=str(self._settings.get("region") or "Auto"))
-        self.language_var = tk.StringVar(value=str(self._settings.get("language") or "Auto"))
+        self.region_var = tk.StringVar(value=str(self._settings.get("region") or "Multiple"))
+        self.language_var = tk.StringVar(value=str(self._settings.get("language") or ""))
         self.tag_var = tk.StringVar(value=str(self._settings.get("tag") or ""))
         self.index_var = tk.StringVar(value=str(self._settings.get("index") or ""))
         
@@ -402,15 +403,23 @@ class VerifyStringGUI:
         row += 1
 
         tk.Label(frm, text="Region").grid(row=row, column=0, sticky="w", pady=(6, 0))
-        self.region_combo = ttk.Combobox(frm, textvariable=self.region_var, width=20, state="normal", values=["Auto", "APAC", "EMEA", "LACR", "English"])
+        self.region_combo = ttk.Combobox(frm, textvariable=self.region_var, width=20, state="normal", values=["Multiple", "APAC", "EMEA", "LACR", "English"])
         self.region_combo.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
         self.region_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_languages())
         self.region_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_tags(), add=True)
         row += 1
 
-        tk.Label(frm, text="Language").grid(row=row, column=0, sticky="w", pady=(6, 0))
-        self.language_combo = ttk.Combobox(frm, textvariable=self.language_var, width=30, state="normal")
-        self.language_combo.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+        # Multi-select Language setup
+        tk.Label(frm, text="Language(s)").grid(row=row, column=0, sticky="w", pady=(6, 0))
+        lang_frame = tk.Frame(frm)
+        lang_frame.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
+        
+        self.language_entry = ttk.Entry(lang_frame, textvariable=self.language_var, width=30)
+        self.language_entry.pack(side=tk.LEFT)
+        
+        self.language_combo = ttk.Combobox(lang_frame, width=18, state="readonly")
+        self.language_combo.pack(side=tk.LEFT, padx=(5, 0))
+        self.language_combo.bind("<<ComboboxSelected>>", self._add_language)
         row += 1
 
         tk.Label(frm, text="String Tag").grid(row=row, column=0, sticky="w", pady=(6, 0))
@@ -632,6 +641,20 @@ class VerifyStringGUI:
             pass
 
         self.root.after(50, self._drain_queue)
+
+    def _add_language(self, event=None):
+        val = self.language_combo.get()
+        if not val: return
+        current = self.language_var.get().strip()
+        if current:
+            # Check if it's already in the list to avoid duplicates
+            existing = [x.strip().lower() for x in current.split(",")]
+            if val.lower() not in existing:
+                self.language_var.set(current + ", " + val)
+        else:
+            self.language_var.set(val)
+        # Clear combobox selection visually
+        self.language_combo.set('')
 
     def _on_index_changed(self, *args):
         if getattr(self, "_commg_is_active_run", False): return
@@ -1274,10 +1297,18 @@ class VerifyStringGUI:
 
     def refresh_languages(self):
         excel = (self.excel_var.get() or "").strip()
-        region = (self.region_var.get() or "").strip() or "Auto"
+        region = (self.region_var.get() or "").strip() or "Multiple"
         
-        if region.lower() == "auto":
-            opts = ["Auto"]
+        if region.lower() == "multiple":
+            try: 
+                opts1 = _language_options_from_excel(excel, "apac")
+                opts2 = _language_options_from_excel(excel, "emea")
+                opts3 = _language_options_from_excel(excel, "lacr")
+                opts = list(set(opts1 + opts2 + opts3))
+            except Exception:
+                opts = []
+            if not opts:
+                opts = ["Japanese", "Korean", "Simplified Chinese", "Traditional Chinese", "French", "Spanish", "German", "Italian", "Polish", "Russian", "Turkish", "Arabic", "Hungarian", "Hebrew", "Czech", "Portuguese", "English"]
         elif region.lower() == "english":
             opts = ["English"]
         else:
@@ -1285,16 +1316,11 @@ class VerifyStringGUI:
             except Exception: opts = []
 
             if not opts:
-                opts = ["Japanese", "Korean", "Simplified Chinese", "Traditional Chinese", "French", "Spanish", "German", "Italian", "Polish", "Russian", "Turkish", "Arabic", "Hungarian", "Hebrew", "Czech", "Portuguese"]
+                opts = ["Japanese", "Korean", "Simplified Chinese", "Traditional Chinese", "French", "Spanish", "German", "Italian", "Polish", "Russian", "Turkish", "Arabic", "Hungarian", "Hebrew", "Czech", "Portuguese", "English"]
 
         try:
-            self.language_combo["values"] = opts
-            cur = (self.language_var.get() or "").strip()
-            
-            if cur and cur in opts: 
-                return
-                
-            if opts: 
+            self.language_combo["values"] = sorted(opts)
+            if not self.language_var.get().strip() and opts:
                 self.language_var.set(opts[0])
         except Exception: pass
 
@@ -1370,7 +1396,7 @@ class VerifyStringGUI:
         tag = self.tag_var.get().strip()
         idx = self.index_var.get().strip()
 
-        if not region: raise ValueError("Region is required (e.g., Auto/APAC/EMEA/LACR/English)")
+        if not region: raise ValueError("Region is required (e.g., Multiple/APAC/EMEA/LACR/English)")
         if not language: raise ValueError("Language is required (e.g., Auto/Japanese)")
         if not tag and not idx: raise ValueError("Provide either String Tag or Index")
 
