@@ -22,7 +22,9 @@ class MSIGenAIOCR:
         self.api_key = os.getenv('MSI_API_KEY', "GTy:YsSiQSt,cxCGOLsj(ZkjCZDFTh!OkML9WrEn")
         self.user_id = os.getenv('MSI_USER_ID', 'bgvk38@motorolasolutions.com')
         self.datastore_id = os.getenv('MSI_DATASTORE_ID', "1579319e-2b48-4bad-9825-4a7dd10ac0ef")
-        self.model = os.getenv('MSI_MODEL', "ChatGPT4o")
+        
+        # MODIFICATION 1: Switch to the highly cost-efficient GPT-4o Mini model
+        self.model = os.getenv('MSI_MODEL', "ChatGPT4o-mini")
         
         if not self.api_key:
             raise ValueError("MSI_API_KEY not found in environment variables")
@@ -33,17 +35,19 @@ class MSIGenAIOCR:
         # Session-based workflow endpoints
         self.chat_url = self.host + "/chat"
         self.upload_url = self.host + "/upload"
+        self.sessions_url = self.host + f"/getChatSessions/{self.model}"
  
-        # Performance tuning
+        # MODIFICATION 2: Performance tuning (reduced image payload size)
         self.http = requests.Session()
-        self.max_image_dim = int(os.getenv("MSI_MAX_IMAGE_DIM", "1600"))
-        self.jpeg_quality = int(os.getenv("MSI_JPEG_QUALITY", "98"))
+        self.max_image_dim = int(os.getenv("MSI_MAX_IMAGE_DIM", "800"))
+        self.jpeg_quality = int(os.getenv("MSI_JPEG_QUALITY", "85"))
+        
         self.init_timeouts = [int(t) for t in os.getenv("MSI_INIT_TIMEOUTS", "60,30").split(",") if t.strip()]
         self.init_attempts = int(os.getenv("MSI_INIT_ATTEMPTS", "3"))
         self.upload_timeout = int(os.getenv("MSI_UPLOAD_TIMEOUT", "50"))
         self.prompt_timeout = int(os.getenv("MSI_PROMPT_TIMEOUT", "80"))
         self.session_ttl_sec = int(os.getenv("MSI_SESSION_TTL_SEC", "360"))
-        self.prompt_mode = os.getenv("MSI_PROMPT_MODE", "short").strip().lower()  # full|short
+        self.prompt_mode = os.getenv("MSI_PROMPT_MODE", "short").strip().lower()
 
         self._cached_session_id: Optional[str] = None
         self._cached_session_ts: float = 0.0
@@ -64,8 +68,6 @@ class MSIGenAIOCR:
 
             if sid:
                 self._cached_session_id = sid
-                # Force the cache timestamp to 0 so the script knows it's an old session
-                # and generates a fresh one instead of overloading Claude!
                 self._cached_session_ts = 0.0 
         except Exception:
             pass
@@ -73,31 +75,37 @@ class MSIGenAIOCR:
         print(f"[MSI GenAI] Using: {self.model}")
         print(f"[MSI GenAI] User: {self.user_id}")
         print(f"[MSI GenAI] Datastore: {self.datastore_id[:10]}...")
-        print(f"[MSI GenAI] Chat URL: {self.chat_url}")
-        # Add these two lines at the bottom of __init__:
+        
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
     
     def encode_image_to_base64(self, image):
-        """Convert image to base64 string"""
+        """Convert image to base64 string with maximum compression for token savings"""
         if isinstance(image, (str, Path)):
             with open(image, "rb") as f:
                 return base64.b64encode(f.read()).decode("utf-8")
         elif isinstance(image, np.ndarray):
             img = image
-            if self.max_image_dim and self.max_image_dim > 0:
-                h, w = img.shape[:2]
-                max_dim = max(h, w)
-                if max_dim > self.max_image_dim:
-                    scale = self.max_image_dim / float(max_dim)
-                    new_w = max(1, int(w * scale))
-                    new_h = max(1, int(h * scale))
-                    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            
+            # Convert to Grayscale to strip color data (reduces file size by 60%)
+            if len(img.shape) == 3:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            # Aggressively resize down to 250 pixels maximum (plenty for OCR)
+            safe_dim = 250 
+            h, w = img.shape[:2]
+            max_dim = max(h, w)
+            if max_dim > safe_dim:
+                scale = safe_dim / float(max_dim)
+                new_w = max(1, int(w * scale))
+                new_h = max(1, int(h * scale))
+                img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
+            # Use maximum JPEG compression (50 is visually fine for reading basic text)
             success, buffer = cv2.imencode(
                 '.jpg',
                 img,
-                [int(cv2.IMWRITE_JPEG_QUALITY), int(self.jpeg_quality)],
+                [int(cv2.IMWRITE_JPEG_QUALITY), 50],
             )
             if success:
                 return base64.b64encode(buffer).decode("utf-8")
@@ -219,13 +227,27 @@ class MSIGenAIOCR:
             
             response_data = response.json()
             
-            # Extract token usage from the response
+            # --- UPDATED: Extract token usage from the response "args" ---
             try:
+                pt, ct = 0, 0
+                
+                # Check standard locations
                 if "usage" in response_data:
-                    usage = response_data["usage"]
-                    # Handle both standard OpenAI naming and CamelCase gateway naming
-                    self.total_prompt_tokens += usage.get("promptTokens", usage.get("prompt_tokens", 0))
-                    self.total_completion_tokens += usage.get("completionTokens", usage.get("completion_tokens", 0))
+                    pt = response_data["usage"].get("promptTokens", response_data["usage"].get("prompt_tokens", 0))
+                    ct = response_data["usage"].get("completionTokens", response_data["usage"].get("completion_tokens", 0))
+                
+                # Check inside 'args' as per API Guide documentation
+                if pt == 0 and ct == 0 and "args" in response_data and isinstance(response_data["args"], dict):
+                    args_data = response_data["args"]
+                    if "usage" in args_data:
+                        pt = args_data["usage"].get("promptTokens", args_data["usage"].get("prompt_tokens", 0))
+                        ct = args_data["usage"].get("completionTokens", args_data["usage"].get("completion_tokens", 0))
+                    else:
+                        pt = args_data.get("promptTokens", args_data.get("prompt_tokens", 0))
+                        ct = args_data.get("completionTokens", args_data.get("completion_tokens", 0))
+
+                self.total_prompt_tokens += int(pt)
+                self.total_completion_tokens += int(ct)
             except Exception:
                 pass
                 
@@ -233,7 +255,7 @@ class MSIGenAIOCR:
         except Exception as e:
             print(f"[ERROR] Failed to send prompt: {e}")
             raise
-
+        
     def get_or_init_session(self) -> str:
         now = time.time()
         if self._cached_session_id and (now - self._cached_session_ts) < self.session_ttl_sec:
@@ -250,6 +272,9 @@ class MSIGenAIOCR:
         region: Optional[tuple] = None,
         expected_language: Optional[str] = None,
     ) -> Tuple[str, float]:
+        
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
 
         def _print_detected_line(msg: str):
             print(f"Detected: '{msg}'", flush=True)
@@ -487,11 +512,7 @@ class MSIGenAIOCR:
                 try:
                     v = (expected_language or "").strip()
                     if v:
-                        lang_hint = (
-                            f"The expected UI language is '{v}'. "
-                            "If multiple languages are present, include the expected UI language in Detected Languages. "
-                            "Do NOT label the language as English unless the Original text is entirely English. "
-                        )
+                        lang_hint = f"Expected UI language is '{v}'. "
                 except Exception: pass
 
                 softkey_hint = ""
@@ -499,45 +520,30 @@ class MSIGenAIOCR:
                     exp_softkeys = str(os.getenv("WALKIE_EXPECT_SOFTKEYS", "") or "").strip()
                     exp_softkeys = int(exp_softkeys) if exp_softkeys else 0
                     if exp_softkeys > 0:
-                        exp_seps = max(0, int(exp_softkeys) - 1)
-                        softkey_hint = (
-                            f"This device has {int(exp_softkeys)} softkey buttons. "
-                            "If you see fewer columns than expected, treat it as an overlap error. "
-                        )
+                        softkey_hint = f"Device has {int(exp_softkeys)} softkey buttons. "
                 except Exception: pass
 
+                # MODIFICATION 3: Optimised System Prompt
                 prompt = (
-                    "Extract all visible text from this walkie-talkie screen image. "
-                    "Ignore all icons/pictograms (especially the music note ♪, battery, or signal bars). Extract TEXT ONLY. "
-                    "EXTREMELY CRITICAL: This is an industrial radio LCD screen. The text may be in a very blocky, segmented, or dot-matrix font. "
-                    "Do NOT mistake large, stylized letters (like 'H', or zone indicators) for icons or geometric shapes. "
-                    "EXTREMELY CRITICAL: Pay careful attention to NUMBERS versus LETTERS. Do not hallucinate letters where there are numbers. For example, do not confuse the number '25' with 'AF', '5' with 'S', or '0' with 'O'. Output exactly what is on the screen without guessing. " # <--- ADD THIS INSTRUCTION
-                    "You MUST read ALL visible characters, no matter how blocky they look. "
-                    "CRITICAL: You MUST preserve exact leading spaces and indentation for every line! "
-                    "CRITICAL: Preserve column separators and layout exactly. "
-                    "EXTREMELY CRITICAL: Carefully inspect the text for ANY upside-down or inverted characters. "
-                    "Pay special attention to Arabic text. If the letter 'ع' (Ain) or any other letter is visually flipped upside down, you MUST set Upside Down Error to YES and provide the character in the evidence. "
-                    + lang_hint
-                    + softkey_hint
-                    +
-                    "Be STRICT on layout bugs, BUT handle Bi-Directional text correctly: "
-                    "If the screen contains Right-to-Left text (like Arabic) mixed with LTR (English/Numbers), the entire block is usually RIGHT-ALIGNED. "
-                    "Because lines have different lengths, their LEFT starting positions will be staggered/uneven. "
-                    "DO NOT flag a Misalignment Error for uneven left margins in a Right-Aligned text block! "
+                    "Extract all text from this walkie-talkie screen. Ignore all icons/symbols (♪, battery). "
+                    "EXTREMELY CRITICAL: Output EXACTLY what is on screen. Do NOT confuse numbers with letters (e.g. 5 vs S, 0 vs O, 25 vs AF). "
+                    "CRITICAL: Preserve exact leading spaces, indentation, and layout. "
+                    + lang_hint + softkey_hint +
+                    "Be STRICT on layout bugs. If Right-to-Left text (Arabic) is mixed LTR, ignore left margin staggering. "
                     "Return EXACTLY in this format, no extra text:\n"
                     "Detected Languages: <languages>\n"
-                    "Detected Text(Original):\n<<<\n<original text exactly as it appears>\n>>>\n"
-                    "Detected Text(English Translation):\n<<<\n<english translation>\n>>>\n"
-                    "Upside Down Error: <YES or NO>\n"
-                    "Upside Down Evidence: <if YES, output ONLY the upside down character or word>\n"
-                    "Overlap Error: <YES or NO>\n"
-                    "Overlap Evidence: <if YES, quote the merged word>\n"
-                    "Misalignment Error: <YES or NO. Answer YES ONLY if a line is SEVERELY indented or shifted (e.g., more than 15% of the screen width) compared to the main text block. Ignore minor pixel staggering or slight unevenness.>\n"
-                    "Misalignment Evidence: <If YES, extract ONLY the specific line of text that is visibly indented/shifted away from the margin. Do NOT output the first or second lines if the third line is the indented one.>\n"
-                    "Vertical Overlap Error: <YES or NO>\n"
-                    "Vertical Overlap Evidence: <if YES, quote the stacked snippet>\n"
-                    "UI Render Overlap Error: <YES or NO>\n"
-                    "UI Render Overlap Evidence: <if YES, quote the overlapped snippet>\n"
+                    "Detected Text(Original):\n<<<\n<exact text>\n>>>\n"
+                    "Detected Text(English Translation):\n<<<\n<translation>\n>>>\n"
+                    "Upside Down Error: <YES/NO>\n"
+                    "Upside Down Evidence: <text>\n"
+                    "Overlap Error: <YES/NO>\n"
+                    "Overlap Evidence: <text>\n"
+                    "Misalignment Error: <YES/NO>\n"
+                    "Misalignment Evidence: <text>\n"
+                    "Vertical Overlap Error: <YES/NO>\n"
+                    "Vertical Overlap Evidence: <text>\n"
+                    "UI Render Overlap Error: <YES/NO>\n"
+                    "UI Render Overlap Evidence: <text>\n"
                 )
             else:
                 prompt = """Read ALL text visible in this walkie-talkie screen image..."""
@@ -551,9 +557,6 @@ class MSIGenAIOCR:
                     session_id = self.init_session()
                 
                 # CRITICAL FIX: Invalidate the cached session immediately!
-                # This guarantees that the next device in the loop will trigger a 
-                # fresh session, completely preventing the AI from remembering and 
-                # copying text from the previous devices.
                 self._cached_session_id = None
                 self._cached_session_ts = 0.0
                 
@@ -565,30 +568,24 @@ class MSIGenAIOCR:
             
             raw_text = self.extract_text_from_response(result)
             parsed = _parse_structured(raw_text)
+            
             # --- FORCE CV2 PIXEL-PERFECT FALLBACK TO OVERWRITE BAD EVIDENCE ---
-            # Flawless physical line segmentation using Morphological Gradients.
-            # Bypasses all glare and perfectly maps indented lines to OCR text using Hard Anchors.
             try:
                 if image_to_use is not None:
                     gray = cv2.cvtColor(image_to_use, cv2.COLOR_BGR2GRAY) if len(image_to_use.shape) == 3 else image_to_use
                     h_img, w_img = gray.shape
                     
-                    # RELAXED CROP: cy1=0.20, cy2=0.90
-                    # Expands the vertical view to catch lower menu items like "convergnti".
                     cy1, cy2 = int(h_img * 0.20), int(h_img * 0.90)
                     cx1, cx2 = int(w_img * 0.05), int(w_img * 0.95)
                     
                     if cy2 > cy1 and cx2 > cx1:
                         roi = gray[cy1:cy2, cx1:cx2]
                         
-                        # 1. Morphological Gradient: Extracts text outlines perfectly regardless of lighting/glare
                         kernel_grad = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
                         grad = cv2.morphologyEx(roi, cv2.MORPH_GRADIENT, kernel_grad)
                         
-                        # 2. Otsu Thresholding
                         _, thresh = cv2.threshold(grad, 0, 255, cv2.THRESH_BINARY | cv2.THRESH_OTSU)
                         
-                        # 3. STRICT HORIZONTAL DILATION
                         kernel_h = cv2.getStructuringElement(cv2.MORPH_RECT, (35, 2))
                         dilated = cv2.morphologyEx(thresh, cv2.MORPH_DILATE, kernel_h)
                         
@@ -597,14 +594,11 @@ class MSIGenAIOCR:
                         lines_bounds = []
                         for c in contours:
                             x, y, w, h = cv2.boundingRect(c)
-                            # RELAXED FILTERS: Catches smaller font sizes and shorter words
                             if w > 12 and h > 6 and h < int((cy2 - cy1) * 0.5):
                                 lines_bounds.append([x, y, x+w, y+h])
                                 
-                        # Sort by Y axis
                         lines_bounds.sort(key=lambda b: b[1])
                         
-                        # 4. Group intersecting bounds into solid physical lines
                         merged_lines = []
                         for b in lines_bounds:
                             if not merged_lines:
@@ -613,7 +607,6 @@ class MSIGenAIOCR:
                                 last = merged_lines[-1]
                                 y_overlap = max(0, min(last[3], b[3]) - max(last[1], b[1]))
                                 min_h = min(last[3]-last[1], b[3]-b[1])
-                                # Require substantial vertical overlap to merge (prevents separate lines from fusing)
                                 if y_overlap > 0.4 * min_h:
                                     last[0] = min(last[0], b[0])
                                     last[1] = min(last[1], b[1])
@@ -622,46 +615,34 @@ class MSIGenAIOCR:
                                 else:
                                     merged_lines.append(b)
 
-                        # Clean up: Remove residual WAVE header if it sneaks in at the very top
                         if len(merged_lines) >= 2 and merged_lines[0][1] < int((cy2-cy1)*0.08):
                             merged_lines.pop(0)
 
                         if len(merged_lines) >= 2:
                             roi_w = cx2 - cx1
-                            
-                            # Increase tolerance to 4% variance before it considers it a new margin
                             touch_tol = max(5, int(roi_w * 0.04))   
-                            # REQUIRE A SEVERE SHIFT (15% of the screen width) to trigger an error
                             shift_thresh = max(15, int(roi_w * 0.15))
                             
                             is_rtl = any(rtl_lang in str(parsed.get("language") or "").lower() for rtl_lang in ["arabic", "hebrew", "farsi", "urdu", "persian"])
-                            
-                            # 1. Get the starting edge for each row (Left edge for LTR, Right edge for RTL)
                             edges = [b[2] if is_rtl else b[0] for b in merged_lines]
                             
-                            # 2. Draw the "Majority Line"
                             best_baseline = edges[0]
                             max_votes = 0
-                            
                             for e in edges:
-                                # Count how many rows "touch" this specific line
                                 votes = sum(1 for other_e in edges if abs(e - other_e) <= touch_tol)
                                 if votes > max_votes:
                                     max_votes = votes
                                     best_baseline = e
                             
-                            # Edge case: If there are exactly 2 lines, we assume the top line is the correct baseline
                             if len(merged_lines) == 2 and abs(edges[0] - edges[1]) > shift_thresh:
                                 best_baseline = edges[0]
                             
-                            # 3. Check if any minority row didn't touch the line
                             shifted_idx = -1
                             max_deviation = 0
                             
                             for i, e in enumerate(edges):
                                 dev = abs(e - best_baseline)
                                 if dev > shift_thresh:
-                                    # It's misaligned! Grab the one that strayed the furthest.
                                     if dev > max_deviation:
                                         max_deviation = dev
                                         shifted_idx = i
@@ -669,12 +650,10 @@ class MSIGenAIOCR:
                             if shifted_idx != -1:
                                 parsed["misalignment_error"] = True
                                 
-                                # 5. Map the physically indented box back to the OCR text
                                 orig_text = parsed.get("original") or ""
                                 ocr_lines = [ln.rstrip() for ln in orig_text.splitlines() if ln.strip() and not ln.strip().lower().startswith("wave") and len(ln.strip()) > 1]
                                 
                                 if ocr_lines:
-                                    # Fallback 1: Trust explicit spaces if AI captured them organically
                                     indented_idx = -1
                                     for ocr_idx, ln in enumerate(ocr_lines):
                                         if ln.startswith("  ") or ln.startswith(" \t") or ln.startswith("\t"):
@@ -684,13 +663,9 @@ class MSIGenAIOCR:
                                     if indented_idx != -1:
                                         parsed["misalignment_evidence"] = ocr_lines[indented_idx].strip()
                                     else:
-                                        # Fallback 2: Intelligent anchored mapping.
-                                        # Misaligned text on these UI devices is almost universally the last wrapped line.
                                         if shifted_idx == len(merged_lines) - 1:
-                                            # If CV2 says the last physical line is shifted, grab the last OCR line. Perfect anchor.
                                             target_idx = len(ocr_lines) - 1
                                         else:
-                                            # Otherwise, use proportional Y-center mapping
                                             y_centers = [b[1] + (b[3] - b[1]) / 2.0 for b in merged_lines]
                                             shift_y = y_centers[shifted_idx]
                                             min_y, max_y = min(y_centers), max(y_centers)
@@ -730,6 +705,7 @@ class MSIGenAIOCR:
             detected_summary = " ".join([ln.strip() for ln in str(detected_summary).splitlines() if ln.strip()])
             
             _print_detected_line(detected_summary)
+            self.get_usage_and_cost()
             return text, 0.0
             
         except Exception as e:
@@ -799,8 +775,7 @@ class MSIGenAIOCR:
             ("5tatus", "Status"), ("8att", "Batt"), ("8attery", "Battery"),
             
             # --- VAPORIZE STATUS BAR ICON HALLUCINATIONS ---
-            # "MAX" / "JMAX" Signal Indicator misreads
-            ("AF KHZ", "25 KHZ"), # <--- ADD THIS TO FORCE CORRECTION
+            ("AF KHZ", "25 KHZ"), 
             ("AF kHz", "25 kHz"),
             ("JMAX", ""),
             ("MAX", ""),
@@ -914,11 +889,6 @@ class MSIGenAIOCR:
             ("14▲", ""),    # number 1
             ("l4▲", ""),    # lowercase L
             ("I4▲", ""),    # capital I
-            
-            # Common stray UI boundaries (Optional: remove if they conflict with real text)
-            # ("|", ""),
-            # ("[", ""),
-            # ("]", ""),
             ("H|AK", "")
         ]
         
@@ -927,12 +897,9 @@ class MSIGenAIOCR:
             text = text.replace(wrong.upper(), correct.upper())
             text = text.replace(wrong.capitalize(), correct.capitalize())
         
-        
         # Clean up any leftover blank spaces or empty lines caused by the deletion
         lines = [line.strip() for line in text.split('\n') if line.strip()]
         return '\n'.join(lines)
-    
-        return text
 
     def calculate_confidence(self, text: str) -> float:
         if not text or text == "NO_TEXT" or text.startswith(("API_ERROR", "CONNECTION", "TIMEOUT", "REQUEST", "EXTRACTION")):
@@ -966,29 +933,64 @@ class MSIGenAIOCR:
             confidence += (sum(1 for c in text if c.isalnum() or c in '.-_ ') / total_chars) * 0.2
         
         return round(max(0.1, min(confidence, 0.95)) * 20) / 20
-    
+
+    # MODIFICATION 4: Usage Summary and Cost Fetching
+    def get_monthly_usage(self) -> Optional[float]:
+        """Fetches the monthly user cost limit metrics from the API endpoint."""
+        headers = {
+            "x-msi-genai-api-key": self.api_key
+        }
+        try:
+            response = self.http.get(
+                self.sessions_url,
+                headers=headers,
+                timeout=10
+            )
+            if response.status_code == 200:
+                data = response.json()
+                if "user_cost" in data:
+                    return float(data["user_cost"])
+        except Exception as e:
+            pass
+            
+        return None
+
     def get_usage_and_cost(self):
-        """Prints the total token usage for the session so the GUI can display it."""
+        """Prints total token usage for the session, estimated cost, and monthly budget remaining."""
         total = self.total_prompt_tokens + self.total_completion_tokens
         
-        if total == 0:
-            print("\n[GenAI Tokens] No token usage tracked in this session.")
-            return
-            
         print("\n" + "=" * 70)
-        print("GENAI API TOKEN USAGE SUMMARY")
+        print("GENAI API TOKEN USAGE & BUDGET SUMMARY")
         print("=" * 70)
-        print(f"Prompt (Input) Tokens:     {self.total_prompt_tokens}")
-        print(f"Completion (Output) Tokens:{self.total_completion_tokens}")
-        print(f"Total Tokens Used:         {total}")
         
-        # Estimate cost based on ChatGPT-4o pricing ($5.00 per 1M input / $15.00 per 1M output)
-        if "4o" in self.model.lower() and "mini" not in self.model.lower():
-            est_cost = (self.total_prompt_tokens / 1000000 * 5.00) + (self.total_completion_tokens / 1000000 * 15.00)
-            print(f"Estimated Session Cost:    ${est_cost:.4f}")
-        # Estimate cost based on ChatGPT-4o-mini pricing ($0.15 per 1M input / $0.60 per 1M output)
-        elif "mini" in self.model.lower():
-            est_cost = (self.total_prompt_tokens / 1000000 * 0.15) + (self.total_completion_tokens / 1000000 * 0.60)
-            print(f"Estimated Session Cost:    ${est_cost:.5f}")
+        if total == 0:
+            print("Session Tokens:            [Usage metadata not returned by API]")
+        else:
+            print(f"Session Prompt (Input):    {self.total_prompt_tokens} tokens")
+            print(f"Session Completion (Output):{self.total_completion_tokens} tokens")
+            print(f"Total Session Tokens Used: {total} tokens")
+            
+            # Estimate cost based on ChatGPT-4o pricing
+            if "4o" in self.model.lower() and "mini" not in self.model.lower():
+                est_cost = (self.total_prompt_tokens / 1000000 * 5.00) + (self.total_completion_tokens / 1000000 * 15.00)
+                print(f"Estimated Session Cost:    ${est_cost:.4f}")
+            # Estimate cost based on ChatGPT-4o-mini pricing
+            elif "mini" in self.model.lower():
+                est_cost = (self.total_prompt_tokens / 1000000 * 0.15) + (self.total_completion_tokens / 1000000 * 0.60)
+                print(f"Estimated Session Cost:    ${est_cost:.5f}")
+        
+        print("-" * 70)
+        
+        # Pull exact monthly usage values from the portal
+        monthly_cost = self.get_monthly_usage()
+        if monthly_cost is not None:
+            budget_limit = 50.00 # The system is limited to $50 per user/month
+            remaining = max(0, budget_limit - monthly_cost)
+            
+            print(f"Total Used This Month:     ${monthly_cost:.2f} / ${budget_limit:.2f}")
+            print(f"Monthly Budget Remaining:  ${remaining:.2f}")
+            print(f"Monthly Capacity Consumed: {(monthly_cost/budget_limit)*100:.1f}%")
+        else:
+            print("Monthly usage data is temporarily unavailable from portal.")
             
         print("=" * 70 + "\n")

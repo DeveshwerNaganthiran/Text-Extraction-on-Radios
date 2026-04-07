@@ -432,6 +432,14 @@ def _parse_structured_fields(block: str):
 
     info["original"] = "\n".join([x for x in buf_orig if x]).strip()
     info["english"] = "\n".join([x for x in buf_eng if x]).strip()
+    
+    if info["error_type"] == "misalignment":
+        lines_count = len([ln for ln in info["original"].splitlines() if ln.strip()])
+        if lines_count <= 1:
+            info["error_red"] = False
+            info["error_type"] = ""
+            info["error_evidence"] = ""
+
     return info
 
 def _ts_log(t0: float, msg: str):
@@ -726,7 +734,6 @@ def get_device_name(profiles: dict, device_id: int) -> str:
     return name if name else f"Device {device_id}"
 
 def map_language_to_region(lang: str, text: str = "", allowed_langs: str = "") -> tuple[str, str]:
-    """Smart mapping that STRICTLY obeys allowed_langs."""
     l = str(lang).lower().strip()
     t = str(text)
     
@@ -740,7 +747,6 @@ def map_language_to_region(lang: str, text: str = "", allowed_langs: str = "") -
         if "english" in ln or "en" in ln: return "english"
         return "emea"
 
-    # 1. HARD UNICODE BLOCK DETECTION (Absolute proof of foreign script)
     has_hiragana = any('\u3040' <= c <= '\u309F' for c in t)
     has_katakana = any('\u30A0' <= c <= '\u30FF' for c in t)
     has_hangul = any('\uAC00' <= c <= '\uD7A3' for c in t)
@@ -750,29 +756,22 @@ def map_language_to_region(lang: str, text: str = "", allowed_langs: str = "") -
     has_thai = any('\u0E00' <= c <= '\u0E7F' for c in t)
     has_cjk = any('\u4E00' <= c <= '\u9FFF' for c in t)
 
-    # 2. STRICT ENFORCEMENT: If foreign characters exist, force it to the user's selected foreign language
     if has_hiragana or has_katakana or has_hangul or has_cyrillic or has_arabic or has_hebrew or has_thai or has_cjk:
         if len(foreign_allowed) == 1:
-            # If user ONLY selected "Traditional Chinese", force any CJK text to Traditional Chinese
             return _get_region(foreign_allowed[0]), foreign_allowed[0]
         elif foreign_allowed:
-            # If multiple foreign langs allowed, try to match AI output to allowed list
             for fa in foreign_allowed:
                 if fa.lower() in l: return _get_region(fa), fa
-            # Fallback to first allowed foreign language
             return _get_region(foreign_allowed[0]), foreign_allowed[0]
 
-    # 3. CHECK IF AI DETECTED ONE OF THE EXPLICIT FOREIGN LANGUAGES
     if foreign_allowed:
         for fa in foreign_allowed:
             if fa.lower() in l:
                 return _get_region(fa), fa
 
-    # 4. EXPLICIT ENGLISH CHECK
     if "english" in l or l == "en":
         return "english", "English"
         
-    # 5. ULTIMATE FALLBACK
     if foreign_allowed:
         return _get_region(foreign_allowed[0]), foreign_allowed[0]
         
@@ -1106,10 +1105,8 @@ def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float
     boxes = sorted(boxes, key=lambda b: (b[0], b[1]))
     rois = []
     for (x1, y1, x2, y2) in boxes:
-        # Use the YOLO screen if its center point is inside the device (allows overlapping edges)
         screen_box = next((s for s in screens if x1 <= (s[0]+s[2])/2 <= x2 and y1 <= (s[1]+s[3])/2 <= y2), None)
         
-        # If YOLO completely failed to find a screen, just use the whole device box instead of a hardcoded crop
         if screen_box is None: screen_box = (x1, y1, x2, y2)
         sx1, sy1, sx2, sy2 = max(0, screen_box[0]), max(0, screen_box[1]), min(last.shape[1], screen_box[2]), min(last.shape[0], screen_box[3])
         if sx2 <= sx1 or sy2 <= sy1: continue
@@ -1441,7 +1438,7 @@ def main():
                         wb = Workbook()
                         ws = wb.active
                         ws.title = "Batch Summary"
-                        headers = ["Timestamp", "Device", "Region", "Language", "Index", "Tag", "Expected (English)", "Expected (Local)", "Actual Detected", "Verdict", "Error Message", "ROI Image"]
+                        headers = ["Timestamp", "Device", "Region", "Language", "Index", "Tag", "Expected (English)", "Expected (Local)", "Actual Detected", "Confidence (%)", "Verdict", "Error Message", "ROI Image"]
                         ws.append(headers)
                         ws.freeze_panes = "A2"
                         
@@ -1452,7 +1449,7 @@ def main():
                             cell.font = header_font
                             cell.alignment = Alignment(horizontal="center", vertical="center")
                         
-                        widths = [20, 15, 12, 15, 10, 25, 35, 35, 35, 12, 35, 30]
+                        widths = [20, 15, 12, 15, 10, 25, 35, 35, 35, 15, 12, 35, 30]
                         for i, width in enumerate(widths, 1):
                             ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
                     else:
@@ -1461,15 +1458,15 @@ def main():
                         
                     ws.append([
                         time.strftime("%Y-%m-%d %H:%M:%S"),
-                        dev_name, args.region, args.language, "SKIP", "SKIP", "-", "-", "-", "SKIP", "", ""
+                        dev_name, args.region, args.language, "SKIP", "SKIP", "-", "-", "-", "-", "SKIP", "", ""
                     ])
                     
                     row_idx = ws.max_row
-                    for col_num in range(1, 13):
+                    for col_num in range(1, 14):
                         cell = ws.cell(row=row_idx, column=col_num)
                         cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
                         
-                    verdict_cell = ws.cell(row=row_idx, column=10)
+                    verdict_cell = ws.cell(row=row_idx, column=11)
                     verdict_cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
                     verdict_cell.font = Font(color="333333", bold=True)
                     ws.row_dimensions[row_idx].height = 80
@@ -1477,7 +1474,7 @@ def main():
                     wb.save(xl_p)
                 except Exception: pass
 
-            payload = {"device": dev_name, "index": "SKIP", "tag": "SKIP", "expected": "-", "actual": "-", "verdict": "SKIP", "error": ""}
+            payload = {"device": dev_name, "index": "SKIP", "tag": "SKIP", "expected": "-", "actual": "-", "confidence": "-", "verdict": "SKIP", "error": ""}
             print(f"[GUI_RESULT] {json.dumps(payload)}")
             continue
 
@@ -1492,6 +1489,7 @@ def main():
             print("Expected (Local): [Will auto-detect from OCR based on selected languages]")
         else:
             print(f"Expected ({final_region.upper()}/{final_language}): {exp_dict.get('expected_local', '')}")
+            print(f"-> [Note]: Verification will auto-switch to English if the actual detected text is purely English.")
 
         # ------------------------------------------------------------------
         # RETRY LOGIC FOR OCR FAILURES/WARNINGS
@@ -1504,14 +1502,11 @@ def main():
         for attempt in range(max_retries):
             if attempt > 0:
                 print(f"\n[RETRY {attempt}/{max_retries-1}] Verification was not a PASS. Initiating completely new session...")
-                # Re-instantiate the OCR object to completely wipe any requests.Session or cached tokens
                 ocr = MSIGenAIOCR()
                 
             t0_ocr = time.time()
             pass_lang = args.language if args.language.lower() != "multiple" else None
             
-            # Anti-caching: Slightly alter a single pixel on retries so the image hash changes
-            # This completely bypasses any server-side or API gateway image caching.
             retry_roi = roi.copy()
             if attempt > 0:
                 try:
@@ -1621,20 +1616,56 @@ def main():
             orig_text = parsed.get("original") or text
             eng_text = parsed.get("english") or ""
 
+            # -------------------------------------------------------------
+            # NEW LOGIC: Check ACTUAL detected text before verifying
+            # -------------------------------------------------------------
+            # Check if actual text contains ANY foreign letter (> 127 and isalpha)
+            has_foreign = any(ord(ch) > 127 and ch.isalpha() for ch in str(orig_text))
+
             if args.region.lower() == "multiple":
-                final_region, final_language = map_language_to_region(lang_detected, orig_text, allowed_langs=args.language)
-                print(f"\n[MULTIPLE DETECT] Mapped detected language '{lang_detected}' to Region: {final_region.upper()}, Column: {final_language}")
-                try:
-                    new_exp = load_expected(args.excel, final_region, final_language, index=exp_dict.get("index"), tag=exp_dict.get("tag"))
-                    exp_dict["expected_local"] = new_exp.get("expected_local", "")
-                    exp_dict["region_sheet"] = new_exp.get("region_sheet", final_region)
-                    print(f"Expected ({final_region.upper()}/{final_language}): {exp_dict['expected_local']}")
-                except Exception as e:
-                    print(f"[WARNING] Failed to load expected text for {final_region}/{final_language}: {e}")
-                    exp_dict["expected_local"] = ""
-            
+                if not has_foreign:
+                    final_region = "english"
+                    final_language = "English"
+                    exp_target = exp_dict.get("expected_en", "")
+                    if attempt == 0:
+                        print(f"\n[MULTIPLE DETECT] Text is fully English. Ignoring GenAI language label '{lang_detected}'.")
+                        print(f"Expected (ENGLISH/English): {exp_target}")
+                else:
+                    final_region, final_language = map_language_to_region(lang_detected, orig_text, allowed_langs=args.language)
+                    try:
+                        new_exp = load_expected(args.excel, final_region, final_language, index=exp_dict.get("index"), tag=exp_dict.get("tag"))
+                        exp_target = new_exp.get("expected_local", "")
+                        exp_dict["expected_local"] = exp_target
+                        exp_dict["region_sheet"] = new_exp.get("region_sheet", final_region)
+                        if attempt == 0:
+                            print(f"\n[MULTIPLE DETECT] Mapped detected language '{lang_detected}' to Region: {final_region.upper()}, Column: {final_language}")
+                            print(f"Expected ({final_region.upper()}/{final_language}): {exp_dict['expected_local']}")
+                    except Exception as e:
+                        print(f"[WARNING] Failed to load expected text for {final_region}/{final_language}: {e}")
+                        exp_target = exp_dict.get("expected_local", "")
+            else:
+                # If the chosen language in the GUI was already English, stay English.
+                if args.language.lower() in ["english", "en"]:
+                    final_region = "english"
+                    final_language = "English"
+                    exp_target = exp_dict.get("expected_en", "")
+                else:
+                    if has_foreign:
+                        final_region = args.region
+                        final_language = args.language
+                        exp_target = exp_dict.get("expected_local", "")
+                        if attempt == 0:
+                            print(f"    -> [Language Switch] Detected foreign letters. Using {final_language} for verification.")
+                    else:
+                        # Fallback to English because actual text is fully English
+                        final_region = "english"
+                        final_language = "English"
+                        exp_target = exp_dict.get("expected_en", "")
+                        if attempt == 0:
+                            print(f"    -> [Language Switch] Detected fully English text. Reverting to English for verification.")
+
             observed_n = _norm_text(orig_text)
-            expected_local_n = _norm_text(exp_dict.get("expected_local", ""))
+            expected_local_n = _norm_text(exp_target)
 
             flat_obs = " ".join(observed_n.split())
             flat_exp = " ".join(expected_local_n.split())
@@ -1664,13 +1695,11 @@ def main():
             else:
                 verdict = "PASS" if not flat_obs else "FAIL"
 
-            # ------------------------------------------------------------------
-            # SAVE BEST ATTEMPT
-            # ------------------------------------------------------------------
             if confidence_pct > best_conf:
                 best_conf = confidence_pct
                 best_attempt_data = {
                     "flat_obs": flat_obs,
+                    "flat_exp": flat_exp,
                     "confidence_pct": confidence_pct,
                     "verdict": verdict,
                     "orig_text": orig_text,
@@ -1678,23 +1707,20 @@ def main():
                     "lang_detected": lang_detected,
                     "final_error_red": final_error_red,
                     "final_error_evidence": final_error_evidence,
-                    "final_error_type": final_error_type
+                    "final_error_type": final_error_type,
+                    "final_region": final_region,
+                    "final_language": final_language,
+                    "exp_target": exp_target
                 }
 
-            # ------------------------------------------------------------------
-            # RETRY CONDITION CHECK (Strict: Any non-PASS triggers a retry)
-            # ------------------------------------------------------------------
             needs_retry = False
             
-            # Retry strictly if the verdict is NOT a perfect PASS
             if verdict != "PASS":
                 needs_retry = True
             
-            # Always retry on absolute errors
             if not text or text == "NO_TEXT" or "REQUEST_ERROR" in text or "EXTRACTION_ERROR" in text:
                 needs_retry = True
                 
-            # Retry if we expect text but got no alphanumeric characters
             if flat_exp and not any(c.isalnum() for c in flat_obs):
                 needs_retry = True
 
@@ -1703,11 +1729,9 @@ def main():
             else:
                 break
 
-        # --- END OF RETRY LOOP ---
-
-        # If we failed to get a PASS after all 15 retries, restore the best attempt
         if verdict != "PASS" and best_attempt_data is not None:
             flat_obs = best_attempt_data["flat_obs"]
+            flat_exp = best_attempt_data["flat_exp"]
             confidence_pct = best_attempt_data["confidence_pct"]
             verdict = best_attempt_data["verdict"]
             orig_text = best_attempt_data["orig_text"]
@@ -1716,13 +1740,16 @@ def main():
             final_error_red = best_attempt_data["final_error_red"]
             final_error_evidence = best_attempt_data["final_error_evidence"]
             final_error_type = best_attempt_data["final_error_type"]
+            final_region = best_attempt_data["final_region"]
+            final_language = best_attempt_data["final_language"]
+            exp_target = best_attempt_data["exp_target"]
             print(f"\n[INFO] Exhausted {max_retries} retries. Using best attempt with {confidence_pct}% confidence.")
 
-        observed_display = f"{flat_obs} (Conf: {confidence_pct}%)"
+        observed_display = flat_obs 
         
         exp_lines = [
             f"Expected (English): {exp_dict.get('expected_en','')}",
-            f"Expected ({final_region.upper()}/{final_language}): {exp_dict.get('expected_local','')}"
+            f"Expected ({final_region.upper()}/{final_language}): {exp_target}"
         ]
         
         detected_flat = " ".join([ln.strip() for ln in str(orig_text).splitlines() if ln.strip()])
@@ -1804,7 +1831,7 @@ def main():
                     wb = Workbook()
                     ws = wb.active
                     ws.title = "Batch Summary"
-                    headers = ["Timestamp", "Device", "Region", "Language", "Index", "Tag", "Expected (English)", "Expected (Local)", "Actual Detected", "Verdict", "Error Message", "ROI Image"]
+                    headers = ["Timestamp", "Device", "Region", "Language", "Index", "Tag", "Expected (English)", "Expected (Local)", "Actual Detected", "Confidence (%)", "Verdict", "Error Message", "ROI Image"]
                     ws.append(headers)
                     
                     header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
@@ -1814,7 +1841,7 @@ def main():
                         cell.font = header_font
                         cell.alignment = Alignment(horizontal="center", vertical="center")
                     
-                    widths = [20, 15, 12, 15, 10, 25, 35, 35, 35, 12, 35, 30]
+                    widths = [20, 15, 12, 15, 10, 25, 35, 35, 35, 15, 12, 35, 30]
                     for i, width in enumerate(widths, 1):
                         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
                 else:
@@ -1831,6 +1858,7 @@ def main():
                     " ".join(str(exp_dict.get('expected_en', '')).split()),
                     flat_exp, 
                     observed_display,
+                    confidence_pct,
                     verdict,
                     error_msg_display,
                     "" 
@@ -1838,12 +1866,12 @@ def main():
                 
                 row_idx = ws.max_row
                 
-                for col_num in range(1, 13):
+                for col_num in range(1, 14):
                     cell = ws.cell(row=row_idx, column=col_num)
-                    h_align = "left" if col_num in [7, 8, 9, 11] else "center"
+                    h_align = "left" if col_num in [7, 8, 9, 12] else "center"
                     cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal=h_align)
 
-                verdict_cell = ws.cell(row=row_idx, column=10) 
+                verdict_cell = ws.cell(row=row_idx, column=11) 
                 if verdict == "PASS":
                     verdict_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
                     verdict_cell.font = Font(color="006100", bold=True)
@@ -1860,7 +1888,7 @@ def main():
                     img = OpenpyxlImage(roi_saved_path)
                     img.height = 95
                     img.width = 200
-                    img.anchor = f"L{row_idx}"
+                    img.anchor = f"M{row_idx}" 
                     ws.add_image(img)
 
                 wb.save(xl_p)
@@ -1873,6 +1901,7 @@ def main():
             "tag": exp_dict.get('tag', ''),
             "expected": flat_exp, 
             "actual": observed_display,
+            "confidence": f"{confidence_pct}%",
             "verdict": verdict,
             "error": error_msg_display
         }
@@ -1895,7 +1924,6 @@ def main():
     print(f"Total Time Taken: {time_taken} seconds")
     print("=" * 70 + "\n")
 
-    # Print out Token Usage and Remaining Limit
     try: ocr.get_usage_and_cost()
     except Exception: pass
 
