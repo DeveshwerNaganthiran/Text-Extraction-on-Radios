@@ -30,6 +30,35 @@ from src.fast_detector import FastDetector
 from src.msi_genai_ocr import MSIGenAIOCR
 
 # ---------------------------------------------------------------------------
+# Display Style Mappings
+# ---------------------------------------------------------------------------
+DISPLAY_STYLES = {
+    34: "EMERGENCY_NOTICE_CENTER_DISP_STYLE",
+    38: "FEATURE_HOME_SCREEN_SUBFEATURE_DISP_STYLE",
+    39: "FEATURE_HOME_SCREEN_FEATURE_DISP_STYLE",
+    40: "FEATURE_HOME_SCREEN_FIRST_LINE_SELECTED_FEATURE_DISP_STYLE",
+    41: "FEATURE_HOME_SCREEN_SYSTEM_DISP_STYLE",
+    50: "FEATURE_GOOD_NOTICE_SYSTEM_DISP_STYLE",
+    51: "FEATURE_GOOD_NOTICE_FEATURE_DISP_STYLE",
+    52: "FEATURE_BAD_NOTICE_SYSTEM_DISP_STYLE",
+    53: "FEATURE_BAD_NOTICE_FEATURE_DISP_STYLE",
+    54: "FEATURE_NEUTRAL_NOTICE_SYSTEM_DISP_STYLE",
+    55: "FEATURE_NEUTRAL_NOTICE_FEATURE_DISP_STYLE"
+}
+
+def get_display_style_name(command_str: str) -> str:
+    """Parses a command like STR_TEST:FIX:0050:1188 to get the display style name."""
+    if not command_str or command_str == "SKIP_VERIFY": return "-"
+    parts = command_str.split(":")
+    if len(parts) >= 3:
+        try:
+            style_idx = int(parts[2])
+            return DISPLAY_STYLES.get(style_idx, f"UNKNOWN_{style_idx}")
+        except Exception:
+            pass
+    return "UNKNOWN"
+
+# ---------------------------------------------------------------------------
 # Strict Error Detection Methods Ported from main_msi_genai.py
 # ---------------------------------------------------------------------------
 
@@ -1312,6 +1341,7 @@ def main():
     parser.add_argument("--language", required=True)
     parser.add_argument("--index", default="")
     parser.add_argument("--tag", default="")
+    parser.add_argument("--command", default="")
     parser.add_argument("--config", default="configs/settings.yaml")
     parser.add_argument("--model-path", default="")
     parser.add_argument("--epoch", type=int, default=None)
@@ -1368,30 +1398,38 @@ def main():
 
     indices = [x.strip() for x in args.index.split(",")] if args.index else []
     tags = [x.strip() for x in args.tag.split(",")] if args.tag else []
+    commands = [x.strip() for x in args.command.split(",")] if args.command else []
 
     expected_list = []
-    max_len = max(len(indices), len(tags), 1)
+    max_len = max(len(indices), len(tags), len(commands), 1)
     
     for i in range(max_len):
         idx_val = indices[i] if i < len(indices) else (indices[-1] if indices else "")
         tag_val = tags[i] if i < len(tags) else (tags[-1] if tags else "")
+        cmd_val = commands[i] if i < len(commands) else (commands[-1] if commands else "")
+        
+        disp_style = get_display_style_name(cmd_val)
 
         if tag_val == "SKIP_VERIFY" or idx_val == "SKIP_VERIFY":
-            expected_list.append({"index": "SKIP_VERIFY", "tag": "SKIP_VERIFY", "expected_en": "SKIP", "expected_local": "SKIP"})
+            expected_list.append({"index": "SKIP_VERIFY", "tag": "SKIP_VERIFY", "command": cmd_val, "display_style": disp_style, "expected_en": "SKIP", "expected_local": "SKIP"})
             continue
             
         if args.region.lower() == "multiple":
              try:
                  exp = load_expected(args.excel, "english", "english", index=idx_val, tag=tag_val)
+                 exp["command"] = cmd_val
+                 exp["display_style"] = disp_style
                  expected_list.append(exp)
              except Exception as e:
-                 expected_list.append({"index": idx_val, "tag": tag_val, "expected_en": "", "expected_local": ""})
+                 expected_list.append({"index": idx_val, "tag": tag_val, "command": cmd_val, "display_style": disp_style, "expected_en": "", "expected_local": ""})
         else:
             try:
                 exp = load_expected(args.excel, args.region, args.language, index=idx_val, tag=tag_val)
+                exp["command"] = cmd_val
+                exp["display_style"] = disp_style
                 expected_list.append(exp)
             except Exception as e:
-                expected_list.append({"index": idx_val, "tag": tag_val, "expected_en": "", "expected_local": ""})
+                expected_list.append({"index": idx_val, "tag": tag_val, "command": cmd_val, "display_style": disp_style, "expected_en": "", "expected_local": ""})
 
     print("=" * 70)
     print(f"RADIO STRING VERIFICATION - DETECTED {len(rois)} DEVICES")
@@ -1438,7 +1476,7 @@ def main():
                         wb = Workbook()
                         ws = wb.active
                         ws.title = "Batch Summary"
-                        headers = ["Timestamp", "Device", "Region", "Language", "Index", "Tag", "Expected (English)", "Expected (Local)", "Actual Detected", "Confidence (%)", "Verdict", "Error Message", "ROI Image"]
+                        headers = ["Timestamp", "Device", "Region", "Language", "Command", "Display Style", "Index", "Tag", "Expected (Local)", "Actual Detected", "Confidence (%)", "Verdict", "Error Message", "ROI Image"]
                         ws.append(headers)
                         ws.freeze_panes = "A2"
                         
@@ -1449,7 +1487,7 @@ def main():
                             cell.font = header_font
                             cell.alignment = Alignment(horizontal="center", vertical="center")
                         
-                        widths = [20, 15, 12, 15, 10, 25, 35, 35, 35, 15, 12, 35, 30]
+                        widths = [20, 15, 12, 15, 25, 45, 10, 25, 35, 35, 15, 12, 35, 30]
                         for i, width in enumerate(widths, 1):
                             ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
                     else:
@@ -1458,15 +1496,15 @@ def main():
                         
                     ws.append([
                         time.strftime("%Y-%m-%d %H:%M:%S"),
-                        dev_name, args.region, args.language, "SKIP", "SKIP", "-", "-", "-", "-", "SKIP", "", ""
+                        dev_name, args.region, args.language, exp_dict.get('command', 'SKIP'), exp_dict.get('display_style', 'SKIP'), "SKIP", "SKIP", "-", "-", "-", "SKIP", "", ""
                     ])
                     
                     row_idx = ws.max_row
-                    for col_num in range(1, 14):
+                    for col_num in range(1, 15):
                         cell = ws.cell(row=row_idx, column=col_num)
                         cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
                         
-                    verdict_cell = ws.cell(row=row_idx, column=11)
+                    verdict_cell = ws.cell(row=row_idx, column=12)
                     verdict_cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
                     verdict_cell.font = Font(color="333333", bold=True)
                     ws.row_dimensions[row_idx].height = 80
@@ -1474,13 +1512,14 @@ def main():
                     wb.save(xl_p)
                 except Exception: pass
 
-            payload = {"device": dev_name, "index": "SKIP", "tag": "SKIP", "expected": "-", "actual": "-", "confidence": "-", "verdict": "SKIP", "error": ""}
+            payload = {"device": dev_name, "command": exp_dict.get('command', ''), "display_style": exp_dict.get('display_style', ''), "index": "SKIP", "tag": "SKIP", "expected": "-", "actual": "-", "confidence": "-", "verdict": "SKIP", "error": ""}
             print(f"[GUI_RESULT] {json.dumps(payload)}")
             continue
 
+        if exp_dict.get('command'): print(f"Command: {exp_dict.get('command')}")
+        if exp_dict.get('display_style'): print(f"Display Style: {exp_dict.get('display_style')}")
         print(f"Index: {exp_dict.get('index', '')}")
         if exp_dict.get('tag'): print(f"Tag: {exp_dict.get('tag', '')}")
-        print(f"Expected (English): {exp_dict.get('expected_en', '')}")
         
         final_region = args.region
         final_language = args.language
@@ -1616,9 +1655,6 @@ def main():
             orig_text = parsed.get("original") or text
             eng_text = parsed.get("english") or ""
 
-            # -------------------------------------------------------------
-            # NEW LOGIC: Check ACTUAL detected text before verifying
-            # -------------------------------------------------------------
             # Check if actual text contains ANY foreign letter (> 127 and isalpha)
             has_foreign = any(ord(ch) > 127 and ch.isalpha() for ch in str(orig_text))
 
@@ -1748,7 +1784,6 @@ def main():
         observed_display = flat_obs 
         
         exp_lines = [
-            f"Expected (English): {exp_dict.get('expected_en','')}",
             f"Expected ({final_region.upper()}/{final_language}): {exp_target}"
         ]
         
@@ -1831,7 +1866,7 @@ def main():
                     wb = Workbook()
                     ws = wb.active
                     ws.title = "Batch Summary"
-                    headers = ["Timestamp", "Device", "Region", "Language", "Index", "Tag", "Expected (English)", "Expected (Local)", "Actual Detected", "Confidence (%)", "Verdict", "Error Message", "ROI Image"]
+                    headers = ["Timestamp", "Device", "Region", "Language", "Command", "Display Style", "Index", "Tag", "Expected (Local)", "Actual Detected", "Confidence (%)", "Verdict", "Error Message", "ROI Image"]
                     ws.append(headers)
                     
                     header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
@@ -1841,7 +1876,7 @@ def main():
                         cell.font = header_font
                         cell.alignment = Alignment(horizontal="center", vertical="center")
                     
-                    widths = [20, 15, 12, 15, 10, 25, 35, 35, 35, 15, 12, 35, 30]
+                    widths = [20, 15, 12, 15, 25, 45, 10, 25, 35, 35, 15, 12, 35, 30]
                     for i, width in enumerate(widths, 1):
                         ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
                 else:
@@ -1853,9 +1888,10 @@ def main():
                     dev_name,
                     final_region.upper(),
                     final_language,
+                    exp_dict.get('command', ''),
+                    exp_dict.get('display_style', ''),
                     exp_dict.get('index', ''),
                     exp_dict.get('tag', ''),
-                    " ".join(str(exp_dict.get('expected_en', '')).split()),
                     flat_exp, 
                     observed_display,
                     confidence_pct,
@@ -1866,12 +1902,12 @@ def main():
                 
                 row_idx = ws.max_row
                 
-                for col_num in range(1, 14):
+                for col_num in range(1, 15):
                     cell = ws.cell(row=row_idx, column=col_num)
-                    h_align = "left" if col_num in [7, 8, 9, 12] else "center"
+                    h_align = "left" if col_num in [9, 10, 13] else "center"
                     cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal=h_align)
 
-                verdict_cell = ws.cell(row=row_idx, column=11) 
+                verdict_cell = ws.cell(row=row_idx, column=12) 
                 if verdict == "PASS":
                     verdict_cell.fill = PatternFill(start_color="C6EFCE", end_color="C6EFCE", fill_type="solid")
                     verdict_cell.font = Font(color="006100", bold=True)
@@ -1888,7 +1924,7 @@ def main():
                     img = OpenpyxlImage(roi_saved_path)
                     img.height = 95
                     img.width = 200
-                    img.anchor = f"M{row_idx}" 
+                    img.anchor = f"N{row_idx}" 
                     ws.add_image(img)
 
                 wb.save(xl_p)
@@ -1897,6 +1933,8 @@ def main():
 
         payload = {
             "device": dev_name,
+            "command": exp_dict.get('command', ''),
+            "display_style": exp_dict.get('display_style', ''),
             "index": exp_dict.get('index', ''),
             "tag": exp_dict.get('tag', ''),
             "expected": flat_exp, 
