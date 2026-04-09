@@ -19,8 +19,8 @@ class MSIGenAIOCR:
     def __init__(self):
         # Get configuration from environment or use credentials from genai_client.py
         self.host = os.getenv('MSI_HOST', "https://genai-service.stage.commandcentral.com/app-gateway/api/v2")
-        self.api_key = os.getenv('MSI_API_KEY', "GTy:YsSiQSt,cxCGOLsj(ZkjCZDFTh!OkML9WrEn")
-        self.user_id = os.getenv('MSI_USER_ID', 'bgvk38@motorolasolutions.com')
+        self.api_key = os.getenv('MSI_API_KEY', "(I9ZpcAsjzv*aSwdRHxc3nOnuZR1LY!aNkxPG~e9")
+        self.user_id = os.getenv('MSI_USER_ID', "rnj673@motorolasolutions.com")
         self.datastore_id = os.getenv('MSI_DATASTORE_ID', "1579319e-2b48-4bad-9825-4a7dd10ac0ef")
         
         # MODIFICATION 1: Switch to the highly cost-efficient GPT-4o Mini model
@@ -80,19 +80,19 @@ class MSIGenAIOCR:
         self.total_completion_tokens = 0
     
     def encode_image_to_base64(self, image):
-        """Convert image to base64 string with maximum compression for token savings"""
+        """Convert image to base64 string with balanced compression for token savings vs accuracy"""
         if isinstance(image, (str, Path)):
             with open(image, "rb") as f:
                 return base64.b64encode(f.read()).decode("utf-8")
         elif isinstance(image, np.ndarray):
             img = image
             
-            # Convert to Grayscale to strip color data (reduces file size by 60%)
+            # Convert to Grayscale to strip color data (keeps tokens low)
             if len(img.shape) == 3:
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             
-            # Aggressively resize down to 250 pixels maximum (plenty for OCR)
-            safe_dim = 250 
+            # INCREASED from 250 to 450: Big enough to read small text, small enough to save money
+            safe_dim = 450 
             h, w = img.shape[:2]
             max_dim = max(h, w)
             if max_dim > safe_dim:
@@ -101,11 +101,11 @@ class MSIGenAIOCR:
                 new_h = max(1, int(h * scale))
                 img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-            # Use maximum JPEG compression (50 is visually fine for reading basic text)
+            # INCREASED JPEG quality from 50 to 75 to stop compression artifacts & hallucinations
             success, buffer = cv2.imencode(
                 '.jpg',
                 img,
-                [int(cv2.IMWRITE_JPEG_QUALITY), 50],
+                [int(cv2.IMWRITE_JPEG_QUALITY), 75],
             )
             if success:
                 return base64.b64encode(buffer).decode("utf-8")
@@ -525,6 +525,7 @@ class MSIGenAIOCR:
 
                 # MODIFICATION 3: Optimised System Prompt
                 prompt = (
+                    "You are a strict OCR engine. Transcribe the text exactly character-by-character as it appears in the image. DO NOT translate. DO NOT use synonyms. DO NOT correct grammar or spelling. Preserve exact spacing."
                     "Extract all text from this walkie-talkie screen. Ignore all icons/symbols (♪, battery). "
                     "EXTREMELY CRITICAL: Output EXACTLY what is on screen. Do NOT confuse numbers with letters (e.g. 5 vs S, 0 vs O, 25 vs AF). "
                     "CRITICAL: Preserve exact leading spaces, indentation, and layout. "
@@ -817,6 +818,18 @@ class MSIGenAIOCR:
             ("HIAS", ""),
             ("H1A S", ""),
             ("H1AS", ""),
+            ("⚠", ""),
+            ("⚠️", ""),
+            ("!", ""),
+            ("🔊", ""),
+            ("🔕", ""),
+            
+            #Chinese Word
+            ("錄展", "擴展"),
+            ("警告碼", "號碼"),
+            ("警告 號碼", "號碼"),
+            ("衰道", "頻道"),
+            ("信息 深後", "然後"),
 
             # Symbols and Emojis (Battery, Signal, Bluetooth, Star)
             ("Hi Δ⚡ 📶", ""),
@@ -994,3 +1007,4 @@ class MSIGenAIOCR:
             print("Monthly usage data is temporarily unavailable from portal.")
             
         print("=" * 70 + "\n")
+        

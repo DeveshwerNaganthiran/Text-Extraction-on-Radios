@@ -964,7 +964,7 @@ class VerifyStringGUI:
         self._current_batch_cmd = cmds[0]
         self.tag_var.set(",".join(tags))
         self.index_var.set(",".join(indices))
-        
+        self._current_batch_cmds = cmds
         tool = self.integration_type_var.get()
         self.q.put(f"\n[{tool}] Dispatched Commands: {cmds}\n", ("commg",))
 
@@ -1403,8 +1403,15 @@ class VerifyStringGUI:
         script_path = Path(__file__).resolve().parent / "verify_string.py"
         cmd = [_python_exe(), str(script_path), "--excel", excel, "--region", region, "--language", language]
 
+        # Locate this inside def _build_cmd:
         if tag: cmd += ["--tag", tag]
         if idx: cmd += ["--index", idx]
+
+        # ADD THESE LINES:
+        if getattr(self, "_commg_is_active_run", False) and hasattr(self, "_current_batch_cmds"):
+            cmd += ["--command", ",".join(self._current_batch_cmds)]
+        elif self.commg_mode_var.get() == "Single" and self.integration_enable_var.get():
+            cmd += ["--command", self.commg_custom_cmd_var.get().strip()]
 
         model_path = _resolve_path(self.model_path_var.get())
         try: self.model_path_var.set(model_path)
@@ -1779,6 +1786,7 @@ class VerifyStringGUI:
                 else:
                     time_taken_str = f"{elapsed:.1f}s"
             
+            # UPDATE this array to have 14 items total (add two empty strings ""):
             summary_row = [
                 f"FINAL SUMMARY", 
                 f"Total Time: {time_taken_str}", 
@@ -1786,13 +1794,20 @@ class VerifyStringGUI:
                 f"FAIL: {f}", 
                 f"WARN: {w}", 
                 f"SKIP: {s}",
-                "", "", "", "", "", ""
+                "", "", "", "", "", "", "", "" 
             ]
             ws.append(summary_row)
             
             row_idx = ws.max_row
             summary_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
             summary_font = Font(bold=True)
+            
+            # UPDATE the range here from 7 to 9 to cover the new width
+            for col_num in range(1, 9):
+                cell = ws.cell(row=row_idx, column=col_num)
+                cell.fill = summary_fill
+                cell.font = summary_font
+                cell.alignment = Alignment(horizontal="center", vertical="center")
             
             for col_num in range(1, 7):
                 cell = ws.cell(row=row_idx, column=col_num)
@@ -1830,9 +1845,20 @@ class VerifyStringGUI:
                             
                             ips = list(self.ip_listbox.get(0, tk.END))
                             skip_records = []
+                            cmds_for_skip = getattr(self, "_current_batch_cmds", [])
                             for i, (t, idx) in enumerate(zip(self.tag_var.get().split(","), self.index_var.get().split(","))):
                                 dev_nm = ips[i] if i < len(ips) else f"Device {i+1}"
-                                payload = {"device": dev_nm, "index": idx, "tag": t, "expected": "-", "actual": "-", "verdict": "SKIP", "error": ""}
+                                cmd_str = cmds_for_skip[i] if i < len(cmds_for_skip) else "-"
+                                
+                                style_str = "-"
+                                try:
+                                    mapping = {34: "EMERGENCY_NOTICE_CENTER_DISP_STYLE", 38: "FEATURE_HOME_SCREEN_SUBFEATURE_DISP_STYLE", 39: "FEATURE_HOME_SCREEN_FEATURE_DISP_STYLE", 40: "FEATURE_HOME_SCREEN_FIRST_LINE_SELECTED_FEATURE_DISP_STYLE", 41: "FEATURE_HOME_SCREEN_SYSTEM_DISP_STYLE", 50: "FEATURE_GOOD_NOTICE_SYSTEM_DISP_STYLE", 51: "FEATURE_GOOD_NOTICE_FEATURE_DISP_STYLE", 52: "FEATURE_BAD_NOTICE_SYSTEM_DISP_STYLE", 53: "FEATURE_BAD_NOTICE_FEATURE_DISP_STYLE", 54: "FEATURE_NEUTRAL_NOTICE_SYSTEM_DISP_STYLE", 55: "FEATURE_NEUTRAL_NOTICE_FEATURE_DISP_STYLE"}
+                                    parts = cmd_str.split(":")
+                                    if len(parts) >= 3:
+                                        style_str = mapping.get(int(parts[2]), f"UNKNOWN_{parts[2]}")
+                                except: pass
+                                
+                                payload = {"device": dev_nm, "command": cmd_str, "display_style": style_str, "index": idx, "tag": t, "expected": "-", "actual": "-", "verdict": "SKIP", "error": ""}
                                 self.all_results_data.append(payload)
                                 skip_records.append(payload)
                             self._update_summary_ui(self.current_filter)
@@ -1840,11 +1866,12 @@ class VerifyStringGUI:
                             if getattr(self, "_log_session_dir", None):
                                 xl_p = Path(self._log_session_dir) / "Batch_Summary_Report.xlsx"
                                 try:
+                                    # REPLACE the Excel writing block inside the if not xl_p.exists(): condition with this:
                                     if not xl_p.exists():
                                         wb = Workbook()
                                         ws = wb.active
                                         ws.title = "Batch Summary"
-                                        headers = ["Timestamp", "Device", "Region", "Language", "Index", "Tag", "Expected (English)", "Expected (Local)", "Actual Detected", "Verdict", "Error Message", "ROI Image"]
+                                        headers = ["Timestamp", "Device", "Region", "Language", "Command", "Display Style", "Index", "Tag", "Expected (Local)", "Actual Detected", "Confidence (%)", "Verdict", "Error Message", "ROI Image"]
                                         ws.append(headers)
                                         
                                         header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
@@ -1854,29 +1881,34 @@ class VerifyStringGUI:
                                             cell.font = header_font
                                             cell.alignment = Alignment(horizontal="center", vertical="center")
                                         
-                                        widths = [20, 15, 12, 15, 10, 25, 35, 35, 35, 12, 35, 30]
+                                        widths = [20, 15, 12, 15, 25, 45, 10, 25, 35, 35, 15, 12, 35, 30]
                                         for i, width in enumerate(widths, 1):
                                             ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
                                     else:
                                         wb = load_workbook(xl_p)
                                         ws = wb.active
+                                        
                                     for rec in skip_records:
                                         ws.append([
                                             time.strftime("%Y-%m-%d %H:%M:%S"),
                                             rec["device"],
                                             self.region_var.get().strip(),
                                             self.language_var.get().strip(),
+                                            rec.get("command", "-"),
+                                            rec.get("display_style", "-"),
                                             rec["index"], 
                                             rec["tag"],
                                             "-", "-", "-", "SKIP", "", ""
                                         ])
                                         
                                         row_idx = ws.max_row
-                                        for col_num in range(1, 13):
+                                        # UPDATE range to 15 (which handles columns 1 through 14)
+                                        for col_num in range(1, 15):
                                             cell = ws.cell(row=row_idx, column=col_num)
                                             cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
                                             
-                                        verdict_cell = ws.cell(row=row_idx, column=10)
+                                        # UPDATE verdict cell position from 10 to 12
+                                        verdict_cell = ws.cell(row=row_idx, column=12)
                                         verdict_cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
                                         verdict_cell.font = Font(color="333333", bold=True)
                                         ws.row_dimensions[row_idx].height = 80
