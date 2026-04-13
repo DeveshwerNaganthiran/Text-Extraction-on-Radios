@@ -46,6 +46,7 @@ DISPLAY_STYLES = {
     55: "FEATURE_NEUTRAL_NOTICE_FEATURE_DISP_STYLE"
 }
 
+
 def get_display_style_name(command_str: str) -> str:
     """Parses a command like STR_TEST:FIX:0050:1188 to get the display style name."""
     if not command_str or command_str == "SKIP_VERIFY": return "-"
@@ -1700,7 +1701,8 @@ def main():
                 # 1B. Destroy hallucinated symbol icons even if they are attached to a word
                 c = re.sub(r'^(!|\?|⏹|\[\]|\'|\"|️)\s*', '', c)
                 
-                c = re.sub(r'[,:。…\.!]', ' ', c)
+                # Removed the colon (:) and period (\.) so they are strictly graded!
+                c = re.sub(r'[,。…!]', ' ', c)
                 
                 if is_cjk:
                     c = re.sub(r'\s+', '', c).upper()
