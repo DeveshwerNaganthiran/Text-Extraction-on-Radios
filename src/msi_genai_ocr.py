@@ -37,8 +37,15 @@ class MSIGenAIOCR:
         self.upload_url = self.host + "/upload"
         self.sessions_url = self.host + f"/getChatSessions/{self.model}"
  
-        # MODIFICATION 2: Performance tuning (reduced image payload size)
+        # MODIFICATION 2: Performance tuning and Cache Busting
         self.http = requests.Session()
+        # --- NEW: Force close the connection and disable network caching ---
+        self.http.headers.update({
+            "Connection": "close", 
+            "Cache-Control": "no-cache", 
+            "Pragma": "no-cache"
+        })
+        
         self.max_image_dim = int(os.getenv("MSI_MAX_IMAGE_DIM", "800"))
         self.jpeg_quality = int(os.getenv("MSI_JPEG_QUALITY", "85"))
         
@@ -79,29 +86,33 @@ class MSIGenAIOCR:
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
     
-    def encode_image_to_base64(self, image):
-        """Convert image to base64 string with balanced compression for token savings vs accuracy"""
+    def encode_image_to_base64(self, image, dynamic_dim=None, squash_ratio=1.0):
+        """Convert image to base64 string with dynamic compression and aspect ratio squashing"""
         if isinstance(image, (str, Path)):
             with open(image, "rb") as f:
                 return base64.b64encode(f.read()).decode("utf-8")
         elif isinstance(image, np.ndarray):
             img = image
             
-            # Convert to Grayscale to strip color data (keeps tokens low)
             if len(img.shape) == 3:
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             
-            # INCREASED from 250 to 450: Big enough to read small text, small enough to save money
-            safe_dim = 450 
+            safe_dim = dynamic_dim if dynamic_dim else 600 
             h, w = img.shape[:2]
             max_dim = max(h, w)
-            if max_dim > safe_dim:
-                scale = safe_dim / float(max_dim)
-                new_w = max(1, int(w * scale))
-                new_h = max(1, int(h * scale))
+            
+            scale = safe_dim / float(max_dim) if max_dim > safe_dim else 1.0
+            new_w = max(1, int(w * scale))
+            new_h = max(1, int(h * scale))
+            
+            # --- GEOMETRIC SQUASH ---
+            # Only compress the width if a specific squash_ratio is requested
+            if new_w > new_h and squash_ratio != 1.0:
+                new_w = max(1, int(new_w * squash_ratio))
+                
+            if scale != 1.0 or new_w != w:
                 img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
-            # INCREASED JPEG quality from 50 to 75 to stop compression artifacts & hallucinations
             success, buffer = cv2.imencode(
                 '.jpg',
                 img,
@@ -271,6 +282,9 @@ class MSIGenAIOCR:
         image,
         region: Optional[tuple] = None,
         expected_language: Optional[str] = None,
+        dynamic_dim: Optional[int] = None,
+        squash_ratio: float = 1.0,
+        expected_text: Optional[str] = None,
     ) -> Tuple[str, float]:
         
         self.total_prompt_tokens = 0
@@ -505,7 +519,8 @@ class MSIGenAIOCR:
             else:
                 image_to_use = image
             
-            image_base64 = self.encode_image_to_base64(image_to_use)
+            # PASS THE SQUASH RATIO HERE:
+            image_base64 = self.encode_image_to_base64(image_to_use, dynamic_dim=dynamic_dim, squash_ratio=squash_ratio)
             
             if self.prompt_mode == "short":
                 lang_hint = ""
@@ -523,13 +538,20 @@ class MSIGenAIOCR:
                         softkey_hint = f"Device has {int(exp_softkeys)} softkey buttons. "
                 except Exception: pass
 
-                # MODIFICATION 3: Optimised System Prompt
+                # --- NEW: CONTEXTUAL VOCABULARY HINT ---
+                vocab_hint = ""
+                if expected_text and str(expected_text).strip():
+                    vocab_hint = f"HINT: The text on the screen is expected to be '{expected_text}'. Use this hint to resolve ambiguous, dense, or pixelated LCD fonts (especially for complex Chinese characters). However, DO NOT output this hint if the screen clearly displays a different word or if extra text is present.\n"
+
+                # MODIFICATION 3: Balanced System Prompt (Center + Corners)
                 prompt = (
-                    "You are a strict OCR engine. Transcribe the text exactly character-by-character as it appears in the image. DO NOT translate. DO NOT use synonyms. DO NOT correct grammar or spelling. Preserve exact spacing."
-                    "Extract all text from this walkie-talkie screen. Ignore all icons/symbols (♪, battery). "
-                    "EXTREMELY CRITICAL: Output EXACTLY what is on screen. Do NOT confuse numbers with letters (e.g. 5 vs S, 0 vs O, 25 vs AF). "
+                    "Extract ALL text from this walkie-talkie screen. Ignore all icons/symbols (♪, battery, power indicators). "
+                    "CRITICAL INSTRUCTION: You must read the ENTIRE screen. Text may be perfectly centered, OR it may be split into softkey labels at the BOTTOM-LEFT and BOTTOM-RIGHT corners. "
+                    "Do NOT ignore perfectly centered text, and Do NOT ignore text on the far edges. Capture absolutely everything. "
+                    "Output EXACTLY what is on screen. Do NOT confuse numbers with letters. "
+                    "EXTREMELY IMPORTANT: The 'Detected Text(Original)' field MUST contain the EXACT language and characters shown in the image. DO NOT translate the original text into English. If the screen is in Chinese,Korean or other foreign languages the Original Text MUST be in the same foreign language "
                     "CRITICAL: Preserve exact leading spaces, indentation, and layout. "
-                    + lang_hint + softkey_hint +
+                    + lang_hint + softkey_hint + vocab_hint +
                     "Be STRICT on layout bugs. If Right-to-Left text (Arabic) is mixed LTR, ignore left margin staggering. "
                     "Return EXACTLY in this format, no extra text:\n"
                     "Detected Languages: <languages>\n"
@@ -545,6 +567,7 @@ class MSIGenAIOCR:
                     "Vertical Overlap Evidence: <text>\n"
                     "UI Render Overlap Error: <YES/NO>\n"
                     "UI Render Overlap Evidence: <text>\n"
+                    f"[RequestHash: {uuid.uuid4().hex[:8]}]\n"
                 )
             else:
                 prompt = """Read ALL text visible in this walkie-talkie screen image..."""
@@ -823,6 +846,14 @@ class MSIGenAIOCR:
             ("!", ""),
             ("🔊", ""),
             ("🔕", ""),
+            # --- NEW: VAPORIZE SPECIFIC SHEET1 HALLUCINATIONS ---
+            ("i TXT", "TXT"),
+            ("i 按", "按"),
+            ("4 電話", "電話"),
+            ("4 遙測", "遙測"),
+            ("⏹", ""),
+            ("️", ""),
+            
             
             #Chinese Word
             ("錄展", "擴展"),

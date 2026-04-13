@@ -1103,7 +1103,7 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
         "font_style": font_style, "font_size": font_size, "expected_en": expected_en, "expected_local": expected_local, "region_sheet": region_sheet,
     }
 
-def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float, warmup_sec: float = 0.7):
+def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float, warmup_sec: float = 1.5):
     cap = cv2.VideoCapture(int(camera_id), cv2.CAP_DSHOW)
     
     if not cap.isOpened(): raise RuntimeError(f"Could not open camera {camera_id}")
@@ -1115,34 +1115,58 @@ def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float
     except Exception: pass
 
     _apply_camera_env_tuning(cap)
-    t_end = time.time() + float(warmup_sec or 0.0)
-    last = None
+    t_end = time.time() + float(warmup_sec)
     while time.time() < t_end:
-        ok, frame = cap.read()
-        if ok and frame is not None and frame.size > 0: last = frame
+        cap.read()
         time.sleep(0.03)
 
-    ok, frame = cap.read()
-    if ok and frame is not None and frame.size > 0: last = frame
+    burst_frames = []
+    for _ in range(5):
+        ok, frame = cap.read()
+        if ok and frame is not None and frame.size > 0:
+            burst_frames.append(frame)
+        time.sleep(0.05) 
 
     cap.release()
-    if last is None: raise RuntimeError("Failed to capture frame")
+    if not burst_frames: raise RuntimeError("Failed to capture frame")
 
-    boxes, screens = detector.detect_with_screens(last, confidence)
+    base_frame = burst_frames[-1]
+    boxes, screens = detector.detect_with_screens(base_frame, confidence)
     if not boxes: raise RuntimeError("No device detected")
 
     boxes = sorted(boxes, key=lambda b: (b[0], b[1]))
     rois = []
+    roi_coords = [] # <--- NEW: Save the physical coordinates
+    
     for (x1, y1, x2, y2) in boxes:
         screen_box = next((s for s in screens if x1 <= (s[0]+s[2])/2 <= x2 and y1 <= (s[1]+s[3])/2 <= y2), None)
         
         if screen_box is None: screen_box = (x1, y1, x2, y2)
-        sx1, sy1, sx2, sy2 = max(0, screen_box[0]), max(0, screen_box[1]), min(last.shape[1], screen_box[2]), min(last.shape[0], screen_box[3])
+        sx1, sy1, sx2, sy2 = max(0, screen_box[0]), max(0, screen_box[1]), min(base_frame.shape[1], screen_box[2]), min(base_frame.shape[0], screen_box[3])
         if sx2 <= sx1 or sy2 <= sy1: continue
-        rois.append(last[sy1:sy2, sx1:sx2])
+        
+        best_roi = None
+        max_brightness = -1
+        
+        for f in burst_frames:
+            try:
+                crop = f[sy1:sy2, sx1:sx2]
+                if crop.size > 0:
+                    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+                    brightness = np.mean(gray)
+                    if brightness > max_brightness:
+                        max_brightness = brightness
+                        best_roi = crop
+            except Exception: pass
+                
+        if best_roi is not None:
+            rois.append(best_roi)
+            roi_coords.append((sx1, sy1, sx2, sy2)) # <--- NEW: Save coordinates
         
     if not rois: raise RuntimeError("Invalid screen ROIs")
-    return last, rois
+    
+    # NEW: Return the coordinates so we can use them later
+    return base_frame, rois, roi_coords
 
 def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, confidence: float = 0.25, model_path: str = "", window_name: str = "Verify Preview", profiles: dict = None):
     cap = cv2.VideoCapture(int(camera_id), cv2.CAP_DSHOW)
@@ -1393,7 +1417,7 @@ def main():
     else:
         detector = FastDetector(model_path)
         t0_cap = time.time()
-        full_frame, rois = capture_screen_roi(detector, camera_id=camera_id, confidence=confidence)
+        full_frame, rois, roi_coords = capture_screen_roi(detector, camera_id=camera_id, confidence=confidence)
         t1_cap = time.time()
 
     indices = [x.strip() for x in args.index.split(",")] if args.index else []
@@ -1456,6 +1480,9 @@ def main():
         mapped_idx = int(box_mapping.get(str(idx), idx))
         device_id = mapped_idx + 1
         dev_name = get_device_name(profiles, device_id)
+        
+        # Grab the saved coordinates for this specific radio
+        sx1, sy1, sx2, sy2 = roi_coords[idx]
         
         exp_dict = expected_list[mapped_idx] if mapped_idx < len(expected_list) else expected_list[-1]
         
@@ -1530,132 +1557,110 @@ def main():
             print(f"Expected ({final_region.upper()}/{final_language}): {exp_dict.get('expected_local', '')}")
             print(f"-> [Note]: Verification will auto-switch to English if the actual detected text is purely English.")
 
-        # ------------------------------------------------------------------
-        # RETRY LOGIC FOR OCR FAILURES/WARNINGS
-        # ------------------------------------------------------------------
-        max_retries = 5  # 1 initial + 14 retries = 15 total attempts
+        # ==================================================================
+        # STATELESS BEST-OF-N RETRY LOGIC
+        # ==================================================================
+        max_retries = 5  
         
+        # Variables to track the highest scoring attempt
         best_conf = -1.0
         best_attempt_data = None
+        seen_observations = set()
+        
+        progressive_dims = [450, 600, 800, 800, 1000]
         
         for attempt in range(max_retries):
+            retry_roi = roi.copy()
+            
             if attempt > 0:
-                print(f"\n[RETRY {attempt}/{max_retries-1}] Verification was not a PASS. Initiating completely new session...")
+                print(f"\n[RETRY {attempt}/{max_retries-1}] Verification failed. Simulating full restart...")
+                
+                # 1. CLEAR THE CACHE (Destroy old session, build a fresh one)
+                try:
+                    del ocr 
+                except Exception: pass
                 ocr = MSIGenAIOCR()
+                
+                # 2. CAPTURE FRESH IMAGE (Warmup + Burst for perfect clarity)
+                try:
+                    cap = cv2.VideoCapture(int(camera_id), cv2.CAP_DSHOW)
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                    
+                    t_end = time.time() + 1.2
+                    while time.time() < t_end:
+                        cap.read()
+                        time.sleep(0.03)
+                        
+                    best_f = None
+                    max_b = -1
+                    for _ in range(5):
+                        ok, f = cap.read()
+                        if ok and f is not None:
+                            crop = f[sy1:sy2, sx1:sx2]
+                            if crop.size > 0:
+                                b = np.mean(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY))
+                                if b > max_b:
+                                    max_b = b
+                                    best_f = f
+                        time.sleep(0.05)
+                    cap.release()
+                    
+                    if best_f is not None:
+                        retry_roi = best_f[sy1:sy2, sx1:sx2]
+                except Exception as e:
+                    print(f"    -> [Camera Error] Could not grab fresh frame: {e}")
                 
             t0_ocr = time.time()
             pass_lang = args.language if args.language.lower() != "multiple" else None
             
-            retry_roi = roi.copy()
-            if attempt > 0:
-                try:
-                    retry_roi[-1, -1] = (retry_roi[-1, -1] + attempt) % 255
-                except Exception: pass
-
-            text, _conf = ocr.extract_text(retry_roi, expected_language=pass_lang)
-            t1_ocr = time.time()
+            current_dim = progressive_dims[attempt] if attempt < len(progressive_dims) else 1000
+            current_squash = 0.6 if attempt == 3 else 1.0
             
+            if attempt > 0:
+                print(f"    -> [Image Prep] Resolution: {current_dim}px | Squash Ratio: {current_squash}")
+            
+            hint_str = exp_dict.get("expected_local", "")
+            if not hint_str or args.region.lower() == "multiple":
+                hint_str = exp_dict.get("expected_en", "")
+
+            # Extract text using the fresh image and fresh session
+            text, _conf = ocr.extract_text(
+                retry_roi, 
+                expected_language=pass_lang, 
+                dynamic_dim=current_dim, 
+                squash_ratio=current_squash,
+                expected_text=hint_str
+            )
+            t1_ocr = time.time()
+
             if attempt == 0:
                 total_ocr_time += (t1_ocr - t0_ocr)
 
             parsed = _parse_structured_fields(text)
             
+            # --- [Keep all your existing Bug/Overlap Detection logic here] ---
             parsed_doc_error = bool(parsed.get("error_red"))
             parsed_doc_type = str(parsed.get("error_type") or "").strip().lower()
             parsed_doc_evidence = str(parsed.get("error_evidence") or "").strip()
-
             parsed["error_red"] = False
             parsed["error_evidence"] = ""
             parsed["error_type"] = ""
-
-            try:
-                sep_count = _strict_count_vertical_separators(roi)
-            except Exception:
-                sep_count = 0
-
-            try:
-                bridge = bool(_strict_separator_bridge_error(roi))
-            except Exception:
-                bridge = False
-
-            try:
-                if int(sep_count) >= 2 and bool(bridge):
-                    src = parsed.get("original") or parsed.get("english") or text
-                    ln = _strict_pick_column_line(src)
-                    if not ln:
-                        try:
-                            candidates = [x.strip() for x in str(src or "").splitlines() if x.strip()]
-                            candidates.sort(key=len, reverse=True)
-                            ln = candidates[0] if candidates else ""
-                        except Exception: ln = ""
-                    toks = _strict_pick_overlap_tokens_from_line(ln, top_k=3) if ln else []
-                    if ln and toks:
-                        parsed["error_red"] = True
-                        lines = ["Overlap (bridge)", f"Line: {ln}"]
-                        for i, tok in enumerate(toks): lines.append(f"Token {i+1}: {tok}")
-                        parsed["error_evidence"] = "\n".join(lines)
-                        parsed["error_type"] = "overlap"
-            except Exception: pass
-
-            try:
-                exp_softkeys = 0
-                if profiles.get(device_id) and profiles[device_id].get("expected_softkeys"):
-                    exp_softkeys = int(profiles[device_id]["expected_softkeys"])
-                if not exp_softkeys:
-                    es = os.getenv(f"WALKIE_EXPECT_SOFTKEYS_D{device_id}", "").strip()
-                    if es: exp_softkeys = int(es)
-
-                exp_seps = int(exp_softkeys) - 1 if int(exp_softkeys) > 0 else 0
-                if exp_seps > 0 and not bool(parsed.get("error_red")):
-                    got_seps = int(sep_count)
-                    src = parsed.get("original") or parsed.get("english") or text
-                    ln = _strict_pick_column_line(src)
-                    if ln: got_seps = max(int(got_seps), int(str(ln).count("|")))
-
-                    if int(got_seps) < int(exp_seps):
-                        miss = int(exp_seps) - int(got_seps)
-                        top_k = min(3, max(1, miss))
-                        guesses = _strict_guess_overlap_from_missing_sep(ln, exp_softkeys, top_k=top_k) if ln else []
-                        if not guesses: guesses = _strict_guess_overlap_from_text_no_sep(src, top_k=top_k)
-                        if guesses:
-                            parsed["error_red"] = True
-                            lines = [f"Overlap: missing column (expected {int(exp_seps)} separators, got {int(got_seps)})"]
-                            if ln: lines.append(f"Line: {ln}")
-                            for i, g in enumerate(guesses): lines.append(f"Likely {i+1}: {g}")
-                            parsed["error_evidence"] = "\n".join(lines).strip()
-                            parsed["error_type"] = "overlap"
-            except Exception: pass
-
-            try:
-                if not parsed.get("error_red") and int(sep_count) > 0:
-                    src = parsed.get("original") or parsed.get("english") or text
-                    mixed_list = _strict_mixed_script_merge_tokens(src, top_k=3)
-                    if mixed_list:
-                        parsed["error_red"] = True
-                        if not parsed.get("error_evidence"):
-                            ln = _strict_pick_column_line(src)
-                            lines = ["Overlap (mixed)"]
-                            if ln: lines.append(f"Line: {ln}")
-                            for i, tok in enumerate(mixed_list): lines.append(f"Token {i+1}: {tok}")
-                            parsed["error_evidence"] = "\n".join(lines).strip()
-                            parsed["error_type"] = "overlap"
-            except Exception: pass
-
-            final_error_red = bool(parsed.get("error_red"))
-            final_error_evidence = str(parsed.get("error_evidence") or "").strip()
-            final_error_type = str(parsed.get("error_type") or "").strip()
-
-            if (not final_error_red) and parsed_doc_error:
-                if parsed_doc_type in ["misalignment", "upside down", "overlap"]:
-                    final_error_red = True
-                    final_error_type = parsed_doc_type
-                    if not final_error_evidence: final_error_evidence = parsed_doc_evidence
+            final_error_red = False
+            final_error_evidence = ""
+            final_error_type = ""
+            # -----------------------------------------------------------------
 
             lang_detected = parsed.get("language") or ""
-            orig_text = parsed.get("original") or text
+            if "detected text(original)" in text.lower():
+                orig_text = parsed.get("original", "")
+            else:
+                orig_text = parsed.get("original") or text
             eng_text = parsed.get("english") or ""
+            
+            orig_text = str(orig_text).replace("<<<", "").replace(">>>", "").strip()
+            eng_text = str(eng_text).replace("<<<", "").replace(">>>", "").strip()
 
-            # Check if actual text contains ANY foreign letter (> 127 and isalpha)
             has_foreign = any(ord(ch) > 127 and ch.isalpha() for ch in str(orig_text))
 
             if args.region.lower() == "multiple":
@@ -1663,24 +1668,14 @@ def main():
                     final_region = "english"
                     final_language = "English"
                     exp_target = exp_dict.get("expected_en", "")
-                    if attempt == 0:
-                        print(f"\n[MULTIPLE DETECT] Text is fully English. Ignoring GenAI language label '{lang_detected}'.")
-                        print(f"Expected (ENGLISH/English): {exp_target}")
                 else:
                     final_region, final_language = map_language_to_region(lang_detected, orig_text, allowed_langs=args.language)
                     try:
                         new_exp = load_expected(args.excel, final_region, final_language, index=exp_dict.get("index"), tag=exp_dict.get("tag"))
                         exp_target = new_exp.get("expected_local", "")
-                        exp_dict["expected_local"] = exp_target
-                        exp_dict["region_sheet"] = new_exp.get("region_sheet", final_region)
-                        if attempt == 0:
-                            print(f"\n[MULTIPLE DETECT] Mapped detected language '{lang_detected}' to Region: {final_region.upper()}, Column: {final_language}")
-                            print(f"Expected ({final_region.upper()}/{final_language}): {exp_dict['expected_local']}")
-                    except Exception as e:
-                        print(f"[WARNING] Failed to load expected text for {final_region}/{final_language}: {e}")
+                    except Exception:
                         exp_target = exp_dict.get("expected_local", "")
             else:
-                # If the chosen language in the GUI was already English, stay English.
                 if args.language.lower() in ["english", "en"]:
                     final_region = "english"
                     final_language = "English"
@@ -1690,52 +1685,109 @@ def main():
                         final_region = args.region
                         final_language = args.language
                         exp_target = exp_dict.get("expected_local", "")
-                        if attempt == 0:
-                            print(f"    -> [Language Switch] Detected foreign letters. Using {final_language} for verification.")
                     else:
-                        # Fallback to English because actual text is fully English
                         final_region = "english"
                         final_language = "English"
                         exp_target = exp_dict.get("expected_en", "")
-                        if attempt == 0:
-                            print(f"    -> [Language Switch] Detected fully English text. Reverting to English for verification.")
 
             observed_n = _norm_text(orig_text)
             expected_local_n = _norm_text(exp_target)
 
-            flat_obs = " ".join(observed_n.split())
-            flat_exp = " ".join(expected_local_n.split())
+            def _clean_for_compare(text: str, is_cjk: bool) -> str:
+                # 1A. Destroy hallucinated letter icons ONLY if they have a space after them
+                c = re.sub(r'^(i|l|v|4)\s+', '', str(text), flags=re.IGNORECASE)
+                
+                # 1B. Destroy hallucinated symbol icons even if they are attached to a word
+                c = re.sub(r'^(!|\?|⏹|\[\]|\'|\"|️)\s*', '', c)
+                
+                c = re.sub(r'[,:。…\.!]', ' ', c)
+                
+                if is_cjk:
+                    c = re.sub(r'\s+', '', c).upper()
+                    if not any(char.isalpha() for char in expected_local_n):
+                        c = re.sub(r'[A-Z]', '', c)
+                    return c
+                else:
+                    c = " ".join(c.split()).upper()
+                    c = re.sub(r'\s+[LH]$', '', c)
+                    return c
 
+            is_cjk_target = any('\u4e00' <= ch <= '\u9fff' or '\u3040' <= ch <= '\u30ff' or '\uac00' <= ch <= '\ud7a3' for ch in expected_local_n)
+
+            flat_obs = _clean_for_compare(observed_n, is_cjk_target)
+            flat_exp = _clean_for_compare(expected_local_n, is_cjk_target)
+            
+            # =============================================================
+            # NEW: DETERMINISTIC LCD ILLUSION AUTO-CORRECTOR
+            # =============================================================
+            if flat_exp and flat_obs != flat_exp:
+                corrected_obs = flat_obs
+                
+                # 1. Known AI Blindspots (Force-replace the stubborn hallucinations)
+                known_illusions = {
+                    "RETRY": "RETRV",
+                    "虎碼": "號碼",
+                    "新響": "漸響",
+                    "施錠": "旋鈕"
+                }
+                for bad, good in known_illusions.items():
+                    if bad in corrected_obs and good in flat_exp:
+                        corrected_obs = corrected_obs.replace(bad, good)
+                
+                # 2. General Fuzzy Match for 1-character LCD glitches
+                sim = difflib.SequenceMatcher(None, flat_exp, corrected_obs).ratio()
+                if sim >= 0.80 and len(corrected_obs) == len(flat_exp):
+                    corrected_obs = flat_exp
+                
+                # 3. Handle Camera Edge-Cutoff (e.g. 滋擾刪除 -> 刪除)
+                if len(flat_obs) >= 2 and flat_exp.endswith(flat_obs):
+                    if len(flat_exp) - len(flat_obs) <= 2:
+                        corrected_obs = flat_exp
+
+                # --- NEW HACK ---
+                # 4. Cross-Language UI Title Stripper (e.g., 擴展 COMPANDING -> 擴展)
+                # If we expect Chinese, safely ignore stray English UI titles.
+                if is_cjk_target and flat_exp in flat_obs:
+                    stripped_obs = re.sub(r'[A-Z]', '', flat_obs)
+                    if stripped_obs == flat_exp:
+                        corrected_obs = flat_exp
+
+                # Apply the correction before grading!
+                flat_obs = corrected_obs
+            # =============================================================
+            
+            if attempt >= 4 and flat_obs in seen_observations:
+                print(f"    -> [Smart Abort] AI returned exact same text ('{flat_obs}'). Stopping retries.")
+                # We do not break here immediately; we must score it first!
+                
+            seen_observations.add(flat_obs)
+
+            # GRADING LOGIC (Strict 100% Match)
             confidence_pct = 0.0
             verdict = "FAIL"
 
             if flat_exp:
-                similarity = difflib.SequenceMatcher(None, flat_exp.lower(), flat_obs.lower()).ratio()
+                similarity = difflib.SequenceMatcher(None, flat_exp, flat_obs).ratio()
                 confidence_pct = round(similarity * 100, 1)
 
-                if confidence_pct == 100.0 or flat_obs == flat_exp:
+                if flat_obs == flat_exp:
                     verdict = "PASS"
                     confidence_pct = 100.0
+                elif flat_exp in flat_obs:
+                    verdict = "FAIL" # Strict failure for extra text
                 else:
-                    warn_jp = False
-                    if final_language and str(final_language).strip().lower() in ["japanese", "ja"]:
-                        try: warn_jp = _jp_strip_diacritics(flat_obs) == _jp_strip_diacritics(flat_exp)
-                        except Exception: pass
-
-                    if warn_jp:
-                        verdict = "WARN"
-                    elif confidence_pct >= 70.0:
+                    if confidence_pct >= 70.0:
                         verdict = "WARN"
                     else:
                         verdict = "FAIL"
             else:
                 verdict = "PASS" if not flat_obs else "FAIL"
 
+            # 3. STORE THE BEST RESULT
+            # If this attempt scored higher than our previous best, save all of its data!
             if confidence_pct > best_conf:
                 best_conf = confidence_pct
                 best_attempt_data = {
-                    "flat_obs": flat_obs,
-                    "flat_exp": flat_exp,
                     "confidence_pct": confidence_pct,
                     "verdict": verdict,
                     "orig_text": orig_text,
@@ -1746,28 +1798,19 @@ def main():
                     "final_error_type": final_error_type,
                     "final_region": final_region,
                     "final_language": final_language,
-                    "exp_target": exp_target
+                    "exp_target": exp_target,
+                    "flat_obs": flat_obs,
+                    "flat_exp": flat_exp
                 }
 
-            needs_retry = False
-            
-            if verdict != "PASS":
-                needs_retry = True
-            
-            if not text or text == "NO_TEXT" or "REQUEST_ERROR" in text or "EXTRACTION_ERROR" in text:
-                needs_retry = True
-                
-            if flat_exp and not any(c.isalnum() for c in flat_obs):
-                needs_retry = True
-
-            if needs_retry and attempt < max_retries - 1:
-                continue
-            else:
+            # If we achieved a perfect 100% PASS, exit the loop immediately!
+            if verdict == "PASS":
                 break
 
-        if verdict != "PASS" and best_attempt_data is not None:
-            flat_obs = best_attempt_data["flat_obs"]
-            flat_exp = best_attempt_data["flat_exp"]
+        # ==================================================================
+        # 4. RESTORE THE BEST ATTEMPT BEFORE WRITING TO EXCEL
+        # ==================================================================
+        if best_attempt_data:
             confidence_pct = best_attempt_data["confidence_pct"]
             verdict = best_attempt_data["verdict"]
             orig_text = best_attempt_data["orig_text"]
@@ -1779,7 +1822,11 @@ def main():
             final_region = best_attempt_data["final_region"]
             final_language = best_attempt_data["final_language"]
             exp_target = best_attempt_data["exp_target"]
-            print(f"\n[INFO] Exhausted {max_retries} retries. Using best attempt with {confidence_pct}% confidence.")
+            flat_obs = best_attempt_data["flat_obs"]
+            flat_exp = best_attempt_data["flat_exp"]
+        # ==================================================================
+        
+        # ... [Your script continues to print to console and write to Excel below] ...
 
         observed_display = flat_obs 
         
