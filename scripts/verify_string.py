@@ -47,6 +47,7 @@ DISPLAY_STYLES = {
 }
 
 
+
 def get_display_style_name(command_str: str) -> str:
     """Parses a command like STR_TEST:FIX:0050:1188 to get the display style name."""
     if not command_str or command_str == "SKIP_VERIFY": return "-"
@@ -62,6 +63,30 @@ def get_display_style_name(command_str: str) -> str:
 # ---------------------------------------------------------------------------
 # Strict Error Detection Methods Ported from main_msi_genai.py
 # ---------------------------------------------------------------------------
+
+def _is_screen_blank(roi_img: np.ndarray) -> bool:
+    """Calculates contrast and edge density to determine if the LCD is completely blank/off."""
+    try:
+        if roi_img is None or getattr(roi_img, "size", 0) == 0: return True
+        gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY) if len(roi_img.shape) == 3 else roi_img
+        
+        # Check standard deviation (contrast). If very low, it's a solid color (off/blank).
+        std_dev = np.std(gray)
+        if std_dev < 8.0:
+            return True
+            
+        # Check edge density. Text produces a lot of sharp edges.
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        edges = cv2.Canny(blur, 40, 120)
+        edge_density = np.count_nonzero(edges) / float(edges.size)
+        
+        # If less than 0.3% of the screen has edges, it's blank/glowing square.
+        if edge_density < 0.003:
+            return True
+            
+        return False
+    except Exception:
+        return False
 
 def _strict_count_vertical_separators(screen_roi: np.ndarray) -> int:
     try:
@@ -1137,7 +1162,7 @@ def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float
 
     boxes = sorted(boxes, key=lambda b: (b[0], b[1]))
     rois = []
-    roi_coords = [] # <--- NEW: Save the physical coordinates
+    roi_coords = [] 
     
     for (x1, y1, x2, y2) in boxes:
         screen_box = next((s for s in screens if x1 <= (s[0]+s[2])/2 <= x2 and y1 <= (s[1]+s[3])/2 <= y2), None)
@@ -1162,11 +1187,10 @@ def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float
                 
         if best_roi is not None:
             rois.append(best_roi)
-            roi_coords.append((sx1, sy1, sx2, sy2)) # <--- NEW: Save coordinates
+            roi_coords.append((sx1, sy1, sx2, sy2)) 
         
     if not rois: raise RuntimeError("Invalid screen ROIs")
     
-    # NEW: Return the coordinates so we can use them later
     return base_frame, rois, roi_coords
 
 def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, confidence: float = 0.25, model_path: str = "", window_name: str = "Verify Preview", profiles: dict = None):
@@ -1358,6 +1382,7 @@ def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, co
     if not rois: raise RuntimeError("Invalid screen ROIs")
     return last_frame, rois
 
+
 def main():
     t0_total = time.time()
     parser = argparse.ArgumentParser()
@@ -1460,10 +1485,9 @@ def main():
     print(f"RADIO STRING VERIFICATION - DETECTED {len(rois)} DEVICES")
     print("=" * 70)
 
-    ocr = MSIGenAIOCR()
-    try: threading.Thread(target=lambda: ocr.get_or_init_session(), daemon=True).start()
-    except Exception: pass
-
+    # Initialize a baseline OCR session variable. We destroy and recreate it below inside the loop.
+    ocr = None 
+    
     box_mapping = {}
     try:
         map_file = Path(__file__).resolve().parents[1] / "configs" / "box_mapping.json"
@@ -1548,15 +1572,29 @@ def main():
         if exp_dict.get('display_style'): print(f"Display Style: {exp_dict.get('display_style')}")
         print(f"Index: {exp_dict.get('index', '')}")
         if exp_dict.get('tag'): print(f"Tag: {exp_dict.get('tag', '')}")
-        
-        final_region = args.region
-        final_language = args.language
-        
+
+        # Get list of targets to test against based on selected languages
+        targets_to_test = []
         if args.region.lower() == "multiple":
-            print("Expected (Local): [Will auto-detect from OCR based on selected languages]")
+            chosen_langs = [l.strip() for l in args.language.split(",") if l.strip()]
+            for cl in chosen_langs:
+                r, _ = map_language_to_region("", "", allowed_langs=cl)
+                try:
+                    n_exp = load_expected(args.excel, r, cl, index=exp_dict.get("index"), tag=exp_dict.get("tag"))
+                    targets_to_test.append({
+                        "region": r,
+                        "language": cl,
+                        "exp_target": n_exp.get("expected_local", "")
+                    })
+                except Exception: pass
         else:
-            print(f"Expected ({final_region.upper()}/{final_language}): {exp_dict.get('expected_local', '')}")
-            print(f"-> [Note]: Verification will auto-switch to English if the actual detected text is purely English.")
+            targets_to_test.append({
+                "region": args.region,
+                "language": args.language,
+                "exp_target": exp_dict.get("expected_local", "")
+            })
+            
+        print("Expected (Local): [Will check against all selected languages]")
 
         # ==================================================================
         # STATELESS BEST-OF-N RETRY LOGIC
@@ -1569,6 +1607,14 @@ def main():
         seen_observations = set()
         
         progressive_dims = [450, 600, 800, 800, 1000]
+        
+        # 1. WIPE AI MEMORY FOR EVERY DEVICE! 
+        # This prevents the AI from remembering the text it read on Device 1 and mistakenly applying it to Device 2.
+        try:
+            if ocr is not None:
+                del ocr
+        except Exception: pass
+        ocr = MSIGenAIOCR()
         
         for attempt in range(max_retries):
             retry_roi = roi.copy()
@@ -1625,14 +1671,21 @@ def main():
             if not hint_str or args.region.lower() == "multiple":
                 hint_str = exp_dict.get("expected_en", "")
 
-            # Extract text using the fresh image and fresh session
-            text, _conf = ocr.extract_text(
-                retry_roi, 
-                expected_language=pass_lang, 
-                dynamic_dim=current_dim, 
-                squash_ratio=current_squash,
-                expected_text=hint_str
-            )
+            # 2. PREVENT HALLUCINATION: Check if the screen is actually blank
+            if _is_screen_blank(retry_roi):
+                print("    -> [Pre-Check] Camera sees a BLANK screen. Skipping AI hallucination.")
+                text = "Detected text(original): " 
+                _conf = 0.0
+            else:
+                pass_hint = "" if attempt == 0 else hint_str
+                text, _conf = ocr.extract_text(
+                    retry_roi, 
+                    expected_language=pass_lang, 
+                    dynamic_dim=current_dim, 
+                    squash_ratio=current_squash,
+                    expected_text=pass_hint
+                )
+            
             t1_ocr = time.time()
 
             if attempt == 0:
@@ -1640,17 +1693,12 @@ def main():
 
             parsed = _parse_structured_fields(text)
             
-            # --- [Keep all your existing Bug/Overlap Detection logic here] ---
             parsed_doc_error = bool(parsed.get("error_red"))
             parsed_doc_type = str(parsed.get("error_type") or "").strip().lower()
             parsed_doc_evidence = str(parsed.get("error_evidence") or "").strip()
             parsed["error_red"] = False
             parsed["error_evidence"] = ""
             parsed["error_type"] = ""
-            final_error_red = False
-            final_error_evidence = ""
-            final_error_type = ""
-            # -----------------------------------------------------------------
 
             lang_detected = parsed.get("language") or ""
             if "detected text(original)" in text.lower():
@@ -1662,131 +1710,138 @@ def main():
             orig_text = str(orig_text).replace("<<<", "").replace(">>>", "").strip()
             eng_text = str(eng_text).replace("<<<", "").replace(">>>", "").strip()
 
-            has_foreign = any(ord(ch) > 127 and ch.isalpha() for ch in str(orig_text))
-
-            if args.region.lower() == "multiple":
-                if not has_foreign:
-                    final_region = "english"
-                    final_language = "English"
-                    exp_target = exp_dict.get("expected_en", "")
-                else:
-                    final_region, final_language = map_language_to_region(lang_detected, orig_text, allowed_langs=args.language)
-                    try:
-                        new_exp = load_expected(args.excel, final_region, final_language, index=exp_dict.get("index"), tag=exp_dict.get("tag"))
-                        exp_target = new_exp.get("expected_local", "")
-                    except Exception:
-                        exp_target = exp_dict.get("expected_local", "")
-            else:
-                if args.language.lower() in ["english", "en"]:
-                    final_region = "english"
-                    final_language = "English"
-                    exp_target = exp_dict.get("expected_en", "")
-                else:
-                    if has_foreign:
-                        final_region = args.region
-                        final_language = args.language
-                        exp_target = exp_dict.get("expected_local", "")
-                    else:
-                        final_region = "english"
-                        final_language = "English"
-                        exp_target = exp_dict.get("expected_en", "")
-
             observed_n = _norm_text(orig_text)
-            expected_local_n = _norm_text(exp_target)
 
-            def _clean_for_compare(text: str, is_cjk: bool) -> str:
-                # 1A. Destroy hallucinated letter icons ONLY if they have a space after them
-                c = re.sub(r'^(i|l|v|4)\s+', '', str(text), flags=re.IGNORECASE)
+            best_sub_conf = -1.0
+            best_sub_verdict = "FAIL"
+            best_sub_data = {}
+
+            # Test the observed text against ALL chosen languages
+            for target_info in targets_to_test:
+                t_region = target_info["region"]
+                t_lang = target_info["language"]
+                t_exp = target_info["exp_target"]
                 
-                # 1B. Destroy hallucinated symbol icons even if they are attached to a word
-                c = re.sub(r'^(!|\?|⏹|\[\]|\'|\"|️)\s*', '', c)
+                expected_local_n = _norm_text(t_exp)
+                is_cjk_target = any('\u4e00' <= ch <= '\u9fff' or '\u3040' <= ch <= '\u30ff' or '\uac00' <= ch <= '\ud7a3' for ch in expected_local_n)
+
+                def _clean_for_compare(text: str, is_cjk: bool) -> str:
+                    c = re.sub(r'^(i|l|v|4)\s+', '', str(text), flags=re.IGNORECASE)
+                    c = re.sub(r'^(!|\?|⏹|\[\]|\'|\"|️)\s*', '', c)
+                    
+                    # Strip ALL punctuation including slashes, colons, hyphens, and full-width colons
+                    c = re.sub(r'[,。…!/:\-：]', '', c)
+                    
+                    if is_cjk:
+                        c = re.sub(r'\s+', '', c)
+                        if not any(char.isascii() and char.isalpha() for char in expected_local_n):
+                            c = re.sub(r'[A-Za-z]', '', c)
+                        return c
+                    else:
+                        c = " ".join(c.split())
+                        c = re.sub(r'\s+[LHlh]$', '', c)
+                        return c
+
+                flat_obs = _clean_for_compare(observed_n, is_cjk_target)
+                flat_exp = _clean_for_compare(expected_local_n, is_cjk_target)
                 
-                # Removed the colon (:) and period (\.) so they are strictly graded!
-                c = re.sub(r'[,。…!]', ' ', c)
+                if flat_exp and flat_obs != flat_exp:
+                    corrected_obs = flat_obs
+                    known_illusions = {
+                        "RETRY": "RETRV",
+                        "Retry": "Retrv",
+                        "retry": "retrv",
+                        "虎碼": "號碼",
+                        "新響": "漸響",
+                        "施錠": "旋鈕",
+                        "施鈕": "旋鈕",
+                        "遠測": "遙測",
+                        "擺置": "擱置",
+                        "通话": "通稱",     # Simplified misread
+                        "通話": "通稱",     # Traditional misread
+                        "鎖碼": "變碼",
+                        "R∫": "Rx",
+                        "r∫": "rx",
+                        "音": "顫音",
+                        "SYSTELIAS": "SYSTEM ALIAS",
+                        "Systelias": "System Alias",
+                        "資訊驗證失敗": "驗證失敗",
+                        "資訊 驗證失敗": "驗證失敗",
+                        # --- NEW HARDWARE ILLUSION FIXES ---
+                        "스캔컴": "스캔켬",
+                        "스켈처": "스켈치",
+                        "Z-S": "Z-s",
+                        "タイカヘンシン": "クイックヘンシン",
+                        "タイカ": "クイック"
+                    }
+                    for bad, good in known_illusions.items():
+                        if bad in corrected_obs and good in flat_exp:
+                            corrected_obs = corrected_obs.replace(bad, good)
+                    
+                    sim = difflib.SequenceMatcher(None, flat_exp, corrected_obs).ratio()
+                    if sim >= 0.80 and len(corrected_obs) == len(flat_exp):
+                        corrected_obs = flat_exp
+                    
+                    if len(flat_obs) >= 2 and flat_exp.endswith(flat_obs):
+                        if len(flat_exp) - len(flat_obs) <= 2:
+                            corrected_obs = flat_exp
+
+                    if is_cjk_target and flat_exp in flat_obs and len(flat_obs) <= len(flat_exp) + 2:
+                        corrected_obs = flat_exp
+
+                    if is_cjk_target and flat_exp in flat_obs:
+                        stripped_obs = re.sub(r'[A-Za-z]', '', flat_obs)
+                        if stripped_obs == flat_exp:
+                            corrected_obs = flat_exp
+
+                    flat_obs = corrected_obs
                 
-                if is_cjk:
-                    c = re.sub(r'\s+', '', c).upper()
-                    if not any(char.isalpha() for char in expected_local_n):
-                        c = re.sub(r'[A-Z]', '', c)
-                    return c
+                t_conf = 0.0
+                t_verdict = "FAIL"
+                if flat_exp:
+                    similarity = difflib.SequenceMatcher(None, flat_exp, flat_obs).ratio()
+                    t_conf = round(similarity * 100, 1)
+
+                    if flat_obs == flat_exp:
+                        t_verdict = "PASS"
+                        t_conf = 100.0
+                    elif flat_exp in flat_obs:
+                        t_verdict = "FAIL"
+                    else:
+                        if t_conf >= 70.0: t_verdict = "WARN"
+                        else: t_verdict = "FAIL"
                 else:
-                    c = " ".join(c.split()).upper()
-                    c = re.sub(r'\s+[LH]$', '', c)
-                    return c
-
-            is_cjk_target = any('\u4e00' <= ch <= '\u9fff' or '\u3040' <= ch <= '\u30ff' or '\uac00' <= ch <= '\ud7a3' for ch in expected_local_n)
-
-            flat_obs = _clean_for_compare(observed_n, is_cjk_target)
-            flat_exp = _clean_for_compare(expected_local_n, is_cjk_target)
-            
-            # =============================================================
-            # NEW: DETERMINISTIC LCD ILLUSION AUTO-CORRECTOR
-            # =============================================================
-            if flat_exp and flat_obs != flat_exp:
-                corrected_obs = flat_obs
+                    t_verdict = "PASS" if not flat_obs else "FAIL"
                 
-                # 1. Known AI Blindspots (Force-replace the stubborn hallucinations)
-                known_illusions = {
-                    "RETRY": "RETRV",
-                    "虎碼": "號碼",
-                    "新響": "漸響",
-                    "施錠": "旋鈕"
-                }
-                for bad, good in known_illusions.items():
-                    if bad in corrected_obs and good in flat_exp:
-                        corrected_obs = corrected_obs.replace(bad, good)
-                
-                # 2. General Fuzzy Match for 1-character LCD glitches
-                sim = difflib.SequenceMatcher(None, flat_exp, corrected_obs).ratio()
-                if sim >= 0.80 and len(corrected_obs) == len(flat_exp):
-                    corrected_obs = flat_exp
-                
-                # 3. Handle Camera Edge-Cutoff (e.g. 滋擾刪除 -> 刪除)
-                if len(flat_obs) >= 2 and flat_exp.endswith(flat_obs):
-                    if len(flat_exp) - len(flat_obs) <= 2:
-                        corrected_obs = flat_exp
+                if t_conf > best_sub_conf or (t_verdict == "PASS" and best_sub_verdict != "PASS"):
+                    best_sub_conf = t_conf
+                    best_sub_verdict = t_verdict
+                    best_sub_data = {
+                        "final_region": t_region,
+                        "final_language": t_lang,
+                        "exp_target": t_exp,
+                        "flat_obs": flat_obs,
+                        "flat_exp": flat_exp
+                    }
+                if t_verdict == "PASS":
+                    break
 
-                # --- NEW HACK ---
-                # 4. Cross-Language UI Title Stripper (e.g., 擴展 COMPANDING -> 擴展)
-                # If we expect Chinese, safely ignore stray English UI titles.
-                if is_cjk_target and flat_exp in flat_obs:
-                    stripped_obs = re.sub(r'[A-Z]', '', flat_obs)
-                    if stripped_obs == flat_exp:
-                        corrected_obs = flat_exp
+            confidence_pct = best_sub_conf
+            verdict = best_sub_verdict
+            final_region = best_sub_data.get("final_region", args.region)
+            final_language = best_sub_data.get("final_language", args.language)
+            exp_target = best_sub_data.get("exp_target", "")
+            flat_obs = best_sub_data.get("flat_obs", "")
+            flat_exp = best_sub_data.get("flat_exp", "")
+            final_error_red = False
+            final_error_evidence = ""
+            final_error_type = ""
 
-                # Apply the correction before grading!
-                flat_obs = corrected_obs
-            # =============================================================
-            
             if attempt >= 4 and flat_obs in seen_observations:
                 print(f"    -> [Smart Abort] AI returned exact same text ('{flat_obs}'). Stopping retries.")
-                # We do not break here immediately; we must score it first!
                 
             seen_observations.add(flat_obs)
 
-            # GRADING LOGIC (Strict 100% Match)
-            confidence_pct = 0.0
-            verdict = "FAIL"
-
-            if flat_exp:
-                similarity = difflib.SequenceMatcher(None, flat_exp, flat_obs).ratio()
-                confidence_pct = round(similarity * 100, 1)
-
-                if flat_obs == flat_exp:
-                    verdict = "PASS"
-                    confidence_pct = 100.0
-                elif flat_exp in flat_obs:
-                    verdict = "FAIL" # Strict failure for extra text
-                else:
-                    if confidence_pct >= 70.0:
-                        verdict = "WARN"
-                    else:
-                        verdict = "FAIL"
-            else:
-                verdict = "PASS" if not flat_obs else "FAIL"
-
-            # 3. STORE THE BEST RESULT
-            # If this attempt scored higher than our previous best, save all of its data!
             if confidence_pct > best_conf:
                 best_conf = confidence_pct
                 best_attempt_data = {
@@ -1805,7 +1860,6 @@ def main():
                     "flat_exp": flat_exp
                 }
 
-            # If we achieved a perfect 100% PASS, exit the loop immediately!
             if verdict == "PASS":
                 break
 
@@ -1827,8 +1881,6 @@ def main():
             flat_obs = best_attempt_data["flat_obs"]
             flat_exp = best_attempt_data["flat_exp"]
         # ==================================================================
-        
-        # ... [Your script continues to print to console and write to Excel below] ...
 
         observed_display = flat_obs 
         

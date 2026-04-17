@@ -284,7 +284,6 @@ def _language_options_from_excel(excel_path: str, region: str) -> list[str]:
             headers = list(row)
             break
 
-        # Removed 'english' from ignore list to allow selection
         ignore = {
             "index", "string tag", "tag", "string category", "category",
             "version", "ver", "comment", "comments",
@@ -382,6 +381,7 @@ class VerifyStringGUI:
         
         self._commg_pending_queue = []
         self._commg_is_active_run = False
+        self._is_paused = False 
         self.active_cmd_windows = []
 
         frm = tk.Frame(root, padx=10, pady=10)
@@ -409,7 +409,6 @@ class VerifyStringGUI:
         self.region_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_tags(), add=True)
         row += 1
 
-        # Multi-select Language setup
         tk.Label(frm, text="Language(s)").grid(row=row, column=0, sticky="w", pady=(6, 0))
         lang_frame = tk.Frame(frm)
         lang_frame.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
@@ -463,7 +462,7 @@ class VerifyStringGUI:
         tk.Button(frm, text="Browse...", command=self.browse_model).grid(row=row, column=2, sticky="e", pady=(6, 0))
         row += 1
 
-        self.lf_commg = tk.LabelFrame(frm, text=" Automation Integration (CommG / CMD) ", padx=10, pady=5, fg="#00008B", font=('Arial', 10, 'bold'))
+        self.lf_commg = tk.LabelFrame(frm, text=" Automation Integration (CommG / CMD / PuTTY) ", padx=10, pady=5, fg="#00008B", font=('Arial', 10, 'bold'))
         self.lf_commg.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
         
         top_frame = tk.Frame(self.lf_commg)
@@ -479,9 +478,10 @@ class VerifyStringGUI:
         tk.Label(top_frame, text="Tool:").pack(side=tk.LEFT)
         tk.Radiobutton(top_frame, text="CommG", variable=self.integration_type_var, value="CommG").pack(side=tk.LEFT, padx=(5, 5))
         tk.Radiobutton(top_frame, text="CMD (Telnet)", variable=self.integration_type_var, value="CMD").pack(side=tk.LEFT, padx=(5, 5))
+        tk.Radiobutton(top_frame, text="PuTTY", variable=self.integration_type_var, value="PuTTY").pack(side=tk.LEFT, padx=(5, 5))
 
         self.telnet_port_var = tk.StringVar(value=str(self._settings.get("telnet_port", "23")))
-        tk.Label(top_frame, text="Port (CMD):").pack(side=tk.LEFT, padx=(10, 2))
+        tk.Label(top_frame, text="Port:").pack(side=tk.LEFT, padx=(10, 2))
         tk.Entry(top_frame, textvariable=self.telnet_port_var, width=5).pack(side=tk.LEFT)
 
         ip_frame = tk.Frame(self.lf_commg)
@@ -647,13 +647,11 @@ class VerifyStringGUI:
         if not val: return
         current = self.language_var.get().strip()
         if current:
-            # Check if it's already in the list to avoid duplicates
             existing = [x.strip().lower() for x in current.split(",")]
             if val.lower() not in existing:
                 self.language_var.set(current + ", " + val)
         else:
             self.language_var.set(val)
-        # Clear combobox selection visually
         self.language_combo.set('')
 
     def _on_index_changed(self, *args):
@@ -723,6 +721,58 @@ class VerifyStringGUI:
         except Exception:
             return False
 
+    def _robust_connection_check(self, ip, port, is_cmd=True):
+        import time
+        has_waited_a_minute = False
+        
+        while True:
+            connected = False
+            for attempt in range(3):
+                self.q.put(f"[Connection Check] Ping {ip} (Attempt {attempt+1}/3)...\n")
+                if self._commg_ping_ip(ip):
+                    if is_cmd:
+                        import socket
+                        try:
+                            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            s.settimeout(2.0)
+                            s.connect((ip, port))
+                            s.close()
+                            connected = True
+                            break
+                        except Exception as e:
+                            self.q.put(f"[Connection Check] Ping OK, but target port {port} is closed/unreachable: {e}\n")
+                    else:
+                        connected = True
+                        break
+                time.sleep(2.0)
+                
+            if connected:
+                return "CONNECTED"
+                
+            if not has_waited_a_minute:
+                self.q.put(f"[Connection Check] Connection lost for {ip}. Waiting 60 seconds before next retry batch...\n")
+                for _ in range(60):
+                    if not getattr(self, "_commg_is_active_run", False): return "PAUSE"
+                    time.sleep(1)
+                has_waited_a_minute = True
+                continue 
+                
+            proceed = messagebox.askyesno(
+                "Connection Lost", 
+                f"Connection to IP {ip} failed after all retries.\n\n"
+                "Click 'Yes' to WAIT another minute and automatically retry again.\n"
+                "Click 'No' to STOP and PAUSE the batch (you can resume safely later)."
+            )
+            
+            if proceed:
+                has_waited_a_minute = False
+                self.q.put(f"[Connection Check] User chose to wait. Waiting 60 seconds...\n")
+                for _ in range(60):
+                    if not getattr(self, "_commg_is_active_run", False): return "PAUSE"
+                    time.sleep(1)
+            else:
+                return "PAUSE"
+
     def _commg_find_handles(self):
         if not HAS_PYWINAUTO: return []
         handles = []
@@ -763,16 +813,16 @@ class VerifyStringGUI:
         self.q.put("[CommG] Successfully hooked into CommuniGATOR.\n")
         return True
 
-    def _commg_send_command_thread_impl(self, payloads):
+    def _commg_send_command_thread_impl(self, payloads, batch_items):
         ips = list(self.ip_listbox.get(0, tk.END))
         if not ips:
             self.q.put("[CommG] No IPs configured!\n")
-            self.q.put((_EVT_COMMG_DONE, "ABORT"))
+            self.q.put((_EVT_COMMG_DONE, "ABORT", batch_items))
             return
 
         if not self._commg_ensure_connection():
             self.q.put("[CommG] Failed to connect to CommuniGATOR.\n")
-            self.q.put((_EVT_COMMG_DONE, "ABORT"))
+            self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
             return
 
         handle = self.commg_handles[0]
@@ -784,14 +834,13 @@ class VerifyStringGUI:
             
             for i, ip in enumerate(ips):
                 payload = payloads[i] if i < len(payloads) else payloads[-1]
-                self.q.put(f"[CommG] Ping check {ip}...\n")
-                if not self._commg_ping_ip(ip):
-                    self.q.put(f"[CommG] WARNING: {ip} is offline.\n")
-                    proceed = messagebox.askyesno("IP Not Found", f"Could not reach IP: {ip}\n\nDo you want to skip this one and proceed?")
-                    if not proceed:
-                        self.q.put("[CommG] Sequence aborted by user.\n")
-                        self.q.put((_EVT_COMMG_DONE, "ABORT"))
-                        return
+                
+                status = self._robust_connection_check(ip, 23, is_cmd=False)
+                if status == "PAUSE" or status == "ABORT":
+                    self.q.put("[CommG] Sequence paused by user.\n")
+                    self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
+                    return
+                elif status == "SKIP":
                     continue
 
                 try:
@@ -820,7 +869,7 @@ class VerifyStringGUI:
                     proceed = messagebox.askyesno("Automation Error", f"An error occurred while controlling the UI for {ip}.\n\nDo you want to skip and proceed?")
                     if not proceed:
                         self.q.put("[CommG] Sequence aborted by user due to UI error.\n")
-                        self.q.put((_EVT_COMMG_DONE, "ABORT"))
+                        self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
                         return
                     
             self.q.put("[CommG] Waiting 5s for UI to update...\n")
@@ -828,18 +877,18 @@ class VerifyStringGUI:
             
         except Exception as e:
             self.q.put(f"[CommG] FATAL ERROR: {e}\n")
-            self.q.put((_EVT_COMMG_DONE, "ABORT"))
+            self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
             return
 
-        self.q.put((_EVT_COMMG_DONE, None))
+        self.q.put((_EVT_COMMG_DONE, None, None))
 
-    def _cmd_telnet_thread(self, payloads):
+    def _cmd_telnet_thread(self, payloads, batch_items):
         import socket
         
         ips = [ip.strip() for ip in self.ip_listbox.get(0, tk.END) if ip.strip()]
         if not ips:
             self.q.put("[CMD] No IPs configured!\n")
-            self.q.put((_EVT_COMMG_DONE, "ABORT"))
+            self.q.put((_EVT_COMMG_DONE, "ABORT", batch_items))
             return
 
         try:
@@ -852,14 +901,13 @@ class VerifyStringGUI:
 
         for i, ip in enumerate(ips):
             payload = payloads[i] if i < len(payloads) else payloads[-1]
-            self.q.put(f"[CMD] Ping check {ip}...\n")
-            if not self._commg_ping_ip(ip):
-                self.q.put(f"[CMD] WARNING: {ip} is offline.\n")
-                proceed = messagebox.askyesno("IP Not Found", f"Could not reach IP: {ip}\n\nDo you want to skip this one and proceed?")
-                if not proceed:
-                    self.q.put("[CMD] Sequence aborted by user.\n")
-                    self.q.put((_EVT_COMMG_DONE, "ABORT"))
-                    return
+            
+            status = self._robust_connection_check(ip, port, is_cmd=True)
+            if status == "PAUSE" or status == "ABORT":
+                self.q.put("[CMD] Sequence paused by user.\n")
+                self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
+                return
+            elif status == "SKIP":
                 continue
 
             try:
@@ -881,22 +929,150 @@ class VerifyStringGUI:
                 proceed = messagebox.askyesno("Automation Error", f"An error occurred while connecting to {ip}.\n\nDo you want to skip and proceed?")
                 if not proceed:
                     self.q.put("[CMD] Sequence aborted by user.\n")
-                    self.q.put((_EVT_COMMG_DONE, "ABORT"))
+                    self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
                     return
 
         self.q.put("[CMD] Waiting 3s for devices to process...\n")
         time.sleep(3.0) 
-        self.q.put((_EVT_COMMG_DONE, None))
+        self.q.put((_EVT_COMMG_DONE, None, None))
 
-    def _integration_send_command_thread(self, payloads):
+    def _putty_thread(self, payloads, batch_items):
+        ips = [ip.strip() for ip in self.ip_listbox.get(0, tk.END) if ip.strip()]
+        if not ips:
+            self.q.put("[PuTTY] No IPs configured!\n")
+            self.q.put((_EVT_COMMG_DONE, "ABORT", batch_items))
+            return
+
+        try:
+            port = str(int(self.telnet_port_var.get().strip() or 23))
+        except ValueError:
+            port = "23"
+
+        if not hasattr(self, "active_putty_apps"):
+            self.active_putty_apps = {}
+
+        putty_exe = None
+        saved_putty = self._settings.get("putty_path", "")
+        
+        if os.path.exists(saved_putty):
+            putty_exe = saved_putty
+        else:
+            putty_paths = [
+                r"C:\Program Files\PuTTY\putty.exe",
+                r"C:\Program Files (x86)\PuTTY\putty.exe"
+            ]
+            for p in putty_paths:
+                if os.path.exists(p):
+                    putty_exe = p
+                    break
+
+            if not putty_exe:
+                self.q.put("[PuTTY] Searching for putty.exe...\n")
+                putty_exe = filedialog.askopenfilename(title="Locate putty.exe", filetypes=[("Executable", "putty.exe")])
+                if putty_exe:
+                    self._settings["putty_path"] = putty_exe
+                    _save_settings(self._settings)
+                else:
+                    self.q.put("[PuTTY] ERROR: putty.exe not found or selected.\n")
+                    self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
+                    return
+
+        for i, ip in enumerate(ips):
+            payload = payloads[i] if i < len(payloads) else payloads[-1]
+
+            status = self._robust_connection_check(ip, int(port), is_cmd=True)
+            if status == "PAUSE" or status == "ABORT":
+                self.q.put("[PuTTY] Sequence paused by user.\n")
+                self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
+                return
+            elif status == "SKIP":
+                continue
+
+            try:
+                with self.type_lock:
+                    if ip not in self.active_putty_apps:
+                        self.q.put(f"[PuTTY] Launching Configuration GUI for {ip}...\n")
+                        
+                        app = Application(backend="uia").start(putty_exe)
+                        config_win = app.window(title="PuTTY Configuration")
+                        config_win.wait("ready", timeout=5)
+                        
+                        # 1. Ensure we are in "Session" Category
+                        try:
+                            config_win.child_window(title="Session", control_type="TreeItem").click_input()
+                            time.sleep(0.2)
+                        except: pass
+
+                        # 2. Type IP Address
+                        try:
+                            host_edit = config_win.child_window(title_re="Host Name.*", control_type="Edit")
+                            host_edit.click_input()
+                            host_edit.type_keys("^a{BACKSPACE}" + ip, with_spaces=True)
+                        except:
+                            config_win.set_focus()
+                            config_win.type_keys("%n^a{BACKSPACE}" + ip)
+                            
+                        # 3. Type Port
+                        try:
+                            port_edit = config_win.child_window(title="Port", control_type="Edit")
+                            port_edit.click_input()
+                            port_edit.type_keys("^a{BACKSPACE}" + port)
+                        except:
+                            config_win.set_focus()
+                            config_win.type_keys("%p^a{BACKSPACE}" + port)
+                            
+                        # 4. Connection Type -> Raw (User specific sequence: TAB 2 times, then 'rr')
+                        try:
+                            config_win.set_focus()
+                            config_win.type_keys("{TAB}{TAB}rr")
+                            time.sleep(0.3)
+                        except Exception as e:
+                            self.q.put(f"[PuTTY] Keyboard shortcut failed: {e}\n")
+
+                        # 5. Click Open Button
+                        try:
+                            open_btn = config_win.child_window(title="Open", control_type="Button")
+                            open_btn.click_input()
+                        except:
+                            config_win.set_focus()
+                            config_win.type_keys("{ENTER}")
+                        
+                        # Wait for the terminal window to open
+                        time.sleep(1.5)
+                        term_win = app.window(title_re=r".*PuTTY.*")
+                        term_win.wait("ready", timeout=5)
+                        
+                        self.active_putty_apps[ip] = (app, term_win)
+
+                    # Send command to the active terminal
+                    app, term_win = self.active_putty_apps[ip]
+                    term_win.set_focus()
+                    term_win.type_keys(payload + "{ENTER}", set_foreground=True)
+                    self.q.put(f"[PuTTY] Sent {payload} to {ip}\n")
+
+            except Exception as inner_e:
+                self.q.put(f"[PuTTY] ERROR on {ip}: {inner_e}\n")
+                proceed = messagebox.askyesno("Automation Error", f"An error occurred while controlling PuTTY for {ip}.\n\nDo you want to skip and proceed?")
+                if not proceed:
+                    self.q.put("[PuTTY] Sequence aborted by user.\n")
+                    self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
+                    return
+
+        self.q.put("[PuTTY] Waiting 3s for devices to process...\n")
+        time.sleep(3.0) 
+        self.q.put((_EVT_COMMG_DONE, None, None))
+
+    def _integration_send_command_thread(self, payloads, batch_items):
         integration_type = self.integration_type_var.get()
         if integration_type == "CMD":
-            self._cmd_telnet_thread(payloads)
+            self._cmd_telnet_thread(payloads, batch_items)
+        elif integration_type == "PuTTY":
+            self._putty_thread(payloads, batch_items)
         else:
-            self._commg_send_command_thread_impl(payloads)
+            self._commg_send_command_thread_impl(payloads, batch_items)
 
     def _run_next_commg_step(self):
-        if not self._commg_pending_queue:
+        if not getattr(self, "_commg_pending_queue", []):
             self._commg_is_active_run = False
             self._set_running(False)
             self.status_var.set("Automation Batch Complete")
@@ -911,7 +1087,7 @@ class VerifyStringGUI:
         batch_items = []
         if mode == "Batch" and num_ips > 1:
             for _ in range(num_ips):
-                if self._commg_pending_queue:
+                if getattr(self, "_commg_pending_queue", []):
                     batch_items.append(self._commg_pending_queue.pop(0))
         else:
             batch_items.append(self._commg_pending_queue.pop(0))
@@ -972,7 +1148,7 @@ class VerifyStringGUI:
         self.status_label.configure(fg="purple")
         self._set_running(True)
 
-        threading.Thread(target=self._integration_send_command_thread, args=(cmds,), daemon=True).start()
+        threading.Thread(target=self._integration_send_command_thread, args=(cmds, batch_items), daemon=True).start()
 
     def _regrid_device_rows(self):
         for idx, row in enumerate(self.device_rows):
@@ -1186,14 +1362,14 @@ class VerifyStringGUI:
             self.output.insert(tk.END, line, ("warn",))
         elif is_error:
             self.output.insert(tk.END, line, ("error",))
-        elif "[CommG]" in stripped or "[CMD]" in stripped:
+        elif "[CommG]" in stripped or "[CMD]" in stripped or "[PuTTY]" in stripped:
             self.output.insert(tk.END, line, ("commg",))
         else:
             self.output.insert(tk.END, line)
             
         self.output.see(tk.END)
         
-        is_gui_msg = stripped.startswith("[CommG]") or stripped.startswith("[CMD]") or stripped.startswith("[GUI")
+        is_gui_msg = stripped.startswith("[CommG]") or stripped.startswith("[CMD]") or stripped.startswith("[PuTTY]") or stripped.startswith("[GUI")
         if "RADIO STRING VERIFICATION - DETECTED" in stripped:
             self._is_recording_log = True
             try:
@@ -1231,6 +1407,7 @@ class VerifyStringGUI:
             "commg_mode": (self.commg_mode_var.get() or "Batch"),
             "commg_custom_cmd": (self.commg_custom_cmd_var.get() or "").strip(),
             "commg_batch_file": (self.commg_batch_file_var.get() or "").strip(),
+            "putty_path": self._settings.get("putty_path", ""),
         }
 
     def _persist_settings(self):
@@ -1403,11 +1580,9 @@ class VerifyStringGUI:
         script_path = Path(__file__).resolve().parent / "verify_string.py"
         cmd = [_python_exe(), str(script_path), "--excel", excel, "--region", region, "--language", language]
 
-        # Locate this inside def _build_cmd:
         if tag: cmd += ["--tag", tag]
         if idx: cmd += ["--index", idx]
 
-        # ADD THESE LINES:
         if getattr(self, "_commg_is_active_run", False) and hasattr(self, "_current_batch_cmds"):
             cmd += ["--command", ",".join(self._current_batch_cmds)]
         elif self.commg_mode_var.get() == "Single" and self.integration_enable_var.get():
@@ -1603,6 +1778,21 @@ class VerifyStringGUI:
 
     def init_and_run(self):
         self.btn_run.configure(state=tk.DISABLED)
+        
+        if getattr(self, "_is_paused", False) and getattr(self, "_commg_pending_queue", []):
+            if messagebox.askyesno("Resume Batch", "A paused batch was detected.\n\nDo you want to RESUME from where you left off?"):
+                self._is_paused = False
+                self._commg_is_active_run = True
+                self._auto_start_verify = True
+                self.init_genai()
+                return
+            else:
+                self._is_paused = False
+                self._commg_pending_queue = []
+                self.clear_summary_data()
+        else:
+            self.clear_summary_data()
+
         self.batch_start_time = time.time()
         self._summary_written = False 
         
@@ -1642,12 +1832,11 @@ class VerifyStringGUI:
                     self.btn_run.configure(state=tk.NORMAL) 
                     return
                     
-            if not self._commg_pending_queue:
+            if not getattr(self, "_commg_pending_queue", []):
                 messagebox.showwarning("Warning", "No commands found in the batch file.")
                 self.btn_run.configure(state=tk.NORMAL) 
                 return
             
-            self.clear_summary_data()
             self.notebook.select(self.tab_summary)
             
             self._commg_is_active_run = True
@@ -1666,6 +1855,7 @@ class VerifyStringGUI:
                 except Exception:
                     self._batch_log_dir = d
         else:
+            self.notebook.select(self.tab_summary)
             self._commg_pending_queue = []
             self._commg_is_active_run = False
             self._batch_log_dir = None
@@ -1731,9 +1921,17 @@ class VerifyStringGUI:
             if action["result"] != "stop":
                 return
                 
-        self._commg_pending_queue = []
+        if getattr(self, "_commg_is_active_run", False) and getattr(self, "_commg_pending_queue", []):
+            self._is_paused = True
+            self.status_var.set("Automation Paused")
+            self.status_label.configure(fg="#E65100")
+            self.q.put("\n[GUI] Sequence stopped manually. State saved. Click 'Start' to resume.\n", ("warn",))
+        else:
+            self._commg_pending_queue = []
+            
         self._commg_is_active_run = False
         
+        # Cleanup CMD Telnet Sessions
         if getattr(self, "active_sockets", []):
             for s in self.active_sockets:
                 try:
@@ -1744,11 +1942,21 @@ class VerifyStringGUI:
                     pass
             self.active_sockets = []
 
+        # Cleanup PuTTY Sessions
+        if getattr(self, "active_putty_apps", {}):
+            for ip, (app, term_win) in list(self.active_putty_apps.items()):
+                try:
+                    term_win.type_keys("STR_TEST:CLOSE{ENTER}")
+                    time.sleep(0.5)
+                    app.kill()
+                except Exception:
+                    pass
+            self.active_putty_apps = {}
+
         if hasattr(self, "proc_thread") and self.proc_thread and self.proc_thread.is_alive():
             self._append("\n[WARNING] Note: Background script is still finishing its current execution loop.\n")
             
     def _write_final_excel_summary(self):
-        """Writes exactly ONE final summary to the Excel sheet at the end without any blanks."""
         if getattr(self, "_summary_written", False):
             return
         self._summary_written = True
@@ -1786,7 +1994,6 @@ class VerifyStringGUI:
                 else:
                     time_taken_str = f"{elapsed:.1f}s"
             
-            # UPDATE this array to have 14 items total (add two empty strings ""):
             summary_row = [
                 f"FINAL SUMMARY", 
                 f"Total Time: {time_taken_str}", 
@@ -1802,7 +2009,6 @@ class VerifyStringGUI:
             summary_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
             summary_font = Font(bold=True)
             
-            # UPDATE the range here from 7 to 9 to cover the new width
             for col_num in range(1, 9):
                 cell = ws.cell(row=row_idx, column=col_num)
                 cell.fill = summary_fill
@@ -1825,12 +2031,23 @@ class VerifyStringGUI:
             while True:
                 s = self.q.get_nowait()
                 
-                if isinstance(s, tuple) and len(s) == 2 and s[0] == _EVT_COMMG_DONE:
-                    if s[1] == "ABORT":
+                if isinstance(s, tuple) and len(s) >= 2 and s[0] == _EVT_COMMG_DONE:
+                    status = s[1]
+                    batch_items = s[2] if len(s) > 2 else []
+                    
+                    if status in ("ABORT", "PAUSE"):
                         self._commg_is_active_run = False
-                        self._commg_pending_queue = []
-                        self.status_var.set("Automation Sequence Aborted")
-                        self.status_label.configure(fg="red")
+                        if status == "PAUSE":
+                            self._is_paused = True
+                            if batch_items:
+                                self._commg_pending_queue = batch_items + getattr(self, "_commg_pending_queue", [])
+                            self.status_var.set("Automation Sequence Paused")
+                            self.status_label.configure(fg="#E65100")
+                        else:
+                            self._commg_pending_queue = []
+                            self.status_var.set("Automation Sequence Aborted")
+                            self.status_label.configure(fg="red")
+                            
                         self._set_running(False)
                         self._write_final_excel_summary() 
                     else:
@@ -1866,7 +2083,6 @@ class VerifyStringGUI:
                             if getattr(self, "_log_session_dir", None):
                                 xl_p = Path(self._log_session_dir) / "Batch_Summary_Report.xlsx"
                                 try:
-                                    # REPLACE the Excel writing block inside the if not xl_p.exists(): condition with this:
                                     if not xl_p.exists():
                                         wb = Workbook()
                                         ws = wb.active
@@ -1902,12 +2118,10 @@ class VerifyStringGUI:
                                         ])
                                         
                                         row_idx = ws.max_row
-                                        # UPDATE range to 15 (which handles columns 1 through 14)
                                         for col_num in range(1, 15):
                                             cell = ws.cell(row=row_idx, column=col_num)
                                             cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
                                             
-                                        # UPDATE verdict cell position from 10 to 12
                                         verdict_cell = ws.cell(row=row_idx, column=12)
                                         verdict_cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
                                         verdict_cell.font = Font(color="333333", bold=True)
@@ -1932,6 +2146,7 @@ class VerifyStringGUI:
                     rc = s[1]
                     is_verify = bool(self._last_run_is_verification)
 
+                    # Cleanup CMD Telnet Sessions on Verification Complete
                     if is_verify and getattr(self, "active_sockets", []):
                         self.q.put("[CMD] Verification complete. Sending close command and terminating sessions...\n")
                         for soc in self.active_sockets:
@@ -1942,6 +2157,18 @@ class VerifyStringGUI:
                             except Exception:
                                 pass
                         self.active_sockets = []
+
+                    # Cleanup PuTTY Sessions on Verification Complete
+                    if is_verify and getattr(self, "active_putty_apps", {}):
+                        self.q.put("[PuTTY] Verification complete. Terminating sessions...\n")
+                        for ip, (app, term_win) in list(self.active_putty_apps.items()):
+                            try:
+                                term_win.type_keys("STR_TEST:CLOSE{ENTER}")
+                                time.sleep(0.5)
+                                app.kill()
+                            except Exception:
+                                pass
+                        self.active_putty_apps = {}
 
                     will_autostart = False
                     try:

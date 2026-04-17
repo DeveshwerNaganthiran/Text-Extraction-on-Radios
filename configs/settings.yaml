@@ -11,7 +11,7 @@ training:
   epochs: 250
   batch_size: 16
   learning_rate: 0.01
-  device: "cpu"  # Change to "cuda" if you have GPU
+  device: "cuda"  # Change to "cuda" if you have GPU , cpu for CPU
   patience: 25
   save_period: 10
   
