@@ -46,10 +46,7 @@ DISPLAY_STYLES = {
     55: "FEATURE_NEUTRAL_NOTICE_FEATURE_DISP_STYLE"
 }
 
-
-
 def get_display_style_name(command_str: str) -> str:
-    """Parses a command like STR_TEST:FIX:0050:1188 to get the display style name."""
     if not command_str or command_str == "SKIP_VERIFY": return "-"
     parts = command_str.split(":")
     if len(parts) >= 3:
@@ -61,372 +58,22 @@ def get_display_style_name(command_str: str) -> str:
     return "UNKNOWN"
 
 # ---------------------------------------------------------------------------
-# Strict Error Detection Methods Ported from main_msi_genai.py
+# Strict Error Detection Methods
 # ---------------------------------------------------------------------------
 
 def _is_screen_blank(roi_img: np.ndarray) -> bool:
-    """Calculates contrast and edge density to determine if the LCD is completely blank/off."""
     try:
         if roi_img is None or getattr(roi_img, "size", 0) == 0: return True
         gray = cv2.cvtColor(roi_img, cv2.COLOR_BGR2GRAY) if len(roi_img.shape) == 3 else roi_img
-        
-        # Check standard deviation (contrast). If very low, it's a solid color (off/blank).
         std_dev = np.std(gray)
-        if std_dev < 8.0:
-            return True
-            
-        # Check edge density. Text produces a lot of sharp edges.
+        if std_dev < 8.0: return True
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         edges = cv2.Canny(blur, 40, 120)
         edge_density = np.count_nonzero(edges) / float(edges.size)
-        
-        # If less than 0.3% of the screen has edges, it's blank/glowing square.
-        if edge_density < 0.003:
-            return True
-            
+        if edge_density < 0.003: return True
         return False
     except Exception:
         return False
-
-def _strict_count_vertical_separators(screen_roi: np.ndarray) -> int:
-    try:
-        if screen_roi is None or getattr(screen_roi, "size", 0) == 0:
-            return 0
-        h, w = screen_roi.shape[:2]
-        if h < 20 or w < 30:
-            return 0
-
-        y0 = int(max(0, h * 0.68))
-        y1 = int(min(h, h * 0.98))
-        roi = screen_roi[y0:y1, :]
-        if roi is None or getattr(roi, "size", 0) == 0:
-            return 0
-        hh, ww_img = roi.shape[:2]
-        if hh < 10 or ww_img < 30:
-            return 0
-
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
-        try:
-            clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-            gray = clahe.apply(gray)
-        except Exception:
-            pass
-        try:
-            blur = cv2.GaussianBlur(gray, (3, 3), 0)
-        except Exception:
-            blur = gray
-
-        try:
-            thr_hi = int(max(160, min(245, np.percentile(blur, 85))))
-        except Exception:
-            thr_hi = 200
-        _t, bw_bright = cv2.threshold(blur, int(thr_hi), 255, cv2.THRESH_BINARY)
-
-        try:
-            thr_lo = int(min(120, max(20, np.percentile(blur, 10))))
-        except Exception:
-            thr_lo = 60
-        _t, bw_dark = cv2.threshold(blur, int(thr_lo), 255, cv2.THRESH_BINARY_INV)
-
-        try:
-            bw_adapt = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY, 31, -10)
-        except Exception:
-            bw_adapt = bw_bright
-
-        try:
-            bw = cv2.max(cv2.max(bw_bright, bw_dark), bw_adapt)
-        except Exception:
-            bw = bw_bright
-
-        k_h = max(8, int(hh * 0.55))
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, int(k_h)))
-        vert = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel, iterations=1)
-
-        try:
-            contours, _hier = cv2.findContours(vert, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        except Exception:
-            _res = cv2.findContours(vert, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            contours = _res[0] if _res else []
-
-        xs_w = []
-        for c in contours or []:
-            x, y, ww, hh0 = cv2.boundingRect(c)
-            if hh0 < int(hh * 0.55): continue
-            if ww > max(10, int(ww_img * 0.05)): continue
-            if int(hh0) < int(ww) * 6: continue
-            xc = int(x + (ww // 2))
-            if xc < int(ww_img * 0.08) or xc > int(ww_img * 0.92): continue
-            xs_w.append((int(xc), int(max(1, ww))))
-
-        if not xs_w:
-            try:
-                col = np.mean((bw_bright.astype(np.uint8) > 0).astype(np.float32), axis=0)
-                win = max(3, int(ww_img * 0.01) | 1)
-                kernel_1d = np.ones((int(win),), dtype=np.float32) / float(max(1, int(win)))
-                col_s = np.convolve(col, kernel_1d, mode="same")
-                thr = float(max(0.55, min(0.90, np.percentile(col_s, 98) * 0.85)))
-                mask = col_s >= thr
-                groups, start = [], None
-                for xi, on in enumerate(mask.tolist()):
-                    if on and start is None: start = int(xi)
-                    elif (not on) and start is not None:
-                        groups.append((int(start), int(xi - 1)))
-                        start = None
-                if start is not None: groups.append((int(start), int(len(mask) - 1)))
-
-                max_w = max(2, int(ww_img * 0.020))
-                for a, b in groups:
-                    gw = int(b - a + 1)
-                    if gw > int(max_w): continue
-                    xc = int((int(a) + int(b)) // 2)
-                    if xc < int(ww_img * 0.08) or xc > int(ww_img * 0.92): continue
-                    xs_w.append((int(xc), int(gw)))
-            except Exception:
-                pass
-
-        if not xs_w:
-            return 0
-
-        xs_w.sort(key=lambda t: t[0])
-        merged = []
-        min_gap = max(6, int(ww_img * 0.035))
-        for x, wline in xs_w:
-            if not merged:
-                merged.append([int(x), int(wline)])
-                continue
-            prev_x, prev_w = merged[-1]
-            gap = max(int(min_gap), int(prev_w) + int(wline))
-            if abs(int(x) - int(prev_x)) <= int(gap):
-                merged[-1][0] = int((int(prev_x) + int(x)) // 2)
-                merged[-1][1] = int(max(int(prev_w), int(wline)))
-            else:
-                merged.append([int(x), int(wline)])
-
-        return int(len(merged))
-    except Exception:
-        return 0
-
-def _strict_separator_bridge_error(screen_roi: np.ndarray) -> bool:
-    try:
-        if screen_roi is None or getattr(screen_roi, "size", 0) == 0: return False
-        h, w = screen_roi.shape[:2]
-        if h < 20 or w < 20: return False
-
-        y0 = int(max(0, h * 0.68))
-        y1 = int(min(h, h * 0.98))
-        roi = screen_roi[y0:y1, :]
-        if roi is None or getattr(roi, "size", 0) == 0: return False
-        hh, ww_img = roi.shape[:2]
-        if hh < 10 or ww_img < 20: return False
-
-        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY) if len(roi.shape) == 3 else roi
-        try:
-            blur = cv2.GaussianBlur(gray, (3, 3), 0)
-        except Exception:
-            blur = gray
-
-        try:
-            thr_hi = int(max(160, min(245, np.percentile(blur, 85))))
-        except Exception:
-            thr_hi = 200
-        _t, bw_bright = cv2.threshold(blur, int(thr_hi), 255, cv2.THRESH_BINARY)
-        
-        k_h = max(8, int(hh * 0.55))
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, int(k_h)))
-        vert = cv2.morphologyEx(bw_bright, cv2.MORPH_OPEN, kernel, iterations=1)
-        try:
-            contours, _hier = cv2.findContours(vert, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        except Exception:
-            _res = cv2.findContours(vert, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            contours = _res[0] if _res else []
-
-        xs_w = []
-        for c in contours or []:
-            x0, y0_, ww, hh0 = cv2.boundingRect(c)
-            if hh0 < int(hh * 0.75): continue
-            if int(y0_) > int(hh * 0.20): continue
-            if ww > max(6, int(ww_img * 0.03)): continue
-            xc = int(x0 + (ww // 2))
-            if xc < int(ww_img * 0.12) or xc > int(ww_img * 0.88): continue
-            xs_w.append((int(xc), int(max(1, ww))))
-
-        if not xs_w: return False
-        xs_w.sort(key=lambda t: t[0])
-        merged = []
-        min_gap = max(6, int(ww_img * 0.035))
-        for x, wline in xs_w:
-            if not merged:
-                merged.append([int(x), int(wline)])
-                continue
-            prev_x, prev_w = merged[-1]
-            gap = max(int(min_gap), int(prev_w) + int(wline))
-            if abs(int(x) - int(prev_x)) <= int(gap):
-                merged[-1][0] = int((int(prev_x) + int(x)) // 2)
-                merged[-1][1] = int(max(int(prev_w), int(wline)))
-            else:
-                merged.append([int(x), int(wline)])
-
-        y_top = int(max(0, hh * 0.10))
-        y_bot = int(min(hh, hh * 0.95))
-        band_half = max(2, int(ww_img * 0.006))
-        for x, _wline in merged:
-            x1 = max(0, int(x) - band_half)
-            x2 = min(ww_img, int(x) + band_half + 1)
-            if x2 <= x1: continue
-            band = gray[y_top:y_bot, x1:x2]
-            if band.size == 0: continue
-            dark = float(np.mean((band.astype(np.uint8) < 90).astype(np.float32)))
-            if dark > 0.08: return True
-        return False
-    except Exception:
-        return False
-
-def _strict_mixed_script_merge_tokens(text_block: str, top_k: int = 3) -> list[str]:
-    try:
-        s = str(text_block or "")
-        if not s: return []
-        toks = re.split(r"[\s\|]+", s)
-        out, seen = [], set()
-        k = max(1, int(top_k or 1))
-        for tok in toks:
-            t = (tok or "").strip().strip("'\"`.,;:!?()[]{}<>")
-            if not t: continue
-            if not (re.search(r"[A-Za-z]", t) and re.search(r"[\uAC00-\uD7A3]", t)): continue
-            key = t.lower()
-            if key in seen: continue
-            seen.add(key)
-            out.append(t)
-            if len(out) >= k: break
-        return out
-    except Exception: return []
-
-def _strict_guess_overlap_from_text_no_sep(text_block: str, top_k: int = 2) -> list[str]:
-    try:
-        s = str(text_block or "").strip()
-        if not s: return []
-        lines = [ln.strip() for ln in s.splitlines() if ln.strip()]
-        if not lines: return []
-
-        def _is_kr(ch: str) -> bool:
-            return 0xAC00 <= ord(ch) <= 0xD7A3 if len(ch) else False
-
-        def _boundary_snippet(t: str) -> str:
-            txt, best = str(t or ""), ""
-            for i in range(1, len(txt)):
-                a, b = txt[i - 1], txt[i]
-                if _is_kr(a) != _is_kr(b):
-                    lo, hi = max(0, i - 6), min(len(txt), i + 6)
-                    cand = txt[lo:hi].strip().strip("'\"`.,;:!?()[]{}<>")
-                    if len(cand) > len(best): best = cand
-            try:
-                if " " in best: best = max([p for p in str(best).split() if p], key=len)
-            except Exception: pass
-            return str(best)
-
-        out, seen, k = [], set(), max(1, int(top_k or 1))
-        for m in _strict_mixed_script_merge_tokens(s, top_k=k):
-            key = str(m).lower()
-            if key in seen: continue
-            seen.add(key)
-            out.append(str(m))
-            if len(out) >= k: return out
-
-        lines.sort(key=len, reverse=True)
-        for ln in lines[:4]:
-            sn = _boundary_snippet(ln)
-            if not sn: continue
-            key = sn.lower()
-            if key in seen: continue
-            seen.add(key)
-            out.append(sn)
-            if len(out) >= k: break
-        return out
-    except Exception: return []
-
-def _strict_pick_overlap_tokens_from_line(line: str, top_k: int = 3) -> list[str]:
-    try:
-        ln = str(line or "").strip()
-        if not ln: return []
-        out, seen = [], set()
-
-        def _is_mixed_token(tok: str) -> bool:
-            t = str(tok or "")
-            if not t: return False
-            return bool(re.search(r"[A-Za-z]", t) and re.search(r"[\uAC00-\uD7A3]", t))
-
-        toks_all = [t for t in re.split(r"[\s\|]+", ln) if t and str(t).strip()]
-        cleaned = []
-        for t in toks_all:
-            tt = str(t).strip().strip("'\"`.,;:!?()[]{}<>")
-            if len(tt) < 2: continue
-            if _is_mixed_token(tt): cleaned.append(tt)
-
-        cleaned.sort(key=lambda x: (len(x), x), reverse=True)
-        k = max(1, int(top_k or 1))
-        for tt in cleaned:
-            key = tt.lower()
-            if key in seen: continue
-            seen.add(key)
-            out.append(tt)
-            if len(out) >= k: break
-        return out
-    except Exception: return []
-
-def _strict_guess_overlap_from_missing_sep(line: str, expected_cols: int, top_k: int = 1) -> list[str]:
-    try:
-        ln = str(line or "").strip()
-        if not ln or "|" not in ln: return []
-        parts = [p for p in (x.strip() for x in ln.split("|")) if p]
-        if expected_cols and len(parts) >= int(expected_cols): return []
-
-        def _boundary_snippet(s: str) -> str:
-            t, best = str(s or ""), ""
-            for i in range(1, len(t)):
-                a, b = t[i - 1], t[i]
-                if (0xAC00 <= ord(a) <= 0xD7A3) != (0xAC00 <= ord(b) <= 0xD7A3):
-                    lo, hi = max(0, i - 6), min(len(t), i + 6)
-                    cand = t[lo:hi].strip()
-                    if len(cand) > len(best): best = cand
-            best = best.strip().strip("'\"`.,;:!?()[]{}<>")
-            try:
-                if " " in best: best = max([p for p in best.split() if p], key=len)
-            except Exception: pass
-            return best
-
-        scored = []
-        for p in parts:
-            pp = str(p)
-            snip = _boundary_snippet(pp)
-            is_mixed = bool(re.search(r"[A-Za-z]", pp) and re.search(r"[\uAC00-\uD7A3]", pp))
-            if not snip and not is_mixed: continue
-            scored.append((len(pp) + (10 if snip else 0), snip, pp))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        
-        out, seen, k = [], set(), max(1, int(top_k or 1))
-        for _s, snip, pp in scored:
-            cand = str(snip if snip else pp).strip().strip("'\"`.,;:!?()[]{}<>")
-            if not cand: continue
-            key = cand.lower()
-            if key in seen: continue
-            seen.add(key)
-            out.append(cand)
-            if len(out) >= k: break
-        return out
-    except Exception: return []
-
-def _strict_pick_column_line(text_block: str) -> str:
-    try:
-        if not text_block: return ""
-        best_ln, best_cols = "", 0
-        for raw in str(text_block).splitlines():
-            ln = str(raw).strip()
-            if "|" not in ln: continue
-            cols = len([p for p in (x.strip() for x in ln.split("|")) if p])
-            if cols > best_cols:
-                best_cols = cols
-                best_ln = ln
-        return best_ln.strip()
-    except Exception: return ""
 
 def _parse_structured_fields(block: str):
     info = {
@@ -497,30 +144,16 @@ def _parse_structured_fields(block: str):
 
     return info
 
-def _ts_log(t0: float, msg: str):
-    try:
-        dt = time.time() - float(t0)
-        print(f"[VERIFY][{dt:7.3f}s] {msg}", flush=True)
-    except Exception:
-        try:
-            print(f"[VERIFY] {msg}", flush=True)
-        except Exception:
-            pass
-
 def _font_candidates_for_text(text: str, preferred: str = "") -> list:
     s = str(text or "")
     has_hangul = any(0xAC00 <= ord(ch) <= 0xD7A3 for ch in s)
     has_cjk = any(
-        (0x3040 <= ord(ch) <= 0x30FF)
-        or (0x4E00 <= ord(ch) <= 0x9FFF)
-        or (0x3400 <= ord(ch) <= 0x4DBF)
-        or (0xF900 <= ord(ch) <= 0xFAFF)
-        for ch in s
+        (0x3040 <= ord(ch) <= 0x30FF) or (0x4E00 <= ord(ch) <= 0x9FFF) or
+        (0x3400 <= ord(ch) <= 0x4DBF) or (0xF900 <= ord(ch) <= 0xFAFF) for ch in s
     )
 
     out = []
-    if preferred:
-        out.append(preferred)
+    if preferred: out.append(preferred)
 
     if has_hangul:
         out.extend([r"C:\\Windows\\Fonts\\malgun.ttf", r"C:\\Windows\\Fonts\\gulim.ttc", r"C:\\Windows\\Fonts\\batang.ttc"])
@@ -553,8 +186,7 @@ def _draw_text_unicode(img_bgr: np.ndarray, text: str, org: tuple, font_scale: f
                 if os.path.exists(c):
                     font = ImageFont.truetype(c, size)
                     break
-            except Exception:
-                font = None
+            except Exception: font = None
 
         if font is None:
             cv2.putText(img_bgr, s, org, cv2.FONT_HERSHEY_SIMPLEX, float(font_scale), tuple(int(x) for x in color_bgr), int(thickness), cv2.LINE_AA)
@@ -569,8 +201,7 @@ def _draw_text_unicode(img_bgr: np.ndarray, text: str, org: tuple, font_scale: f
         draw.text((x, y), s, font=font, fill=(r, g, b))
         out_rgb = np.asarray(pil_img)
         return cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
-    except Exception:
-        return img_bgr
+    except Exception: return img_bgr
 
 def _truncate_text_to_px(text: str, max_w: int, font_scale: float) -> str:
     try:
@@ -619,8 +250,7 @@ def _truncate_text_to_px(text: str, max_w: int, font_scale: float) -> str:
             if _w(cand) <= int(max_w): best, lo = cand, mid + 1
             else: hi = mid - 1
         return best if best else ell
-    except Exception:
-        return str(text or "")
+    except Exception: return str(text or "")
 
 def _wrap_text_to_px(text: str, max_w: int, font_scale: float) -> list:
     try:
@@ -644,6 +274,9 @@ def _wrap_text_to_px(text: str, max_w: int, font_scale: float) -> list:
         return out if out else [""]
     except Exception: return [str(text or "")] 
 
+# ---------------------------------------------------------------------------
+# Camera UI Overlay Functions
+# ---------------------------------------------------------------------------
 def _create_camera_overlay_state(cap: cv2.VideoCapture) -> dict:
     state = {"enabled": False, "drag": None, "values": {"Brightness": 0, "Sharpness": 0, "Focus": 0}, "last_applied": {}, "layout": {}}
     max_vals = {"Brightness": 255, "Sharpness": 255, "Focus": 50}
@@ -718,7 +351,6 @@ def _draw_camera_overlay(img_bgr: np.ndarray, overlay: dict) -> np.ndarray:
         overlay["layout"][lab] = {"x1": int(slider_left), "x2": int(slider_right), "y": int(y)}
     return out
 
-
 def _apply_camera_env_tuning(cap: cv2.VideoCapture) -> None:
     try:
         if cap is None: return
@@ -742,24 +374,6 @@ def _norm_text(s: str) -> str:
     s = s.replace("\r\n", "\n").replace("\r", "\n")
     lines = [ln for ln in (" ".join(ln.strip().split()) for ln in s.split("\n")) if ln != ""]
     return "\n".join(lines).strip()
-
-def _jp_strip_diacritics(s: str) -> str:
-    s = "" if s is None else str(s)
-    try: s = unicodedata.normalize("NFKC", s)
-    except Exception: pass
-    try:
-        decomp = unicodedata.normalize("NFD", s).replace("\u3099", "").replace("\u309A", "")
-        return unicodedata.normalize("NFC", decomp)
-    except Exception: return s
-
-def _parse_structured_original(block: str) -> str:
-    return _parse_structured_fields(block).get("original", "")
-
-def _parse_structured_language(block: str) -> str:
-    return _parse_structured_fields(block).get("language", "")
-
-def _parse_structured_english(block: str) -> str:
-    return _parse_structured_fields(block).get("english", "")
 
 def load_device_profiles() -> dict:
     profiles = {}
@@ -821,26 +435,16 @@ def map_language_to_region(lang: str, text: str = "", allowed_langs: str = "") -
 
     if foreign_allowed:
         for fa in foreign_allowed:
-            if fa.lower() in l:
-                return _get_region(fa), fa
+            if fa.lower() in l: return _get_region(fa), fa
 
-    if "english" in l or l == "en":
-        return "english", "English"
-        
-    if foreign_allowed:
-        return _get_region(foreign_allowed[0]), foreign_allowed[0]
-        
+    if "english" in l or l == "en": return "english", "English"
+    if foreign_allowed: return _get_region(foreign_allowed[0]), foreign_allowed[0]
     return "english", "English"
 
 def _show_ocr_result_window(
-    roi: np.ndarray,
-    original: str,
-    english: str,
-    language: str,
-    verdict: str = "",
-    expected_lines: list | None = None,
-    device_name: str = "",
-    error_msg: str = "",
+    roi: np.ndarray, original: str, english: str, language: str,
+    verdict: str = "", expected_lines: list | None = None,
+    device_name: str = "", error_msg: str = "",
 ) -> None:
     try:
         if roi is None or getattr(roi, "size", 0) == 0: return
@@ -924,9 +528,7 @@ def _show_ocr_result_window(
         try:
             header_h = 100
             summary_h = 120 + (max(0, len(exp_draw_lines)) * 32) + 16
-            
-            if error_msg:
-                summary_h += 40
+            if error_msg: summary_h += 40
 
             header = np.zeros((header_h, out_w, 3), dtype=np.uint8)
             cv2.putText(header, f"OCR Result - {device_name}" if device_name else "OCR Result", (24, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.4, (0, 255, 255), 3)
@@ -940,11 +542,9 @@ def _show_ocr_result_window(
                 cv2.putText(summary, f"Verdict: {v}", (24, 86), cv2.FONT_HERSHEY_SIMPLEX, 1.1, vcol, 3)
 
             start_y = 118
-            
             if exp_draw_lines:
                 for i, ln in enumerate(exp_draw_lines):
                     summary = _draw_text_unicode(summary, ln, (24, start_y + (i * 32)), 0.8, (255, 255, 255), 1)
-                
                 start_y += len(exp_draw_lines) * 32
 
             if error_msg:
@@ -970,9 +570,7 @@ def _show_ocr_result_window(
             try:
                 if hasattr(cv2, "getWindowProperty") and hasattr(cv2, "WND_PROP_VISIBLE") and cv2.getWindowProperty("OCR Result", cv2.WND_PROP_VISIBLE) < 1: break
             except Exception: pass
-            
             if cv2.waitKey(50) not in [None, -1]: break
-            
             if time.time() - start_time > 5.0: break
         
         try: cv2.destroyWindow("OCR Result")
@@ -1092,19 +690,14 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
         lines = []
         
         val = df.iloc[start_row][text_col_name]
-        if pd.notna(val) and str(val).strip():
-            lines.append(str(val).strip())
+        if pd.notna(val) and str(val).strip(): lines.append(str(val).strip())
             
         for r in range(start_row + 1, len(df)):
             r_idx = df.iloc[r].get("__index", "")
             r_tag = df.iloc[r].get(tag_col_name, "") if tag_col_name else ""
-            
-            if (pd.notna(r_idx) and str(r_idx).strip() != "") or (pd.notna(r_tag) and str(r_tag).strip() != ""):
-                break
-                
+            if (pd.notna(r_idx) and str(r_idx).strip() != "") or (pd.notna(r_tag) and str(r_tag).strip() != ""): break
             val = df.iloc[r].get(text_col_name, "")
-            if pd.notna(val) and str(val).strip():
-                lines.append(str(val).strip())
+            if pd.notna(val) and str(val).strip(): lines.append(str(val).strip())
                 
         return " ".join(lines)
 
@@ -1119,17 +712,11 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
         lang_col = _pick_language_column(df_reg, region, language)
         expected_local = _extract_merged_text_safely(df_reg, idx, lang_col, reg_tag_col)
 
-    tag_val = next(("" if pd.isna(en_row.get(c)) else str(en_row.get(c) or "")) for c in df_en.columns if _norm_col(c) in ["string tag", "tag", "stringtag"]) if any(_norm_col(c) in ["string tag", "tag", "stringtag"] for c in df_en.columns) else ""
-    cat_val = next(("" if pd.isna(en_row.get(c)) else str(en_row.get(c) or "")) for c in df_en.columns if _norm_col(c) in ["string category", "category"]) if any(_norm_col(c) in ["string category", "category"] for c in df_en.columns) else ""
-    font_style = next(("" if pd.isna(cat_row.get(c)) else str(cat_row.get(c) or "")) for c in df_cat.columns if _norm_col(c) == "font style") if any(_norm_col(c) == "font style" for c in df_cat.columns) else ""
-    font_size = next(("" if pd.isna(cat_row.get(c)) else str(cat_row.get(c) or "")) for c in df_cat.columns if _norm_col(c) == "font size") if any(_norm_col(c) == "font size" for c in df_cat.columns) else ""
-
     return {
-        "index": idx, "index_region": idx_region, "tag": tag_val, "category": cat_val,
-        "font_style": font_style, "font_size": font_size, "expected_en": expected_en, "expected_local": expected_local, "region_sheet": region_sheet,
+        "index": idx, "index_region": idx_region, "expected_en": expected_en, "expected_local": expected_local, "region_sheet": region_sheet,
     }
 
-def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float, warmup_sec: float = 1.5):
+def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float, warmup_sec: float = 1.5, rolling_mode: bool = False):
     cap = cv2.VideoCapture(int(camera_id), cv2.CAP_DSHOW)
     
     if not cap.isOpened(): raise RuntimeError(f"Could not open camera {camera_id}")
@@ -1141,17 +728,20 @@ def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float
     except Exception: pass
 
     _apply_camera_env_tuning(cap)
-    t_end = time.time() + float(warmup_sec)
-    while time.time() < t_end:
-        cap.read()
-        time.sleep(0.03)
-
+    
     burst_frames = []
-    for _ in range(5):
+    
+    # We ONLY capture 5 frames initially.
+    t_end = time.time() + 0.5
+    last_t = 0
+    while time.time() < t_end:
         ok, frame = cap.read()
         if ok and frame is not None and frame.size > 0:
-            burst_frames.append(frame)
-        time.sleep(0.05) 
+            if time.time() - last_t >= 0.08:
+                burst_frames.append(frame.copy()) 
+                last_t = time.time()
+            if len(burst_frames) >= 5:
+                break
 
     cap.release()
     if not burst_frames: raise RuntimeError("Failed to capture frame")
@@ -1166,7 +756,6 @@ def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float
     
     for (x1, y1, x2, y2) in boxes:
         screen_box = next((s for s in screens if x1 <= (s[0]+s[2])/2 <= x2 and y1 <= (s[1]+s[3])/2 <= y2), None)
-        
         if screen_box is None: screen_box = (x1, y1, x2, y2)
         sx1, sy1, sx2, sy2 = max(0, screen_box[0]), max(0, screen_box[1]), min(base_frame.shape[1], screen_box[2]), min(base_frame.shape[0], screen_box[3])
         if sx2 <= sx1 or sy2 <= sy1: continue
@@ -1190,7 +779,6 @@ def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float
             roi_coords.append((sx1, sy1, sx2, sy2)) 
         
     if not rois: raise RuntimeError("Invalid screen ROIs")
-    
     return base_frame, rois, roi_coords
 
 def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, confidence: float = 0.25, model_path: str = "", window_name: str = "Verify Preview", profiles: dict = None):
@@ -1382,7 +970,6 @@ def capture_screen_roi_preview(detector: FastDetector | None, camera_id: int, co
     if not rois: raise RuntimeError("Invalid screen ROIs")
     return last_frame, rois
 
-
 def main():
     t0_total = time.time()
     parser = argparse.ArgumentParser()
@@ -1396,10 +983,8 @@ def main():
     parser.add_argument("--model-path", default="")
     parser.add_argument("--epoch", type=int, default=None)
     parser.add_argument("--camera-id", type=int, default=None)
-    
     parser.add_argument("--save-roi-dir", default="")
     parser.add_argument("--summary-excel", default="")
-    
     parser.add_argument("--preview", action="store_true")
 
     args = parser.parse_args()
@@ -1411,22 +996,7 @@ def main():
 
     with open(args.config, "r", encoding="utf-8") as f: cfg = yaml.safe_load(f) or {}
 
-    def _resolve_epoch_weights(epoch: int) -> str:
-        fname = f"epoch{int(epoch)}.pt"
-        for p in [Path("runs") / "detect" / "models" / "trained" / "walkie_detector" / "weights" / fname, Path("runs") / "detect" / "train" / "weights" / fname, Path("models") / "trained" / "walkie_detector" / "weights" / fname, Path("models") / "trained" / "walkie_detector" / fname]:
-            if p.exists(): return str(p)
-        for root in [Path("runs"), Path("models")]:
-            if not root.exists(): continue
-            try:
-                for p in root.rglob(fname): return str(p)
-            except Exception: pass
-        return ""
-
-    model_path = args.model_path or ""
-    if not model_path and args.epoch is not None:
-        model_path = _resolve_epoch_weights(args.epoch)
-        if not model_path: raise ValueError(f"Could not find weights for epoch {args.epoch}")
-    if not model_path: model_path = cfg.get("detector", {}).get("path", "")
+    model_path = args.model_path or cfg.get("detector", {}).get("path", "")
     if not model_path: raise ValueError("Detector model path not provided")
 
     camera_id = args.camera_id if args.camera_id is not None else int(cfg.get("camera", {}).get("source", 0))
@@ -1434,25 +1004,13 @@ def main():
 
     profiles = load_device_profiles()
 
-    if args.preview:
-        t0_preview = time.time()
-        full_frame, rois = capture_screen_roi_preview(None, camera_id=camera_id, confidence=confidence, model_path=model_path, profiles=profiles)
-        print("\n[INFO] Preview Closed. (Verification string tests will run via Start button).")
-        return  
-        
-    else:
-        detector = FastDetector(model_path)
-        t0_cap = time.time()
-        full_frame, rois, roi_coords = capture_screen_roi(detector, camera_id=camera_id, confidence=confidence)
-        t1_cap = time.time()
-
     indices = [x.strip() for x in args.index.split(",")] if args.index else []
     tags = [x.strip() for x in args.tag.split(",")] if args.tag else []
     commands = [x.strip() for x in args.command.split(",")] if args.command else []
 
     expected_list = []
     max_len = max(len(indices), len(tags), len(commands), 1)
-    
+
     for i in range(max_len):
         idx_val = indices[i] if i < len(indices) else (indices[-1] if indices else "")
         tag_val = tags[i] if i < len(tags) else (tags[-1] if tags else "")
@@ -1481,13 +1039,27 @@ def main():
             except Exception as e:
                 expected_list.append({"index": idx_val, "tag": tag_val, "command": cmd_val, "display_style": disp_style, "expected_en": "", "expected_local": ""})
 
+
+    if args.preview:
+        detector = FastDetector(model_path)
+        full_frame, rois = capture_screen_roi_preview(detector, camera_id=camera_id, confidence=confidence, model_path=model_path, profiles=profiles)
+        print("\n[INFO] Preview Closed. (Verification string tests will run via Start button).")
+        return  
+        
+    detector = FastDetector(model_path)
+    t0_cap = time.time()
+    
+    # First baseline capture
+    full_frame, rois, roi_coords = capture_screen_roi(
+        detector, camera_id=camera_id, confidence=confidence, rolling_mode=False
+    )
+    t1_cap = time.time()
+
     print("=" * 70)
     print(f"RADIO STRING VERIFICATION - DETECTED {len(rois)} DEVICES")
     print("=" * 70)
 
-    # Initialize a baseline OCR session variable. We destroy and recreate it below inside the loop.
     ocr = None 
-    
     box_mapping = {}
     try:
         map_file = Path(__file__).resolve().parents[1] / "configs" / "box_mapping.json"
@@ -1501,6 +1073,7 @@ def main():
     summary_counts = {"PASS": 0, "FAIL": 0, "WARN": 0, "SKIP": 0} 
     
     for idx, roi in enumerate(rois):
+        needs_rolling_capture = False  
         
         mapped_idx = int(box_mapping.get(str(idx), idx))
         device_id = mapped_idx + 1
@@ -1518,52 +1091,6 @@ def main():
         if exp_dict.get("tag") == "SKIP_VERIFY" or exp_dict.get("index") == "SKIP_VERIFY":
             summary_counts["SKIP"] += 1
             print("Skipping verification for this device as requested via Automation Command.")
-            
-            if args.summary_excel:
-                xl_p = Path(args.summary_excel)
-                try:
-                    from openpyxl import load_workbook, Workbook
-                    from openpyxl.styles import PatternFill, Font, Alignment
-                    if not xl_p.exists():
-                        wb = Workbook()
-                        ws = wb.active
-                        ws.title = "Batch Summary"
-                        headers = ["Timestamp", "Device", "Region", "Language", "Command", "Display Style", "Index", "Tag", "Expected (Local)", "Actual Detected", "Confidence (%)", "Verdict", "Error Message", "ROI Image"]
-                        ws.append(headers)
-                        ws.freeze_panes = "A2"
-                        
-                        header_fill = PatternFill(start_color="4F81BD", end_color="4F81BD", fill_type="solid")
-                        header_font = Font(color="FFFFFF", bold=True)
-                        for col_num, cell in enumerate(ws[1], 1):
-                            cell.fill = header_fill
-                            cell.font = header_font
-                            cell.alignment = Alignment(horizontal="center", vertical="center")
-                        
-                        widths = [20, 15, 12, 15, 25, 45, 10, 25, 35, 35, 15, 12, 35, 30]
-                        for i, width in enumerate(widths, 1):
-                            ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = width
-                    else:
-                        wb = load_workbook(xl_p)
-                        ws = wb.active
-                        
-                    ws.append([
-                        time.strftime("%Y-%m-%d %H:%M:%S"),
-                        dev_name, args.region, args.language, exp_dict.get('command', 'SKIP'), exp_dict.get('display_style', 'SKIP'), "SKIP", "SKIP", "-", "-", "-", "SKIP", "", ""
-                    ])
-                    
-                    row_idx = ws.max_row
-                    for col_num in range(1, 15):
-                        cell = ws.cell(row=row_idx, column=col_num)
-                        cell.alignment = Alignment(wrap_text=True, vertical="center", horizontal="center")
-                        
-                    verdict_cell = ws.cell(row=row_idx, column=12)
-                    verdict_cell.fill = PatternFill(start_color="F2F2F2", end_color="F2F2F2", fill_type="solid")
-                    verdict_cell.font = Font(color="333333", bold=True)
-                    ws.row_dimensions[row_idx].height = 80
-                    
-                    wb.save(xl_p)
-                except Exception: pass
-
             payload = {"device": dev_name, "command": exp_dict.get('command', ''), "display_style": exp_dict.get('display_style', ''), "index": "SKIP", "tag": "SKIP", "expected": "-", "actual": "-", "confidence": "-", "verdict": "SKIP", "error": ""}
             print(f"[GUI_RESULT] {json.dumps(payload)}")
             continue
@@ -1573,7 +1100,6 @@ def main():
         print(f"Index: {exp_dict.get('index', '')}")
         if exp_dict.get('tag'): print(f"Tag: {exp_dict.get('tag', '')}")
 
-        # Get list of targets to test against based on selected languages
         targets_to_test = []
         if args.region.lower() == "multiple":
             chosen_langs = [l.strip() for l in args.language.split(",") if l.strip()]
@@ -1596,65 +1122,113 @@ def main():
             
         print("Expected (Local): [Will check against all selected languages]")
 
-        # ==================================================================
-        # STATELESS BEST-OF-N RETRY LOGIC
-        # ==================================================================
         max_retries = 5  
-        
-        # Variables to track the highest scoring attempt
         best_conf = -1.0
         best_attempt_data = None
         seen_observations = set()
         
+        # CRITICAL FIX: Save the exact image used
+        best_roi_for_saving = roi.copy()
+        
         progressive_dims = [450, 600, 800, 800, 1000]
         
-        # 1. WIPE AI MEMORY FOR EVERY DEVICE! 
-        # This prevents the AI from remembering the text it read on Device 1 and mistakenly applying it to Device 2.
         try:
-            if ocr is not None:
-                del ocr
+            if ocr is not None: del ocr
         except Exception: pass
         ocr = MSIGenAIOCR()
         
         for attempt in range(max_retries):
             retry_roi = roi.copy()
+            used_rolling_this_attempt = False
             
             if attempt > 0:
                 print(f"\n[RETRY {attempt}/{max_retries-1}] Verification failed. Simulating full restart...")
                 
-                # 1. CLEAR THE CACHE (Destroy old session, build a fresh one)
                 try:
                     del ocr 
                 except Exception: pass
                 ocr = MSIGenAIOCR()
                 
-                # 2. CAPTURE FRESH IMAGE (Warmup + Burst for perfect clarity)
                 try:
                     cap = cv2.VideoCapture(int(camera_id), cv2.CAP_DSHOW)
                     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
                     
-                    t_end = time.time() + 1.2
-                    while time.time() < t_end:
-                        cap.read()
-                        time.sleep(0.03)
+                    if needs_rolling_capture:
+                        used_rolling_this_attempt = True
+                        retry_burst = []
+                        # Capture exactly 1 frame every 0.25 seconds, up to 10 frames
+                        t_end_capture = time.time() + 3.5
+                        last_save = 0
                         
-                    best_f = None
-                    max_b = -1
-                    for _ in range(5):
-                        ok, f = cap.read()
-                        if ok and f is not None:
-                            crop = f[sy1:sy2, sx1:sx2]
-                            if crop.size > 0:
-                                b = np.mean(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY))
-                                if b > max_b:
-                                    max_b = b
-                                    best_f = f
-                        time.sleep(0.05)
-                    cap.release()
-                    
-                    if best_f is not None:
-                        retry_roi = best_f[sy1:sy2, sx1:sx2]
+                        while time.time() < t_end_capture:
+                            ok, f = cap.read()
+                            if ok and f is not None:
+                                if time.time() - last_save >= 0.25:
+                                    retry_burst.append(f.copy())
+                                    last_save = time.time()
+                                    if len(retry_burst) == 10:
+                                        break
+                        cap.release()
+                        
+                        if len(retry_burst) >= 2:
+                            crops = []
+                            for f in retry_burst[:10]:
+                                try:
+                                    crop = f[sy1:sy2, sx1:sx2]
+                                    if crop.size > 0: crops.append(crop)
+                                except Exception: pass
+                                
+                            if crops:
+                                # GRID STITCHING (2 columns)
+                                border = 6
+                                bordered_crops = []
+                                for c in crops:
+                                    bc = cv2.copyMakeBorder(c, border, border, border, border, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+                                    bordered_crops.append(bc)
+                                
+                                if len(bordered_crops) % 2 != 0:
+                                    bordered_crops.pop()
+                                    
+                                if bordered_crops:
+                                    half = len(bordered_crops) // 2
+                                    col1 = cv2.vconcat(bordered_crops[:half])
+                                    col2 = cv2.vconcat(bordered_crops[half:])
+                                    grid_roi = cv2.hconcat([col1, col2])
+                                    
+                                    # FORCE 1:1 ASPECT RATIO PADDING
+                                    gh, gw = grid_roi.shape[:2]
+                                    max_dim = max(gh, gw)
+                                    top = (max_dim - gh) // 2
+                                    bottom = max_dim - gh - top
+                                    left = (max_dim - gw) // 2
+                                    right = max_dim - gw - left
+                                    retry_roi = cv2.copyMakeBorder(grid_roi, top, bottom, left, right, cv2.BORDER_CONSTANT, value=[0, 0, 0])
+                    else:
+                        best_f = None
+                        max_b = -1
+                        t_end_capture = time.time() + 0.5
+                        last_save = 0
+                        frames_grabbed = 0
+                        
+                        while time.time() < t_end_capture:
+                            ok, f = cap.read()
+                            if ok and f is not None:
+                                if time.time() - last_save >= 0.08:
+                                    crop = f[sy1:sy2, sx1:sx2]
+                                    if crop.size > 0:
+                                        b = np.mean(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY))
+                                        if b > max_b:
+                                            max_b = b
+                                            best_f = f.copy()
+                                    last_save = time.time()
+                                    frames_grabbed += 1
+                                if frames_grabbed >= 5:
+                                    break
+                        cap.release()
+                        
+                        if best_f is not None:
+                            retry_roi = best_f[sy1:sy2, sx1:sx2]
                 except Exception as e:
                     print(f"    -> [Camera Error] Could not grab fresh frame: {e}")
                 
@@ -1671,13 +1245,16 @@ def main():
             if not hint_str or args.region.lower() == "multiple":
                 hint_str = exp_dict.get("expected_en", "")
 
-            # 2. PREVENT HALLUCINATION: Check if the screen is actually blank
             if _is_screen_blank(retry_roi):
                 print("    -> [Pre-Check] Camera sees a BLANK screen. Skipping AI hallucination.")
                 text = "Detected text(original): " 
                 _conf = 0.0
             else:
-                pass_hint = "" if attempt == 0 else hint_str
+                if used_rolling_this_attempt:
+                    pass_hint = f"HINT: The image contains a 2-column grid of screenshots (padded with black space) showing a scrolling screen. Read down the left column, then the right. If the fragments across the frames can be pieced together to form '{hint_str}', output exactly: '{hint_str}'."
+                else:
+                    pass_hint = "" if attempt == 0 else hint_str
+
                 text, _conf = ocr.extract_text(
                     retry_roi, 
                     expected_language=pass_lang, 
@@ -1716,7 +1293,6 @@ def main():
             best_sub_verdict = "FAIL"
             best_sub_data = {}
 
-            # Test the observed text against ALL chosen languages
             for target_info in targets_to_test:
                 t_region = target_info["region"]
                 t_lang = target_info["language"]
@@ -1726,54 +1302,46 @@ def main():
                 is_cjk_target = any('\u4e00' <= ch <= '\u9fff' or '\u3040' <= ch <= '\u30ff' or '\uac00' <= ch <= '\ud7a3' for ch in expected_local_n)
 
                 def _clean_for_compare(text: str, is_cjk: bool) -> str:
-                    c = re.sub(r'^(i|l|v|4)\s+', '', str(text), flags=re.IGNORECASE)
+                    c = str(text)
+                    # Remove only known weird UI glitch prefixes that the AI hallucinates at the far left edge
+                    c = re.sub(r'^(i|l|v|4)\s+', '', c, flags=re.IGNORECASE)
                     c = re.sub(r'^(!|\?|⏹|\[\]|\'|\"|️)\s*', '', c)
                     
-                    # Strip ALL punctuation including slashes, colons, hyphens, and full-width colons
-                    c = re.sub(r'[,。…!/:\-：]', '', c)
-                    
                     if is_cjk:
-                        c = re.sub(r'\s+', '', c)
+                        c = re.sub(r'\s+', '', c) # Remove spaces for CJK
+                        # If expected string doesn't contain English letters, strip English letters from observation (fixes hallucinated English in pure CJK)
                         if not any(char.isascii() and char.isalpha() for char in expected_local_n):
                             c = re.sub(r'[A-Za-z]', '', c)
                         return c
                     else:
-                        c = " ".join(c.split())
-                        c = re.sub(r'\s+[LHlh]$', '', c)
+                        c = " ".join(c.split()) # Normalize spaces
+                        c = re.sub(r'\s+[LHlh]$', '', c) # Strip specific hallucinated trailing letters
                         return c
 
                 flat_obs = _clean_for_compare(observed_n, is_cjk_target)
                 flat_exp = _clean_for_compare(expected_local_n, is_cjk_target)
                 
+                # --- STRICT EXACT MATCHING ---
                 if flat_exp and flat_obs != flat_exp:
                     corrected_obs = flat_obs
+                    
                     known_illusions = {
-                        "RETRY": "RETRV",
-                        "Retry": "Retrv",
-                        "retry": "retrv",
-                        "虎碼": "號碼",
-                        "新響": "漸響",
-                        "施錠": "旋鈕",
-                        "施鈕": "旋鈕",
-                        "遠測": "遙測",
-                        "擺置": "擱置",
-                        "通话": "通稱",     # Simplified misread
-                        "通話": "通稱",     # Traditional misread
-                        "鎖碼": "變碼",
-                        "R∫": "Rx",
-                        "r∫": "rx",
-                        "音": "顫音",
-                        "SYSTELIAS": "SYSTEM ALIAS",
-                        "Systelias": "System Alias",
-                        "資訊驗證失敗": "驗證失敗",
-                        "資訊 驗證失敗": "驗證失敗",
-                        # --- NEW HARDWARE ILLUSION FIXES ---
-                        "스캔컴": "스캔켬",
-                        "스켈처": "스켈치",
-                        "Z-S": "Z-s",
-                        "タイカヘンシン": "クイックヘンシン",
-                        "タイカ": "クイック"
+                        "RETRY": "RETRV", "Retry": "Retrv", "retry": "retrv",
+                        "虎碼": "號碼", "新響": "漸響", "施錠": "旋鈕", "施鈕": "旋鈕",
+                        "遠測": "遙測", "擺置": "搁置", "通话": "通稱", "通話": "通稱",
+                        "鎖碼": "變碼", "R∫": "Rx", "r∫": "rx", "音": "顫音",
+                        "SYSTELIAS": "SYSTEM ALIAS", "Systelias": "System Alias",
+                        "資訊驗證失敗": "驗證失敗", "資訊 驗證失敗": "驗證失敗",
+                        "스캔컴": "스캔켬", "스켈처": "스켈치", "Z-S": "Z-s",
+                        "タイカヘンシン": "クイックヘンシン", "タイカ": "クイック",
+                        "발기": "밝기", "받기": "밝기",
+                        "흰&라이트커기": "혼&라이트켜기", "흰": "혼", "커기": "켜기",
+                        # Rolling/Optical Illusions
+                        "30S": "30ビ", "30L": "30ビ", "ヨウ": "ョウ", 
+                        "ピョウ": "ビョウ", "ビヨウ": "ビョウ", "ヒョウ": "ビョウ", "トウ": "ョウ",
+                        "ヨ": "ョ", "ヤ": "ャ", "ユ": "ュ"
                     }
+                    
                     for bad, good in known_illusions.items():
                         if bad in corrected_obs and good in flat_exp:
                             corrected_obs = corrected_obs.replace(bad, good)
@@ -1794,6 +1362,13 @@ def main():
                         if stripped_obs == flat_exp:
                             corrected_obs = flat_exp
 
+                    # Fragment Summation Math Algorithm
+                    if used_rolling_this_attempt:
+                        matcher = difflib.SequenceMatcher(None, flat_exp, corrected_obs)
+                        matching_chars = sum(m.size for m in matcher.get_matching_blocks())
+                        if matching_chars >= int(len(flat_exp) * 0.85):
+                            corrected_obs = flat_exp
+
                     flat_obs = corrected_obs
                 
                 t_conf = 0.0
@@ -1802,7 +1377,7 @@ def main():
                     similarity = difflib.SequenceMatcher(None, flat_exp, flat_obs).ratio()
                     t_conf = round(similarity * 100, 1)
 
-                    if flat_obs == flat_exp:
+                    if flat_obs == flat_exp: 
                         t_verdict = "PASS"
                         t_conf = 100.0
                     elif flat_exp in flat_obs:
@@ -1842,8 +1417,20 @@ def main():
                 
             seen_observations.add(flat_obs)
 
+            if verdict != "PASS" and attempt < max_retries - 1:
+                if len(flat_obs) < len(flat_exp):
+                    if "..." in str(orig_text) or "…" in str(orig_text) or "..." in flat_obs:
+                        needs_rolling_capture = False
+                        print("    -> [Next Retry Status] Missing words, but '...' detected. This text is statically truncated. Normal retry is enough.")
+                    else:
+                        needs_rolling_capture = True
+                        print("    -> [Next Retry Status] Missing words and no '...' detected. Text may be rolling. Triggering Rolling Batch Capture!")
+                else:
+                    needs_rolling_capture = False
+
             if confidence_pct > best_conf:
                 best_conf = confidence_pct
+                best_roi_for_saving = retry_roi.copy() 
                 best_attempt_data = {
                     "confidence_pct": confidence_pct,
                     "verdict": verdict,
@@ -1863,9 +1450,6 @@ def main():
             if verdict == "PASS":
                 break
 
-        # ==================================================================
-        # 4. RESTORE THE BEST ATTEMPT BEFORE WRITING TO EXCEL
-        # ==================================================================
         if best_attempt_data:
             confidence_pct = best_attempt_data["confidence_pct"]
             verdict = best_attempt_data["verdict"]
@@ -1880,7 +1464,6 @@ def main():
             exp_target = best_attempt_data["exp_target"]
             flat_obs = best_attempt_data["flat_obs"]
             flat_exp = best_attempt_data["flat_exp"]
-        # ==================================================================
 
         observed_display = flat_obs 
         
@@ -1953,7 +1536,7 @@ def main():
                 new_filename = f"roi_{safe_dev_name}_{ts_suffix}.jpg"
                 
             full_roi_path = out_dir / new_filename
-            cv2.imwrite(str(full_roi_path), roi)
+            cv2.imwrite(str(full_roi_path), best_roi_for_saving)
             roi_saved_path = str(full_roi_path.resolve())
 
         if args.summary_excel:
@@ -2047,7 +1630,7 @@ def main():
         print(f"[GUI_RESULT]{json.dumps(payload)}")
 
         all_results.append({
-            "roi": roi, "orig_text": orig_text, "eng_text": eng_text, "lang_detected": lang_detected,
+            "roi": best_roi_for_saving, "orig_text": orig_text, "eng_text": eng_text, "lang_detected": lang_detected,
             "verdict": verdict, "exp_lines": exp_lines, "dev_name": dev_name, "error_msg": error_msg_display
         })
         
