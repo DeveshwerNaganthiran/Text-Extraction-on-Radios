@@ -712,8 +712,10 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
         lang_col = _pick_language_column(df_reg, region, language)
         expected_local = _extract_merged_text_safely(df_reg, idx, lang_col, reg_tag_col)
 
+    found_tag = str(en_row.get(en_tag_col, "")) if en_tag_col and en_tag_col in en_row else str(tag)
+    if str(found_tag).lower() == 'nan': found_tag = ""
     return {
-        "index": idx, "index_region": idx_region, "expected_en": expected_en, "expected_local": expected_local, "region_sheet": region_sheet,
+        "index": idx, "index_region": idx_region, "expected_en": expected_en, "expected_local": expected_local, "region_sheet": region_sheet, "tag": found_tag
     }
 
 def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float, warmup_sec: float = 1.5, rolling_mode: bool = False):
@@ -1164,7 +1166,10 @@ def main():
                         while time.time() < t_end_capture:
                             ok, f = cap.read()
                             if ok and f is not None:
-                                if time.time() - last_save >= 0.25:
+                                # Determine the gap: 0.3s for the second frame, 0.1s for the rest
+                                required_interval = 0.3 if len(retry_burst) == 1 else 0.2
+                                
+                                if time.time() - last_save >= required_interval:
                                     retry_burst.append(f.copy())
                                     last_save = time.time()
                                     if len(retry_burst) == 10:
@@ -1241,9 +1246,23 @@ def main():
             if attempt > 0:
                 print(f"    -> [Image Prep] Resolution: {current_dim}px | Squash Ratio: {current_squash}")
             
-            hint_str = exp_dict.get("expected_local", "")
-            if not hint_str or args.region.lower() == "multiple":
-                hint_str = exp_dict.get("expected_en", "")
+            # --- NEW LOGIC: Safely pass multiple hints without causing hallucinations ---
+            if args.region.lower() == "multiple":
+                hints = [t.get("exp_target", "") for t in targets_to_test if t.get("exp_target")]
+                hints = [h for h in list(set(hints)) if h.strip()] # Remove duplicates and empties
+                
+                if len(hints) > 1:
+                    # Format strictly so the AI knows to pick ONLY ONE and not mash them together
+                    hint_str = "EXACTLY ONE of these options: [" + " | ".join(hints) + "]. DO NOT combine them into one sentence"
+                elif len(hints) == 1:
+                    hint_str = hints[0]
+                else:
+                    hint_str = exp_dict.get("expected_en", "")
+            else:
+                hint_str = exp_dict.get("expected_local", "")
+                if not hint_str:
+                    hint_str = exp_dict.get("expected_en", "")
+            # -------------------------------------------------------------------------
 
             if _is_screen_blank(retry_roi):
                 print("    -> [Pre-Check] Camera sees a BLANK screen. Skipping AI hallucination.")
@@ -1253,7 +1272,7 @@ def main():
                 if used_rolling_this_attempt:
                     pass_hint = f"HINT: The image contains a 2-column grid of screenshots (padded with black space) showing a scrolling screen. Read down the left column, then the right. If the fragments across the frames can be pieced together to form '{hint_str}', output exactly: '{hint_str}'."
                 else:
-                    pass_hint = "" if attempt == 0 else hint_str
+                    pass_hint = hint_str  # <--- CHANGED: Provide hint immediately on attempt 0
 
                 text, _conf = ocr.extract_text(
                     retry_roi, 
@@ -1289,11 +1308,28 @@ def main():
 
             observed_n = _norm_text(orig_text)
 
+            # --- NEW LOGIC: Use AI detected language to filter the Excel targets ---
+            active_targets = targets_to_test
+            if args.region.lower() == "multiple" and lang_detected and lang_detected.lower() != "unknown":
+                matched_targets = []
+                dl_low = lang_detected.lower()
+                for t in targets_to_test:
+                    tl_low = t["language"].lower()
+                    # Check if the AI's detected language matches our target language
+                    if tl_low in dl_low or dl_low in tl_low:
+                        matched_targets.append(t)
+                
+                if matched_targets:
+                    active_targets = matched_targets
+                    print(f"    -> [Language Sync] AI detected '{lang_detected}'. Filtering Excel comparison to '{active_targets[0]['language']}'.")
+            # -------------------------------------------------------------------------
+
             best_sub_conf = -1.0
             best_sub_verdict = "FAIL"
             best_sub_data = {}
 
-            for target_info in targets_to_test:
+            # Change this loop to use 'active_targets' instead of 'targets_to_test'
+            for target_info in active_targets:
                 t_region = target_info["region"]
                 t_lang = target_info["language"]
                 t_exp = target_info["exp_target"]
@@ -1350,8 +1386,19 @@ def main():
                     if sim >= 0.80 and len(corrected_obs) == len(flat_exp):
                         corrected_obs = flat_exp
                     
+                    # Handle minor cut-offs
                     if len(flat_obs) >= 2 and flat_exp.endswith(flat_obs):
                         if len(flat_exp) - len(flat_obs) <= 2:
+                            corrected_obs = flat_exp
+
+                    # Handle minor 1-2 character cut-offs at the edges (safe to allow)
+                    if len(flat_obs) >= 2 and flat_exp.endswith(flat_obs) and len(flat_exp) - len(flat_obs) <= 2:
+                        corrected_obs = flat_exp
+
+                    # STRICT TRUNCATION RULE: If the AI reads a fragment (start, middle, or end),
+                    # it MUST make up at least 99% of the expected text length to pass.
+                    if len(flat_obs) >= 5 and flat_obs in flat_exp:
+                        if len(flat_obs) >= int(len(flat_exp) * 0.99):
                             corrected_obs = flat_exp
 
                     if is_cjk_target and flat_exp in flat_obs and len(flat_obs) <= len(flat_exp) + 2:
@@ -1368,6 +1415,13 @@ def main():
                         matching_chars = sum(m.size for m in matcher.get_matching_blocks())
                         if matching_chars >= int(len(flat_exp) * 0.85):
                             corrected_obs = flat_exp
+                            
+                        # --- NEW: SCRAMBLED ROLLING TEXT RULE ---
+                        # If the AI reads the rolling grid out of order, check if all expected words exist anywhere in the output
+                        exp_words = flat_exp.split()
+                        if exp_words and not is_cjk_target:
+                            if all(word.lower() in corrected_obs.lower() for word in exp_words):
+                                corrected_obs = flat_exp
 
                     flat_obs = corrected_obs
                 

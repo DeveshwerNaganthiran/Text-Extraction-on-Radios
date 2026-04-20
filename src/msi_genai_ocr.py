@@ -541,14 +541,14 @@ class MSIGenAIOCR:
                 # --- NEW: CONTEXTUAL VOCABULARY HINT ---
                 vocab_hint = ""
                 if expected_text and str(expected_text).strip():
-                    vocab_hint = f"HINT: The text on the screen is expected to be '{expected_text}'. Use this hint to resolve ambiguous, dense, or pixelated LCD fonts (especially for complex Chinese characters). However, DO NOT output this hint if the screen clearly displays a different word or if extra text is present.\n"
+                    vocab_hint = f"REFERENCE DICTIONARY: '{expected_text}'. \nWARNING: The physical camera image often cuts off the edges of the text. You are a strict transcription bot. If the image only shows a cut-off fragment like 'нок сообщ. вык', you MUST output exactly 'нок сообщ. вык'. DO NOT auto-complete the missing 'Зво' or 'л.'. You must only transcribe the exact letters that are physically visible inside the image borders. Do not guess or autocorrect missing letters.\n"
 
                 # MODIFICATION 3: Balanced System Prompt (Center + Corners)
                 prompt = (
                     "Extract ALL text from this walkie-talkie screen. Ignore all icons/symbols (♪, battery, power indicators). "
                     "CRITICAL INSTRUCTION: You must read the ENTIRE screen. Text may be perfectly centered, OR it may be split into softkey labels at the BOTTOM-LEFT and BOTTOM-RIGHT corners. "
                     "Do NOT ignore perfectly centered text, and Do NOT ignore text on the far edges. Capture absolutely everything. "
-                    "Output EXACTLY what is on screen. Do NOT confuse numbers with letters. "
+                    "Output EXACTLY what is visibly on the screen. DO NOT auto-complete cut-off words. If the screen physical borders cut off the text (e.g. 'Test fo'), output exactly 'Test fo'. Do NOT guess the missing letters. Do NOT confuse numbers with letters. "
                     "EXTREMELY IMPORTANT: The 'Detected Text(Original)' field MUST contain the EXACT language and characters shown in the image. DO NOT translate the original text into English. If the screen is in Chinese,Korean or other foreign languages the Original Text MUST be in the same foreign language "
                     "CRITICAL: Preserve exact leading spaces, indentation, and layout. "
                     + lang_hint + softkey_hint + vocab_hint +
@@ -882,7 +882,6 @@ class MSIGenAIOCR:
             ("[4] ≡ ≡", ""),
             ("★", ""),
             ("☆", ""),
-            ("*", ""),
             ("M1 A K", ""),
             ("M 8 X", ""),
             ("间皇文", ""),
