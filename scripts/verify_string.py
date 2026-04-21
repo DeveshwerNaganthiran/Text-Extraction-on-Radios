@@ -1024,22 +1024,17 @@ def main():
             expected_list.append({"index": "SKIP_VERIFY", "tag": "SKIP_VERIFY", "command": cmd_val, "display_style": disp_style, "expected_en": "SKIP", "expected_local": "SKIP"})
             continue
             
-        if args.region.lower() == "multiple":
-             try:
-                 exp = load_expected(args.excel, "english", "english", index=idx_val, tag=tag_val)
-                 exp["command"] = cmd_val
-                 exp["display_style"] = disp_style
-                 expected_list.append(exp)
-             except Exception as e:
-                 expected_list.append({"index": idx_val, "tag": tag_val, "command": cmd_val, "display_style": disp_style, "expected_en": "", "expected_local": ""})
-        else:
-            try:
-                exp = load_expected(args.excel, args.region, args.language, index=idx_val, tag=tag_val)
-                exp["command"] = cmd_val
-                exp["display_style"] = disp_style
-                expected_list.append(exp)
-            except Exception as e:
-                expected_list.append({"index": idx_val, "tag": tag_val, "command": cmd_val, "display_style": disp_style, "expected_en": "", "expected_local": ""})
+        try:
+            exp = load_expected(args.excel, "english", "english", index=idx_val, tag=tag_val)
+            exp["command"] = cmd_val
+            exp["display_style"] = disp_style
+            expected_list.append(exp)
+        except Exception as e:
+            expected_list.append({"index": idx_val, "tag": tag_val, "command": cmd_val, "display_style": disp_style, "expected_en": "", "expected_local": ""})
+
+    # We only save the languages chosen in the GUI, we DO NOT search Excel yet!
+    chosen_langs = [l.strip() for l in args.language.split(",") if l.strip()] if args.region.lower() == "multiple" else [args.language]
+    print("Expected (Local): [Will detect language via AI first, then fetch from Excel]")
 
 
     if args.preview:
@@ -1102,29 +1097,33 @@ def main():
         print(f"Index: {exp_dict.get('index', '')}")
         if exp_dict.get('tag'): print(f"Tag: {exp_dict.get('tag', '')}")
 
-        targets_to_test = []
-        if args.region.lower() == "multiple":
-            chosen_langs = [l.strip() for l in args.language.split(",") if l.strip()]
-            for cl in chosen_langs:
-                r, _ = map_language_to_region("", "", allowed_langs=cl)
-                try:
-                    n_exp = load_expected(args.excel, r, cl, index=exp_dict.get("index"), tag=exp_dict.get("tag"))
-                    targets_to_test.append({
-                        "region": r,
-                        "language": cl,
-                        "exp_target": n_exp.get("expected_local", "")
-                    })
-                except Exception: pass
-        else:
-            targets_to_test.append({
+        # --- PRE-FETCH EXCEL TARGETS BASED STRICTLY ON GUI SELECTION ---
+        chosen_langs = [l.strip() for l in args.language.split(",") if l.strip()] if args.region.lower() == "multiple" else [args.language]
+        active_targets = []
+        
+        for cl in chosen_langs:
+            r, _ = map_language_to_region("", "", allowed_langs=cl)
+            try:
+                n_exp = load_expected(args.excel, r, cl, index=exp_dict.get("index"), tag=exp_dict.get("tag"))
+                active_targets.append({
+                    "region": r,
+                    "language": cl,
+                    "exp_target": n_exp.get("expected_local", "")
+                })
+            except Exception:
+                pass
+
+        # Fallback if nothing was found in Excel
+        if not active_targets:
+            active_targets.append({
                 "region": args.region,
                 "language": args.language,
-                "exp_target": exp_dict.get("expected_local", "")
+                "exp_target": exp_dict.get("expected_local", "") or exp_dict.get("expected_en", "")
             })
-            
-        print("Expected (Local): [Will check against all selected languages]")
+        # -------------------------------------------------------------------------
 
-        max_retries = 5  
+
+        max_retries = 10 
         best_conf = -1.0
         best_attempt_data = None
         seen_observations = set()
@@ -1155,51 +1154,55 @@ def main():
                     cap = cv2.VideoCapture(int(camera_id), cv2.CAP_DSHOW)
                     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
                     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-                    
                     if needs_rolling_capture:
                         used_rolling_this_attempt = True
                         retry_burst = []
-                        # Capture exactly 1 frame every 0.25 seconds, up to 10 frames
-                        t_end_capture = time.time() + 3.5
+                        # Capture exactly 1 frame every ~0.2 seconds, up to 20 frames
+                        t_end_capture = time.time() + 9.0  # Increased time to allow 20 frames to capture
                         last_save = 0
                         
                         while time.time() < t_end_capture:
                             ok, f = cap.read()
                             if ok and f is not None:
-                                # Determine the gap: 0.3s for the second frame, 0.1s for the rest
-                                required_interval = 0.3 if len(retry_burst) == 1 else 0.2
+                                # Determine the gap: 0.3s for the second frame, 0.2s for the rest
+                                required_interval = 0.2 if len(retry_burst) == 1 else 0.3
                                 
                                 if time.time() - last_save >= required_interval:
                                     retry_burst.append(f.copy())
                                     last_save = time.time()
-                                    if len(retry_burst) == 10:
+                                    if len(retry_burst) == 20:  # Grab 20 frames
                                         break
                         cap.release()
                         
-                        if len(retry_burst) >= 2:
+                        if len(retry_burst) >= 4:
                             crops = []
-                            for f in retry_burst[:10]:
+                            for f in retry_burst[:20]:  # Process up to 20 frames
                                 try:
                                     crop = f[sy1:sy2, sx1:sx2]
                                     if crop.size > 0: crops.append(crop)
                                 except Exception: pass
                                 
                             if crops:
-                                # GRID STITCHING (2 columns)
+                                # GRID STITCHING (4 columns, 5 rows)
                                 border = 6
                                 bordered_crops = []
                                 for c in crops:
                                     bc = cv2.copyMakeBorder(c, border, border, border, border, cv2.BORDER_CONSTANT, value=[255, 255, 255])
                                     bordered_crops.append(bc)
                                 
-                                if len(bordered_crops) % 2 != 0:
+                                # Make sure we have a multiple of 4 to form even columns
+                                while len(bordered_crops) % 4 != 0:
                                     bordered_crops.pop()
                                     
                                 if bordered_crops:
-                                    half = len(bordered_crops) // 2
-                                    col1 = cv2.vconcat(bordered_crops[:half])
-                                    col2 = cv2.vconcat(bordered_crops[half:])
-                                    grid_roi = cv2.hconcat([col1, col2])
+                                    rows_per_col = len(bordered_crops) // 4
+                                    col1 = cv2.vconcat(bordered_crops[:rows_per_col])
+                                    col2 = cv2.vconcat(bordered_crops[rows_per_col:2*rows_per_col])
+                                    col3 = cv2.vconcat(bordered_crops[2*rows_per_col:3*rows_per_col])
+                                    col4 = cv2.vconcat(bordered_crops[3*rows_per_col:])
+                                    
+                                    # Combine the 4 columns horizontally
+                                    grid_roi = cv2.hconcat([col1, col2, col3, col4])
                                     
                                     # FORCE 1:1 ASPECT RATIO PADDING
                                     gh, gw = grid_roi.shape[:2]
@@ -1238,31 +1241,15 @@ def main():
                     print(f"    -> [Camera Error] Could not grab fresh frame: {e}")
                 
             t0_ocr = time.time()
-            pass_lang = args.language if args.language.lower() != "multiple" else None
             
             current_dim = progressive_dims[attempt] if attempt < len(progressive_dims) else 1000
             current_squash = 0.6 if attempt == 3 else 1.0
             
             if attempt > 0:
                 print(f"    -> [Image Prep] Resolution: {current_dim}px | Squash Ratio: {current_squash}")
-            
-            # --- NEW LOGIC: Safely pass multiple hints without causing hallucinations ---
-            if args.region.lower() == "multiple":
-                hints = [t.get("exp_target", "") for t in targets_to_test if t.get("exp_target")]
-                hints = [h for h in list(set(hints)) if h.strip()] # Remove duplicates and empties
-                
-                if len(hints) > 1:
-                    # Format strictly so the AI knows to pick ONLY ONE and not mash them together
-                    hint_str = "EXACTLY ONE of these options: [" + " | ".join(hints) + "]. DO NOT combine them into one sentence"
-                elif len(hints) == 1:
-                    hint_str = hints[0]
-                else:
-                    hint_str = exp_dict.get("expected_en", "")
-            else:
-                hint_str = exp_dict.get("expected_local", "")
-                if not hint_str:
-                    hint_str = exp_dict.get("expected_en", "")
-            # -------------------------------------------------------------------------
+
+            # Pass only the English text as a generic context reference to avoid hallucination
+            hint_str = exp_dict.get("expected_en", "")
 
             if _is_screen_blank(retry_roi):
                 print("    -> [Pre-Check] Camera sees a BLANK screen. Skipping AI hallucination.")
@@ -1270,9 +1257,12 @@ def main():
                 _conf = 0.0
             else:
                 if used_rolling_this_attempt:
-                    pass_hint = f"HINT: The image contains a 2-column grid of screenshots (padded with black space) showing a scrolling screen. Read down the left column, then the right. If the fragments across the frames can be pieced together to form '{hint_str}', output exactly: '{hint_str}'."
+                    pass_hint = f"HINT: The image contains a 2-column grid of screenshots showing a scrolling screen. Read down the left column, then the right."
                 else:
-                    pass_hint = hint_str  # <--- CHANGED: Provide hint immediately on attempt 0
+                    pass_hint = f"REFERENCE ENGLISH TRANSLATION: '{hint_str}'. Ensure you transcribe the ORIGINAL language visible on screen." if hint_str else ""
+
+                # Pass GUI selections so AI has a general idea of allowed alphabets
+                pass_lang = args.language
 
                 text, _conf = ocr.extract_text(
                     retry_roi, 
@@ -1308,27 +1298,11 @@ def main():
 
             observed_n = _norm_text(orig_text)
 
-            # --- NEW LOGIC: Use AI detected language to filter the Excel targets ---
-            active_targets = targets_to_test
-            if args.region.lower() == "multiple" and lang_detected and lang_detected.lower() != "unknown":
-                matched_targets = []
-                dl_low = lang_detected.lower()
-                for t in targets_to_test:
-                    tl_low = t["language"].lower()
-                    # Check if the AI's detected language matches our target language
-                    if tl_low in dl_low or dl_low in tl_low:
-                        matched_targets.append(t)
-                
-                if matched_targets:
-                    active_targets = matched_targets
-                    print(f"    -> [Language Sync] AI detected '{lang_detected}'. Filtering Excel comparison to '{active_targets[0]['language']}'.")
-            # -------------------------------------------------------------------------
-
             best_sub_conf = -1.0
             best_sub_verdict = "FAIL"
             best_sub_data = {}
 
-            # Change this loop to use 'active_targets' instead of 'targets_to_test'
+            # Loop through the GUI-selected languages (active_targets) and check if ANY of them match the OCR text
             for target_info in active_targets:
                 t_region = target_info["region"]
                 t_lang = target_info["language"]
@@ -1365,7 +1339,7 @@ def main():
                         "RETRY": "RETRV", "Retry": "Retrv", "retry": "retrv",
                         "虎碼": "號碼", "新響": "漸響", "施錠": "旋鈕", "施鈕": "旋鈕",
                         "遠測": "遙測", "擺置": "搁置", "通话": "通稱", "通話": "通稱",
-                        "鎖碼": "變碼", "R∫": "Rx", "r∫": "rx", "音": "顫音",
+                        "鎖碼": "變碼", "R∫": "Rx", "r∫": "rx", "音": "颤音",
                         "SYSTELIAS": "SYSTEM ALIAS", "Systelias": "System Alias",
                         "資訊驗證失敗": "驗證失敗", "資訊 驗證失敗": "驗證失敗",
                         "스캔컴": "스캔켬", "스켈처": "스켈치", "Z-S": "Z-s",
@@ -1415,13 +1389,36 @@ def main():
                         matching_chars = sum(m.size for m in matcher.get_matching_blocks())
                         if matching_chars >= int(len(flat_exp) * 0.85):
                             corrected_obs = flat_exp
-                            
-                        # --- NEW: SCRAMBLED ROLLING TEXT RULE ---
-                        # If the AI reads the rolling grid out of order, check if all expected words exist anywhere in the output
-                        exp_words = flat_exp.split()
-                        if exp_words and not is_cjk_target:
-                            if all(word.lower() in corrected_obs.lower() for word in exp_words):
-                                corrected_obs = flat_exp
+                        else:
+                            # --- NEW: SCRAMBLED ROLLING TEXT REARRANGEMENT RULE ---
+                            if not is_cjk_target:
+                                import unicodedata
+                                def remove_accents(input_str):
+                                    return "".join(c for c in unicodedata.normalize('NFKD', input_str) if not unicodedata.combining(c))
+
+                                exp_words = flat_exp.split()
+                                obs_lower = remove_accents(corrected_obs.lower())
+                                found_chars_len = 0
+                                total_exp_chars = sum(len(w) for w in exp_words)
+                                
+                                for word in exp_words:
+                                    word_clean = remove_accents(word.lower())
+                                    if word_clean in obs_lower:
+                                        found_chars_len += len(word)
+                                        obs_lower = obs_lower.replace(word_clean, "", 1)
+                                        
+                                if total_exp_chars > 0 and (found_chars_len / total_exp_chars) >= 0.85:
+                                    corrected_obs = flat_exp
+                            else:
+                                exp_chars = list(flat_exp)
+                                obs_chars = list(corrected_obs)
+                                found_cjk_chars = 0
+                                for ch in exp_chars:
+                                    if ch in obs_chars:
+                                        found_cjk_chars += 1
+                                        obs_chars.remove(ch)
+                                if len(exp_chars) > 0 and (found_cjk_chars / len(exp_chars)) >= 0.85:
+                                    corrected_obs = flat_exp
 
                     flat_obs = corrected_obs
                 

@@ -832,11 +832,12 @@ class MSIGenAIOCR:
             ("HIA", ""),
             ("H1A", ""),
             ("H l A", ""),  # lowercase L
-            ("HlA", ""),    # lowercase L
+            ("DTETT", "DETT"),
 
             # Number/Letter confusions (5 instead of S, etc.)
             ("HIA5", ""),
             ("H1A5", ""),
+            ("HIV", "HÍV"),
             ("HIA S", ""),
             ("HIAS", ""),
             ("H1A S", ""),
@@ -1036,5 +1037,5 @@ class MSIGenAIOCR:
         else:
             print("Monthly usage data is temporarily unavailable from portal.")
             
-        print("=" * 70 + "\n")
+        print("=" * 70 + "(\n")
         
