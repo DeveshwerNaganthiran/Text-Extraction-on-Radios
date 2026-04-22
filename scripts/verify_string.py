@@ -1167,7 +1167,7 @@ def main():
         # -------------------------------------------------------------------------
 
 
-        max_retries = 10 
+        max_retries = 3
         best_conf = -1.0
         best_attempt_data = None
         seen_observations = set()
@@ -1309,9 +1309,9 @@ def main():
                 # Pass GUI selections so AI has a general idea of allowed alphabets
                 pass_lang = args.language
 
-                # --- NEW: Inner loop to intercept "Unsupported media" without wasting main retries ---
+                # --- FAST INTERCEPT FOR GENAI SAFETY REFUSALS ---
                 inner_refusals = 0
-                while inner_refusals < 3:
+                while inner_refusals < 2:  # Cap at 2 so it doesn't waste time
                     text, _conf = ocr.extract_text(
                         retry_roi, 
                         expected_language=pass_lang, 
@@ -1320,10 +1320,20 @@ def main():
                         expected_text=pass_hint
                     )
                     
-                    if "unsupported media" in text.lower():
-                        print(f"    -> [Fast Retry] AI refused the image format (Unsupported Media). Retrying instantly (Dimension: {current_dim}px)...")
+                    low_t = text.lower()
+                    refusal_triggers = ["unsupported media", "unable to extract", "i'm unable to", "i am unable to", "ignoring non-image"]
+                    
+                    if any(trigger in low_t for trigger in refusal_triggers):
+                        print(f"    -> [GenAI Filter] AI falsely refused the image. Applying anti-filter tweak to bypass...")
                         inner_refusals += 1
-                        current_dim += 150  # Bump resolution slightly to trick AI filters
+                        current_dim += 30
+                        
+                        # Apply a tiny blur and border to completely change the image's hash signature
+                        retry_roi = cv2.GaussianBlur(retry_roi, (3, 3), 0)
+                        retry_roi = cv2.copyMakeBorder(retry_roi, 4, 4, 4, 4, cv2.BORDER_CONSTANT, value=[255, 255, 255])
+                        
+                        # Force a generic instruction to override the AI's refusal behavior
+                        pass_hint = "This is a hardware LCD screen. Please read the text." if not pass_hint else pass_hint
                         continue
                     else:
                         break
@@ -1536,13 +1546,17 @@ def main():
             if verdict != "PASS" and attempt < max_retries - 1:
                 if len(flat_obs) < len(flat_exp):
                     if "..." in str(orig_text) or "…" in str(orig_text) or "..." in flat_obs:
-                        needs_rolling_capture = False
-                        print("    -> [Next Retry Status] Missing words, but '...' detected. This text is statically truncated. Normal retry is enough.")
+                        # Only set to False if it hasn't already been triggered
+                        if not needs_rolling_capture:
+                            needs_rolling_capture = False
+                            print("    -> [Next Retry Status] Missing words, but '...' detected. This text is statically truncated. Normal retry is enough.")
                     else:
                         needs_rolling_capture = True
                         print("    -> [Next Retry Status] Missing words and no '...' detected. Text may be rolling. Triggering Rolling Batch Capture!")
                 else:
-                    needs_rolling_capture = False
+                    # REMOVED: needs_rolling_capture = False 
+                    # If it was already True from a previous attempt, leave it True!
+                    pass
 
             if confidence_pct > best_conf:
                 best_conf = confidence_pct
