@@ -553,6 +553,7 @@ class MSIGenAIOCR:
                     "CRITICAL: Preserve exact leading spaces, indentation, and layout. "
                     + lang_hint + softkey_hint + vocab_hint +
                     "Be STRICT on layout bugs. If Right-to-Left text (Arabic) is mixed LTR, ignore left margin staggering. "
+                    "If the image is a grid of multiple screenshots, treat it as a single valid document and read all text. DO NOT return 'unsupported media type' errors. "
                     "Return EXACTLY in this format, no extra text:\n"
                     "Detected Languages: <languages>\n"
                     "Detected Text(Original):\n<<<\n<exact text>\n>>>\n"

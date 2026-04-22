@@ -410,11 +410,12 @@ def map_language_to_region(lang: str, text: str = "", allowed_langs: str = "") -
     foreign_allowed = [x for x in allowed if x.lower() not in ["english", "en"]]
     
     def _get_region(lang_name: str) -> str:
-        ln = lang_name.lower()
+        ln = lang_name.lower().strip()
         if "korean" in ln or "japanese" in ln or "chinese" in ln or "thai" in ln: return "apac"
-        if "spanish" in ln or "portuguese" in ln: return "lacr"
-        if "english" in ln or "en" in ln: return "english"
-        return "emea"
+        if "portuguese" in ln: return "lacr" 
+        # ---> FIX: STRICT MATCHING SO 'FRENCH' IS NOT CONFUSED FOR 'EN' <---
+        if "english" in ln or ln == "en": return "english"
+        return "emea" 
 
     has_hiragana = any('\u3040' <= c <= '\u309F' for c in t)
     has_katakana = any('\u30A0' <= c <= '\u30FF' for c in t)
@@ -599,6 +600,14 @@ def _pick_language_column(df: pd.DataFrame, region: str, language: str) -> str:
         if c in cols: return cols[c]
     raise ValueError(f"Language column for region='{region}' language='{language}' not found. Columns: {list(df.columns)}")
 
+def _find_tag_column(df: pd.DataFrame) -> str:
+    preferred, fallback = [], []
+    for c in df.columns:
+        low, n = str(c or "").strip().lower(), _norm_col(c)
+        if ("tag" in low and "string" in low) or n in ["string tag", "stringtag"]: preferred.append(c)
+        elif n == "tag" or "tag" in low: fallback.append(c)
+    return preferred[0] if preferred else (fallback[0] if fallback else "")
+
 def load_expected(excel_path: str, region: str, language: str, index: str = "", tag: str = "") -> dict:
     if not os.path.exists(str(excel_path)): raise FileNotFoundError(excel_path)
     xls = pd.ExcelFile(str(excel_path), engine="openpyxl")
@@ -645,45 +654,46 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
         try: idx = str(int(idx))  
         except Exception: pass
 
-    def _find_tag_column(df: pd.DataFrame) -> str:
-        preferred, fallback = [], []
-        for c in df.columns:
-            low, n = str(c or "").strip().lower(), _norm_col(c)
-            if ("tag" in low and "string" in low) or n in ["string tag", "stringtag"]: preferred.append(c)
-            elif n == "tag" or "tag" in low: fallback.append(c)
-        return preferred[0] if preferred else (fallback[0] if fallback else "")
-
     en_tag_col = _find_tag_column(df_en)
     reg_tag_col = _find_tag_column(df_reg)
 
+    tag_norm = str(tag).strip().lower()
+
+    # ---- 1. Search English Sheet (Prioritize TAG over Index) ----
+    row_en = pd.DataFrame()
+    if tag_norm and en_tag_col:
+        row_en = df_en[df_en[en_tag_col].astype(str).str.strip().str.lower() == tag_norm]
+    if row_en.empty and idx:
+        row_en = df_en[df_en["__index"] == idx]
+        
+    if row_en.empty: raise ValueError(f"No English row found for index '{idx}' / tag '{tag}'")
+
+    found_idx = str(row_en.iloc[0].get("__index", "")).strip()
+    found_tag = str(row_en.iloc[0].get(en_tag_col, "")).strip() if en_tag_col else str(tag)
+
+    # ---- 2. Search Region Sheet (Prioritize TAG over Index) ----
+    row_reg = pd.DataFrame()
     idx_region = ""
-    if idx:
-        row_en = df_en[df_en["__index"] == idx]
-        row_reg = df_reg[df_reg["__index"] == idx]
-        row_cat = df_cat[df_cat["__index"] == idx]
-    elif tag:
-        tag_norm = str(tag).strip().lower()
-        if not en_tag_col: raise ValueError("English sheet missing 'string tag' column")
-        row_en_all = df_en[df_en[en_tag_col].astype(str).str.strip().str.lower() == tag_norm]
-        if row_en_all.empty: raise ValueError(f"No row found for tag '{tag}' in English sheet")
-        idx = str(row_en_all.iloc[0]["__index"]).strip()
-        row_en = df_en[df_en["__index"] == idx]
-        row_cat = df_cat[df_cat["__index"] == idx]
-        if not reg_tag_col: row_reg = df_reg[df_reg["__index"] == "__no_match__"]
-        else:
-            row_reg = df_reg[df_reg["__index"] == idx]
-            if not row_reg.empty: idx_region = str(row_reg.iloc[0].get("__index", "")).strip()
-    else: raise ValueError("Provide --index or --tag")
+    if found_tag and reg_tag_col:
+        row_reg = df_reg[df_reg[reg_tag_col].astype(str).str.strip().str.lower() == found_tag.lower()]
+    if row_reg.empty and found_idx:
+        row_reg = df_reg[df_reg["__index"] == found_idx]
+        
+    if not row_reg.empty:
+        idx_region = str(row_reg.iloc[0].get("__index", "")).strip()
 
-    if row_en.empty: raise ValueError(f"No English row found for index '{idx}'")
-
-    en_row = row_en.iloc[0].to_dict()
-    reg_row = row_reg.iloc[0].to_dict() if not row_reg.empty else {}
-    cat_row = row_cat.iloc[0].to_dict() if not row_cat.empty else {}
-
-    def _extract_merged_text_safely(df, target_idx, text_col_name, tag_col_name):
+    def _extract_merged_text_safely(df, target_idx, target_tag, text_col_name, tag_col_name):
         if not text_col_name or text_col_name not in df.columns: return ""
-        matching_rows = df.index[df["__index"] == target_idx].tolist()
+        
+        # Try to find exactly by TAG first
+        matching_rows = []
+        if target_tag and tag_col_name:
+            matching_rows = df.index[df[tag_col_name].astype(str).str.strip().str.lower() == target_tag.lower()].tolist()
+            
+        # Fallback to Index if tag is missing
+        if not matching_rows and target_idx:
+            matching_rows = df.index[df["__index"] == target_idx].tolist()
+            
         if not matching_rows: return ""
         
         start_row = matching_rows[0]
@@ -704,18 +714,17 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
     en_text_col = next((c for c in df_en.columns if _norm_col(c) in ["string (english)", "string english", "english", "string"]), None)
     if en_text_col is None: raise ValueError("English sheet missing 'string (english)' column")
 
-    expected_en = _extract_merged_text_safely(df_en, idx, en_text_col, en_tag_col)
+    expected_en = _extract_merged_text_safely(df_en, found_idx, found_tag, en_text_col, en_tag_col)
     
     if _norm_col(region_sheet) == _norm_col(english_sheet): 
         expected_local = expected_en
     else:
         lang_col = _pick_language_column(df_reg, region, language)
-        expected_local = _extract_merged_text_safely(df_reg, idx, lang_col, reg_tag_col)
+        expected_local = _extract_merged_text_safely(df_reg, found_idx, found_tag, lang_col, reg_tag_col)
 
-    found_tag = str(en_row.get(en_tag_col, "")) if en_tag_col and en_tag_col in en_row else str(tag)
-    if str(found_tag).lower() == 'nan': found_tag = ""
+    final_tag = str(found_tag) if str(found_tag).lower() != 'nan' else ""
     return {
-        "index": idx, "index_region": idx_region, "expected_en": expected_en, "expected_local": expected_local, "region_sheet": region_sheet, "tag": found_tag
+        "index": found_idx, "index_region": idx_region, "expected_en": expected_en, "expected_local": expected_local, "region_sheet": region_sheet, "tag": final_tag
     }
 
 def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float, warmup_sec: float = 1.5, rolling_mode: bool = False):
@@ -1101,17 +1110,52 @@ def main():
         chosen_langs = [l.strip() for l in args.language.split(",") if l.strip()] if args.region.lower() == "multiple" else [args.language]
         active_targets = []
         
+        print("\n" + "="*60)
+        print(f"DEBUG EXCEL FETCH: File: {args.excel}")
+        print(f"Index: {exp_dict.get('index')} | Tag: {exp_dict.get('tag')}")
+        
         for cl in chosen_langs:
             r, _ = map_language_to_region("", "", allowed_langs=cl)
             try:
+                # --- DEEP DIAGNOSTIC ---
+                xls_debug = pd.ExcelFile(args.excel, engine="openpyxl")
+                sheet_name = _find_sheet(xls_debug, r)
+                df_debug = pd.read_excel(xls_debug, sheet_name=sheet_name, engine="openpyxl")
+                tag_col = _find_tag_column(df_debug) 
+                lang_col = _pick_language_column(df_debug, r, cl)
+                
+                print(f"  -> [Diagnostics] Searching Sheet: '{sheet_name}' | Tag Column: '{tag_col}' | Target Column: '{lang_col}'")
+                
+                if tag_col and lang_col:
+                    matched = df_debug[df_debug[tag_col].astype(str).str.strip().str.lower() == str(exp_dict.get('tag')).strip().lower()]
+                    print(f"  -> [Diagnostics] Found {len(matched)} matching row(s) for Tag '{exp_dict.get('tag')}'.")
+                    for i, (idx_num, row_data) in enumerate(matched.iterrows()):
+                        # Excel rows are 0-indexed in Pandas, plus header, so Excel Row is idx_num + 2
+                        val = row_data.get(lang_col, '')
+                        print(f"     - Match {i+1} (Excel Row {idx_num+2}): Value in '{lang_col}' is -> '{val}'")
+                # -----------------------
+
                 n_exp = load_expected(args.excel, r, cl, index=exp_dict.get("index"), tag=exp_dict.get("tag"))
+                target_str = str(n_exp.get("expected_local", "")).strip()
+                english_str = str(n_exp.get("expected_en", "")).strip()
+                
+                print(f"  -> Final Picked '{cl}' Value: '{target_str}'")
+                
+                if not target_str or target_str.lower() == "nan":
+                    target_str = english_str
+                    print(f"  -> [WARNING] Excel cell is empty! Falling back to English.")
+                elif target_str.upper() == english_str.upper():
+                    print(f"  -> [WARNING] The value extracted for {cl} exactly matches the English text! Is it untranslated in the spreadsheet?")
+                
                 active_targets.append({
                     "region": r,
                     "language": cl,
-                    "exp_target": n_exp.get("expected_local", "")
+                    "exp_target": target_str
                 })
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"  -> [ERROR] Failed to fetch '{cl}' from Excel. Reason: {e}")
+
+        print("="*60 + "\n")
 
         # Fallback if nothing was found in Excel
         if not active_targets:
@@ -1165,7 +1209,7 @@ def main():
                             ok, f = cap.read()
                             if ok and f is not None:
                                 # Determine the gap: 0.3s for the second frame, 0.2s for the rest
-                                required_interval = 0.2 if len(retry_burst) == 1 else 0.3
+                                required_interval = 0.1 if len(retry_burst) == 1 else 0.1
                                 
                                 if time.time() - last_save >= required_interval:
                                     retry_burst.append(f.copy())
@@ -1259,19 +1303,31 @@ def main():
                 if used_rolling_this_attempt:
                     pass_hint = f"HINT: The image contains a 2-column grid of screenshots showing a scrolling screen. Read down the left column, then the right."
                 else:
-                    pass_hint = f"REFERENCE ENGLISH TRANSLATION: '{hint_str}'. Ensure you transcribe the ORIGINAL language visible on screen." if hint_str else ""
+                    # STRICT MODE: No English hints allowed. AI must read exactly what is physically visible.
+                    pass_hint = ""
 
                 # Pass GUI selections so AI has a general idea of allowed alphabets
                 pass_lang = args.language
 
-                text, _conf = ocr.extract_text(
-                    retry_roi, 
-                    expected_language=pass_lang, 
-                    dynamic_dim=current_dim, 
-                    squash_ratio=current_squash,
-                    expected_text=pass_hint
-                )
-            
+                # --- NEW: Inner loop to intercept "Unsupported media" without wasting main retries ---
+                inner_refusals = 0
+                while inner_refusals < 3:
+                    text, _conf = ocr.extract_text(
+                        retry_roi, 
+                        expected_language=pass_lang, 
+                        dynamic_dim=current_dim, 
+                        squash_ratio=current_squash,
+                        expected_text=pass_hint
+                    )
+                    
+                    if "unsupported media" in text.lower():
+                        print(f"    -> [Fast Retry] AI refused the image format (Unsupported Media). Retrying instantly (Dimension: {current_dim}px)...")
+                        inner_refusals += 1
+                        current_dim += 150  # Bump resolution slightly to trick AI filters
+                        continue
+                    else:
+                        break
+
             t1_ocr = time.time()
 
             if attempt == 0:
@@ -1331,6 +1387,15 @@ def main():
                 flat_obs = _clean_for_compare(observed_n, is_cjk_target)
                 flat_exp = _clean_for_compare(expected_local_n, is_cjk_target)
                 
+                # --- FIX: CASE AND ACCENT INSENSITIVITY ---
+                import unicodedata
+                def _strip_accents(s):
+                    return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+                
+                # If they match exactly when converted to lowercase and accents are removed, force a PASS
+                if _strip_accents(flat_obs.lower()) == _strip_accents(flat_exp.lower()):
+                    flat_obs = flat_exp  
+                
                 # --- STRICT EXACT MATCHING ---
                 if flat_exp and flat_obs != flat_exp:
                     corrected_obs = flat_obs
@@ -1338,7 +1403,7 @@ def main():
                     known_illusions = {
                         "RETRY": "RETRV", "Retry": "Retrv", "retry": "retrv",
                         "虎碼": "號碼", "新響": "漸響", "施錠": "旋鈕", "施鈕": "旋鈕",
-                        "遠測": "遙測", "擺置": "搁置", "通话": "通稱", "通話": "通稱",
+                        "遠測": "遙測", "摆置": "搁置", "通话": "通稱", "通話": "通稱",
                         "鎖碼": "變碼", "R∫": "Rx", "r∫": "rx", "音": "颤音",
                         "SYSTELIAS": "SYSTEM ALIAS", "Systelias": "System Alias",
                         "資訊驗證失敗": "驗證失敗", "資訊 驗證失敗": "驗證失敗",
@@ -1360,23 +1425,23 @@ def main():
                     if sim >= 0.80 and len(corrected_obs) == len(flat_exp):
                         corrected_obs = flat_exp
                     
-                    # Handle minor cut-offs
-                    if len(flat_obs) >= 2 and flat_exp.endswith(flat_obs):
-                        if len(flat_exp) - len(flat_obs) <= 2:
-                            corrected_obs = flat_exp
+                    # # Handle minor cut-offs
+                    # if len(flat_obs) >= 2 and flat_exp.endswith(flat_obs):
+                    #     if len(flat_exp) - len(flat_obs) <= 2:
+                    #         corrected_obs = flat_exp
 
-                    # Handle minor 1-2 character cut-offs at the edges (safe to allow)
-                    if len(flat_obs) >= 2 and flat_exp.endswith(flat_obs) and len(flat_exp) - len(flat_obs) <= 2:
-                        corrected_obs = flat_exp
+                    # # Handle minor 1-2 character cut-offs at the edges (safe to allow)
+                    # if len(flat_obs) >= 2 and flat_exp.endswith(flat_obs) and len(flat_exp) - len(flat_obs) <= 2:
+                    #     corrected_obs = flat_exp
 
-                    # STRICT TRUNCATION RULE: If the AI reads a fragment (start, middle, or end),
-                    # it MUST make up at least 99% of the expected text length to pass.
-                    if len(flat_obs) >= 5 and flat_obs in flat_exp:
-                        if len(flat_obs) >= int(len(flat_exp) * 0.99):
-                            corrected_obs = flat_exp
+                    # # STRICT TRUNCATION RULE: If the AI reads a fragment (start, middle, or end),
+                    # # it MUST make up at least 99% of the expected text length to pass.
+                    # if len(flat_obs) >= 5 and flat_obs in flat_exp:
+                    #     if len(flat_obs) >= int(len(flat_exp) * 0.99):
+                    #         corrected_obs = flat_exp
 
-                    if is_cjk_target and flat_exp in flat_obs and len(flat_obs) <= len(flat_exp) + 2:
-                        corrected_obs = flat_exp
+                    # if is_cjk_target and flat_exp in flat_obs and len(flat_obs) <= len(flat_exp) + 2:
+                    #     corrected_obs = flat_exp
 
                     if is_cjk_target and flat_exp in flat_obs:
                         stripped_obs = re.sub(r'[A-Za-z]', '', flat_obs)
