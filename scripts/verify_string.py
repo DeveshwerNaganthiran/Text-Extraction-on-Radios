@@ -1170,7 +1170,7 @@ def main():
         # -------------------------------------------------------------------------
 
 
-        max_retries = 2
+        max_retries = 6
         best_conf = -1.0
         best_attempt_data = None
         seen_observations = set()

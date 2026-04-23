@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from typing import Tuple, Optional
 from dotenv import load_dotenv
-
+import difflib
 # Load environment variables
 load_dotenv(override=True)
 
@@ -99,9 +99,21 @@ class MSIGenAIOCR:
             
             safe_dim = dynamic_dim if dynamic_dim else 600 
             h, w = img.shape[:2]
-            max_dim = max(h, w)
             
+            # --- NEW: STRICT GRID DIMENSION LIMITS ---
+            # If the image is extremely tall (a batch capture collage), force scale it down
+            # so the AI gateway doesn't reject it as an unsupported media type.
+            max_allowed_h = 2000
+            if h > max_allowed_h:
+                scale_h = max_allowed_h / float(h)
+                new_w = max(1, int(w * scale_h))
+                new_h = max_allowed_h
+                img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+                h, w = new_h, new_w # Update dimensions for the next calculation
+            
+            max_dim = max(h, w)
             scale = safe_dim / float(max_dim) if max_dim > safe_dim else 1.0
+            
             new_w = max(1, int(w * scale))
             new_h = max(1, int(h * scale))
             
@@ -293,7 +305,51 @@ class MSIGenAIOCR:
         def _print_detected_line(msg: str):
             print(f"Detected: '{msg}'", flush=True)
 
+        # =====================================================================
+        # [START OF INSERTION 1]: Add the Character-Level Verification Function
+        # =====================================================================
+        def _generate_correction_prompt(expected: str, actual: str) -> str:
+            exp_clean = str(expected).strip()
+            act_clean = str(actual).strip()
+            
+            if not exp_clean or not act_clean:
+                return ""
+            
+            # Handle perfect truncation or rolling text (e.g. "RESEN" inside "PRESENT")
+            if act_clean in exp_clean and len(act_clean) >= 2:
+                return "" 
+                
+            if exp_clean.lower() == act_clean.lower():
+                return ""
+                
+            prompt = f"Your previous output was '{act_clean}'. This seems incorrect. Please look at the physical image again very closely.\n"
+            prompt += f"The expected full word is {len(exp_clean)} letters. You provided {len(act_clean)} letters.\n\n"
+            prompt += "Let's check letter by letter from left to right:\n"
+            
+            matcher = difflib.SequenceMatcher(None, exp_clean, act_clean)
+            
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                if tag == 'equal':
+                    prompt += f"- Letters '{exp_clean[i1:i2]}' match perfectly.\n"
+                elif tag == 'replace':
+                    prompt += f"- MISMATCH: You saw '{act_clean[j1:j2]}'. You might have autocorrected a typo. Look closely at the image: is it physically written as '{exp_clean[i1:i2]}'?\n"
+                elif tag == 'delete':
+                    prompt += f"- MISSING LETTER: It looks like you missed '{exp_clean[i1:i2]}' here. Look closely at the spacing.\n"
+                elif tag == 'insert':
+                    prompt += f"- AUTOCORRECT WARNING: You added an extra '{act_clean[j1:j2]}'. You likely autocorrected a typo or grammar mistake! DO NOT AUTOCORRECT. Verify if this letter physically exists on the screen.\n"
+                    
+            prompt += "\nBased on this breakdown, re-read the text in the image. "
+            prompt += "Return EXACTLY in the required format, no extra text:\n"
+            prompt += "Detected Languages: <languages>\n"
+            prompt += "Detected Text(Original):\n<<<\n<exact text>\n>>>\n"
+            
+            return prompt
+        # =====================================================================
+        # [END OF INSERTION 1]
+        # =====================================================================
+
         def _parse_structured(text: str) -> dict:
+            # ... (KEEP YOUR EXISTING _parse_structured CODE HERE) ...
             out = {
                 "upside_down_error": False,
                 "upside_down_evidence": "",
@@ -538,12 +594,17 @@ class MSIGenAIOCR:
                         softkey_hint = f"Device has {int(exp_softkeys)} softkey buttons. "
                 except Exception: pass
 
-                # --- NEW: CONTEXTUAL VOCABULARY HINT ---
+                # --- NEW: AGGRESSIVE ANTI-AUTOCORRECT VOCAB HINT ---
                 vocab_hint = ""
                 if expected_text and str(expected_text).strip():
-                    vocab_hint = f"REFERENCE DICTIONARY: '{expected_text}'. \nWARNING: The physical camera image often cuts off the edges of the text. You are a strict transcription bot. If the image only shows a cut-off fragment like 'нок сообщ. вык', you MUST output exactly 'нок сообщ. вык'. DO NOT auto-complete the missing 'Зво' or 'л.'. You must only transcribe the exact letters that are physically visible inside the image borders. Do not guess or autocorrect missing letters.\n"
-
-                # MODIFICATION 3: Balanced System Prompt (Center + Corners)
+                    vocab_hint = (
+                        f"EXPECTED EXACT STRING: '{expected_text}'. \n"
+                        "CRITICAL ANTI-AUTOCORRECT WARNING: The text on this screen often contains spelling mistakes, "
+                        "missing vowels, or UI truncation (e.g., missing an 'İ' or 'E'). "
+                        "DO NOT AUTOCORRECT. DO NOT FIX GRAMMAR OR SPELLING. "
+                        "If the physical screen shows a typo like 'KAYDEDLDİ', you MUST output exactly 'KAYDEDLDİ'. "
+                        "If you autocorrect typos to valid dictionary words, the test will fail. Output only the physical pixels.\n"
+                    )
                 prompt = (
                     "Extract ALL text from this walkie-talkie screen. Ignore all icons/symbols (♪, battery, power indicators). "
                     "CRITICAL INSTRUCTION: You must read the ENTIRE screen. Text may be perfectly centered, OR it may be split into softkey labels at the BOTTOM-LEFT and BOTTOM-RIGHT corners. "
@@ -586,7 +647,30 @@ class MSIGenAIOCR:
                 self._cached_session_ts = 0.0
                 
                 self.upload_image(session_id, image_base64)
+                
+                # --- ATTEMPT 1 ---
                 result = self.send_prompt(session_id, prompt)
+                raw_text = self.extract_text_from_response(result)
+                parsed = _parse_structured(raw_text)
+                
+                # --- NEW: CHARACTER-LEVEL VERIFICATION & RETRY LOOP ---
+                if expected_text:
+                    current_original = (parsed.get("original") or "").strip()
+                    correction_prompt = _generate_correction_prompt(expected_text, current_original)
+                    
+                    if correction_prompt:
+                        print(f"[MSI GenAI] Hallucination detected (Expected: '{expected_text}', Got: '{current_original}'). Sending letter-by-letter retry...")
+                        
+                        # --- ATTEMPT 2 ---
+                        # Send the highly specific correction prompt to the SAME session ID
+                        retry_result = self.send_prompt(session_id, correction_prompt)
+                        retry_raw = self.extract_text_from_response(retry_result)
+                        retry_parsed = _parse_structured(retry_raw)
+                        
+                        # If the model followed instructions and returned new structured output, update our working variables
+                        if retry_parsed.get("original"):
+                            raw_text = retry_raw
+                            parsed = retry_parsed
 
             except Exception as e:
                 return f"REQUEST_ERROR: {str(e)[:50]}", 0.0
