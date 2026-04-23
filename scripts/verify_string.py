@@ -997,6 +997,9 @@ def main():
     parser.add_argument("--save-roi-dir", default="")
     parser.add_argument("--summary-excel", default="")
     parser.add_argument("--preview", action="store_true")
+    # --- ADD THESE TWO ARGUMENTS ---
+    parser.add_argument("--enable-rolling", action="store_true")
+    parser.add_argument("--enable-truncation", action="store_true")
 
     args = parser.parse_args()
     try: args.region = _norm_col(args.region)
@@ -1167,7 +1170,7 @@ def main():
         # -------------------------------------------------------------------------
 
 
-        max_retries = 3
+        max_retries = 2
         best_conf = -1.0
         best_attempt_data = None
         seen_observations = set()
@@ -1374,6 +1377,9 @@ def main():
                 t_lang = target_info["language"]
                 t_exp = target_info["exp_target"]
                 
+                t_applied_truncation = False
+                t_applied_rolling = False
+                
                 expected_local_n = _norm_text(t_exp)
                 is_cjk_target = any('\u4e00' <= ch <= '\u9fff' or '\u3040' <= ch <= '\u30ff' or '\uac00' <= ch <= '\ud7a3' for ch in expected_local_n)
 
@@ -1431,6 +1437,18 @@ def main():
                         if bad in corrected_obs and good in flat_exp:
                             corrected_obs = corrected_obs.replace(bad, good)
                     
+                    # --- NEW: SMART TRUNCATION (...) MATCH ---
+                    if args.enable_truncation:
+                        has_ellipsis = ("..." in flat_obs or "…" in flat_obs or "..." in str(orig_text) or "…" in str(orig_text))
+                        if has_ellipsis:
+                            obs_no_ellipsis = flat_obs.replace("...", "").replace("…", "").strip()
+                            if len(obs_no_ellipsis) >= 2 and flat_exp.startswith(obs_no_ellipsis):
+                                corrected_obs = flat_exp
+                                t_applied_truncation = True   # <--- ADD THIS
+                            elif is_cjk_target and len(obs_no_ellipsis) >= 1 and flat_exp.startswith(obs_no_ellipsis):
+                                corrected_obs = flat_exp
+                                t_applied_truncation = True   # <--- ADD THIS
+                                
                     sim = difflib.SequenceMatcher(None, flat_exp, corrected_obs).ratio()
                     if sim >= 0.80 and len(corrected_obs) == len(flat_exp):
                         corrected_obs = flat_exp
@@ -1458,14 +1476,50 @@ def main():
                         if stripped_obs == flat_exp:
                             corrected_obs = flat_exp
 
-                    # Fragment Summation Math Algorithm
-                    if used_rolling_this_attempt:
-                        matcher = difflib.SequenceMatcher(None, flat_exp, corrected_obs)
-                        matching_chars = sum(m.size for m in matcher.get_matching_blocks())
-                        if matching_chars >= int(len(flat_exp) * 0.85):
+                    # --- NEW: STATIC REPEATING TEXT FIX (GRID CATCHER) ---
+                    # If the text is fully static but got repeated in the 20-frame grid capture
+                    if used_rolling_this_attempt and corrected_obs != flat_exp:
+                        clean_obs = corrected_obs.replace(" ", "")
+                        clean_exp = flat_exp.replace(" ", "")
+                        
+                        # Remove all full instances of the expected word to see what's left
+                        leftover = clean_obs.replace(clean_exp, "")
+                        
+                        # If the leftover is empty, or just a small clean fragment of the word, it's static!
+                        is_static_repeat = False
+                        if leftover == "":
+                            is_static_repeat = True
+                        elif len(clean_obs) > len(clean_exp) and leftover in clean_exp:
+                            is_static_repeat = True
+                            
+                        if is_static_repeat:
                             corrected_obs = flat_exp
+                            # Do NOT set t_applied_rolling because the text was not genuinely scrambled
+                            
+                    # Fragment Summation Math Algorithm
+                    if used_rolling_this_attempt and corrected_obs != flat_exp:
+                        clean_exp = flat_exp.replace(" ", "")
+                        clean_obs = corrected_obs.replace(" ", "")
+                        
+                        matcher = difflib.SequenceMatcher(None, clean_exp, clean_obs)
+                        blocks = matcher.get_matching_blocks()
+                        
+                        # --- FIX: Stop SequenceMatcher from cherry-picking scattered single letters ---
+                        # Only count matching blocks that are 2+ letters long (unless it's a CJK language or very short word)
+                        min_block = 1 if (is_cjk_target or len(clean_exp) <= 3) else 2
+                        matching_chars = sum(m.size for m in blocks if m.size >= min_block)
+                        
+                        longest_match = max((m.size for m in blocks), default=0)
+                        
+                        match_ratio = matching_chars / len(clean_exp) if len(clean_exp) > 0 else 0
+                        longest_ratio = longest_match / len(clean_exp) if len(clean_exp) > 0 else 0
+                        
+                        # --- LOWERED THRESHOLDS: 70% total match OR a single 60% unbroken chunk ---
+                        if match_ratio >= 0.70 or longest_ratio >= 0.60:
+                            corrected_obs = flat_exp
+                            t_applied_rolling = True
                         else:
-                            # --- NEW: SCRAMBLED ROLLING TEXT REARRANGEMENT RULE ---
+                            # --- SCRAMBLED ROLLING TEXT REARRANGEMENT RULE ---
                             if not is_cjk_target:
                                 import unicodedata
                                 def remove_accents(input_str):
@@ -1478,22 +1532,24 @@ def main():
                                 
                                 for word in exp_words:
                                     word_clean = remove_accents(word.lower())
-                                    if word_clean in obs_lower:
+                                    if word_clean in obs_lower.replace(" ", ""):
                                         found_chars_len += len(word)
                                         obs_lower = obs_lower.replace(word_clean, "", 1)
                                         
-                                if total_exp_chars > 0 and (found_chars_len / total_exp_chars) >= 0.85:
+                                if total_exp_chars > 0 and (found_chars_len / total_exp_chars) >= 0.70:
                                     corrected_obs = flat_exp
+                                    t_applied_rolling = True
                             else:
-                                exp_chars = list(flat_exp)
-                                obs_chars = list(corrected_obs)
+                                exp_chars = list(clean_exp)
+                                obs_chars = list(clean_obs)
                                 found_cjk_chars = 0
                                 for ch in exp_chars:
                                     if ch in obs_chars:
                                         found_cjk_chars += 1
                                         obs_chars.remove(ch)
-                                if len(exp_chars) > 0 and (found_cjk_chars / len(exp_chars)) >= 0.85:
+                                if len(exp_chars) > 0 and (found_cjk_chars / len(exp_chars)) >= 0.70:
                                     corrected_obs = flat_exp
+                                    t_applied_rolling = True
 
                     flat_obs = corrected_obs
                 
@@ -1506,8 +1562,8 @@ def main():
                     if flat_obs == flat_exp: 
                         t_verdict = "PASS"
                         t_conf = 100.0
-                    elif flat_exp in flat_obs:
-                        t_verdict = "FAIL"
+                    # elif flat_exp in flat_obs:
+                    #     t_verdict = "FAIL"
                     else:
                         if t_conf >= 70.0: t_verdict = "WARN"
                         else: t_verdict = "FAIL"
@@ -1522,7 +1578,9 @@ def main():
                         "final_language": t_lang,
                         "exp_target": t_exp,
                         "flat_obs": flat_obs,
-                        "flat_exp": flat_exp
+                        "flat_exp": flat_exp,
+                        "applied_truncation": t_applied_truncation, # <--- ADD THIS
+                        "applied_rolling": t_applied_rolling        # <--- ADD THIS
                     }
                 if t_verdict == "PASS":
                     break
@@ -1534,6 +1592,8 @@ def main():
             exp_target = best_sub_data.get("exp_target", "")
             flat_obs = best_sub_data.get("flat_obs", "")
             flat_exp = best_sub_data.get("flat_exp", "")
+            flat_applied_truncation = best_sub_data.get("applied_truncation", False) # <--- ADD THIS
+            flat_applied_rolling = best_sub_data.get("applied_rolling", False)       # <--- ADD THIS
             final_error_red = False
             final_error_evidence = ""
             final_error_type = ""
@@ -1551,8 +1611,12 @@ def main():
                             needs_rolling_capture = False
                             print("    -> [Next Retry Status] Missing words, but '...' detected. This text is statically truncated. Normal retry is enough.")
                     else:
-                        needs_rolling_capture = True
-                        print("    -> [Next Retry Status] Missing words and no '...' detected. Text may be rolling. Triggering Rolling Batch Capture!")
+                        # --- GATE ROLLING BEHIND THE ENABLE ARGUMENT ---
+                        if args.enable_rolling:
+                            needs_rolling_capture = True
+                            print("    -> [Next Retry Status] Missing words and no '...' detected. Text may be rolling. Triggering Rolling Batch Capture!")
+                        else:
+                            needs_rolling_capture = False
                 else:
                     # REMOVED: needs_rolling_capture = False 
                     # If it was already True from a previous attempt, leave it True!
@@ -1574,9 +1638,10 @@ def main():
                     "final_language": final_language,
                     "exp_target": exp_target,
                     "flat_obs": flat_obs,
-                    "flat_exp": flat_exp
+                    "flat_exp": flat_exp,
+                    "final_applied_truncation": flat_applied_truncation, # <--- ADD THIS
+                    "final_applied_rolling": flat_applied_rolling        # <--- ADD THIS
                 }
-
             if verdict == "PASS":
                 break
 
@@ -1594,7 +1659,8 @@ def main():
             exp_target = best_attempt_data["exp_target"]
             flat_obs = best_attempt_data["flat_obs"]
             flat_exp = best_attempt_data["flat_exp"]
-
+            final_applied_truncation = best_attempt_data.get("final_applied_truncation", False) # <--- ADD THIS
+            final_applied_rolling = best_attempt_data.get("final_applied_rolling", False)       # <--- ADD THIS
         observed_display = flat_obs 
         
         exp_lines = [
@@ -1626,8 +1692,18 @@ def main():
             
             error_msg_display = f"[{err_type_str} ERROR: {words_str}]"
             print(error_msg_display)
-        
+            
+        # --- NEW TRUNCATION/ROLLING TAGS GO HERE (Aligned with the 'if' above) ---
+        if final_applied_truncation:
+            tag_str = "[Word is truncated (...)]"
+            error_msg_display = tag_str if not error_msg_display else f"{error_msg_display} | {tag_str}"
+            
+        if final_applied_rolling:
+            tag_str = "[Word is rolling (...)]"
+            error_msg_display = tag_str if not error_msg_display else f"{error_msg_display} | {tag_str}"
+
         if verdict in ["FAIL", "WARN"]:
+            # ... rest of the code ...
             mismatch_reason = ""
             if len(flat_obs) > len(flat_exp) and flat_exp.lower() in flat_obs.lower():
                 extra_text = re.sub(re.escape(flat_exp), "", flat_obs, flags=re.IGNORECASE).strip()

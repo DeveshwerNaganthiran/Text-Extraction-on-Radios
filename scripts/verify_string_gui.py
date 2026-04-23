@@ -437,6 +437,10 @@ class VerifyStringGUI:
         self.camera_id_var = tk.StringVar(value=str(self._settings.get("camera_id") or "1"))
         self.save_log_var = tk.BooleanVar(value=bool(self._settings.get("save_log", False)))
         self.log_path_var = tk.StringVar(value=str(self._settings.get("log_path") or ""))
+        
+        # --- ADD THESE TWO LINES ---
+        self.enable_rolling_var = tk.BooleanVar(value=bool(self._settings.get("enable_rolling", False)))
+        self.enable_truncation_var = tk.BooleanVar(value=bool(self._settings.get("enable_truncation", False)))
         self._log_fp = None
         self._log_session_dir = None
 
@@ -447,6 +451,11 @@ class VerifyStringGUI:
         self.camera_combo = ttk.Combobox(extras, textvariable=self.camera_id_var, width=35, state="readonly")
         self.camera_combo.pack(side=tk.LEFT)
         tk.Button(extras, text="Refresh", command=self.refresh_cameras).pack(side=tk.LEFT, padx=(6, 0))
+        
+        # --- ADD THESE TWO CHECKBOXES ---
+        tk.Checkbutton(extras, text="Rolling Text", variable=self.enable_rolling_var).pack(side=tk.LEFT, padx=(12, 0))
+        tk.Checkbutton(extras, text="Truncation (...)", variable=self.enable_truncation_var).pack(side=tk.LEFT, padx=(6, 0))
+        
         tk.Checkbutton(extras, text="Save log", variable=self.save_log_var).pack(side=tk.LEFT, padx=(12, 0))
         tk.Entry(extras, textvariable=self.log_path_var, width=28).pack(side=tk.LEFT, padx=(6, 0))
         tk.Button(extras, text="Browse...", command=self.browse_log).pack(side=tk.LEFT, padx=(6, 0))
@@ -1398,6 +1407,8 @@ class VerifyStringGUI:
             "model_path": (self.model_path_var.get() or "").strip(),
             "camera_id": camera_id,
             "save_log": bool(self.save_log_var.get()),
+            "enable_rolling": bool(self.enable_rolling_var.get()),     # <-- ADD THIS
+            "enable_truncation": bool(self.enable_truncation_var.get()), # <-- ADD THIS
             "log_path": (self.log_path_var.get() or "").strip(),
             "integration_enable": bool(self.integration_enable_var.get()),
             "integration_type": (self.integration_type_var.get() or "CommG"),
@@ -1582,6 +1593,12 @@ class VerifyStringGUI:
 
         if tag: cmd += ["--tag", tag]
         if idx: cmd += ["--index", idx]
+        
+        # --- ADD THESE FLAGS IF ENABLED ---
+        if self.enable_rolling_var.get():
+            cmd += ["--enable-rolling"]
+        if self.enable_truncation_var.get():
+            cmd += ["--enable-truncation"]
 
         if getattr(self, "_commg_is_active_run", False) and hasattr(self, "_current_batch_cmds"):
             cmd += ["--command", ",".join(self._current_batch_cmds)]
