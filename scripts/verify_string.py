@@ -1170,7 +1170,7 @@ def main():
         # -------------------------------------------------------------------------
 
 
-        max_retries = 6
+        max_retries = 4
         best_conf = -1.0
         best_attempt_data = None
         seen_observations = set()
@@ -1178,7 +1178,7 @@ def main():
         # CRITICAL FIX: Save the exact image used
         best_roi_for_saving = roi.copy()
         
-        progressive_dims = [450, 600, 800, 800, 1000]
+        progressive_dims = [1000, 1300, 1600]
         
         try:
             if ocr is not None: del ocr
@@ -1188,6 +1188,7 @@ def main():
         for attempt in range(max_retries):
             retry_roi = roi.copy()
             used_rolling_this_attempt = False
+            is_physically_rolling = False  # <--- ADD THIS
             
             if attempt > 0:
                 print(f"\n[RETRY {attempt}/{max_retries-1}] Verification failed. Simulating full restart...")
@@ -1211,8 +1212,10 @@ def main():
                         while time.time() < t_end_capture:
                             ok, f = cap.read()
                             if ok and f is not None:
-                                # Determine the gap: 0.3s for the second frame, 0.2s for the rest
-                                required_interval = 0.1 if len(retry_burst) == 1 else 0.1
+                                # --- FIX: Widen the capture window to 7 seconds to catch the full scrolling loop ---
+                                # 20 frames * 0.1s = 7.0 seconds of real-time recording.
+                                # This guarantees the start of the word loops back into the camera's view!
+                                required_interval = 0.14
                                 
                                 if time.time() - last_save >= required_interval:
                                     retry_burst.append(f.copy())
@@ -1230,35 +1233,54 @@ def main():
                                 except Exception: pass
                                 
                             if crops:
-                                # GRID STITCHING (4 columns, 5 rows)
+                                # --- NEW: Verify if frames are actually different (text is rolling) ---
+                                try:
+                                    # Moderate blur to destroy screen flicker, but preserve thin text
+                                    gray_base = cv2.GaussianBlur(cv2.cvtColor(crops[0], cv2.COLOR_BGR2GRAY), (7, 7), 0)
+                                    for c_img in crops[1:]:
+                                        gray_curr = cv2.GaussianBlur(cv2.cvtColor(c_img, cv2.COLOR_BGR2GRAY), (7, 7), 0)
+                                        diff = cv2.absdiff(gray_base, gray_curr)
+                                        
+                                        # Threshold high enough to ignore LCD moire, but low enough to catch letters
+                                        _, thresh = cv2.threshold(diff, 35, 255, cv2.THRESH_BINARY)
+                                        
+                                        # Text is thin. If just 0.8% of the screen pixels changed, text is moving!
+                                        if (np.count_nonzero(thresh) / float(thresh.size)) > 0.008: 
+                                            is_physically_rolling = True
+                                            break
+                                except Exception: pass
+
+                                # --- FIX: 16-IMAGE (4x4) GRID FOR MAXIMUM ROLLING COVERAGE ---
+                                num_frames = 16
+                                if len(crops) > num_frames:
+                                    indices = np.linspace(0, len(crops) - 1, num_frames).astype(int)
+                                    display_crops = [crops[i] for i in indices]
+                                else:
+                                    display_crops = crops
+                                    
+                                # Add borders to each crop
                                 border = 6
-                                bordered_crops = []
-                                for c in crops:
-                                    bc = cv2.copyMakeBorder(c, border, border, border, border, cv2.BORDER_CONSTANT, value=[255, 255, 255])
-                                    bordered_crops.append(bc)
+                                bordered_crops = [cv2.copyMakeBorder(c, border, border, border, border, cv2.BORDER_CONSTANT, value=[255, 255, 255]) for c in display_crops]
                                 
-                                # Make sure we have a multiple of 4 to form even columns
-                                while len(bordered_crops) % 4 != 0:
-                                    bordered_crops.pop()
+                                # Make sure we have exactly 16 frames to complete the grid
+                                while len(bordered_crops) < 16:
+                                    bordered_crops.append(np.ones_like(bordered_crops[0]) * 255)
+                                
+                                # Stitch into a 4-Column x 4-Row Grid
+                                row1 = cv2.hconcat([bordered_crops[0], bordered_crops[1], bordered_crops[2], bordered_crops[3]])
+                                row2 = cv2.hconcat([bordered_crops[4], bordered_crops[5], bordered_crops[6], bordered_crops[7]])
+                                row3 = cv2.hconcat([bordered_crops[8], bordered_crops[9], bordered_crops[10], bordered_crops[11]])
+                                row4 = cv2.hconcat([bordered_crops[12], bordered_crops[13], bordered_crops[14], bordered_crops[15]])
+                                grid_roi = cv2.vconcat([row1, row2, row3, row4])
+                                
+                                # Cap the maximum dimension to 1200px to keep text clear but file size safe
+                                gh, gw = grid_roi.shape[:2]
+                                safe_grid_dim = 1200
+                                if max(gh, gw) > safe_grid_dim:
+                                    scale_f = safe_grid_dim / float(max(gh, gw))
+                                    grid_roi = cv2.resize(grid_roi, (int(gw * scale_f), int(gh * scale_f)), interpolation=cv2.INTER_AREA)
                                     
-                                if bordered_crops:
-                                    rows_per_col = len(bordered_crops) // 4
-                                    col1 = cv2.vconcat(bordered_crops[:rows_per_col])
-                                    col2 = cv2.vconcat(bordered_crops[rows_per_col:2*rows_per_col])
-                                    col3 = cv2.vconcat(bordered_crops[2*rows_per_col:3*rows_per_col])
-                                    col4 = cv2.vconcat(bordered_crops[3*rows_per_col:])
-                                    
-                                    # Combine the 4 columns horizontally
-                                    grid_roi = cv2.hconcat([col1, col2, col3, col4])
-                                    
-                                    # FORCE 1:1 ASPECT RATIO PADDING
-                                    gh, gw = grid_roi.shape[:2]
-                                    max_dim = max(gh, gw)
-                                    top = (max_dim - gh) // 2
-                                    bottom = max_dim - gh - top
-                                    left = (max_dim - gw) // 2
-                                    right = max_dim - gw - left
-                                    retry_roi = cv2.copyMakeBorder(grid_roi, top, bottom, left, right, cv2.BORDER_CONSTANT, value=[0, 0, 0])
+                                retry_roi = grid_roi
                     else:
                         best_f = None
                         max_b = -1
@@ -1303,14 +1325,21 @@ def main():
                 text = "Detected text(original): " 
                 _conf = 0.0
             else:
-                if used_rolling_this_attempt:
-                    pass_hint = f"HINT: The image contains a 2-column grid of screenshots showing a scrolling screen. Read down the left column, then the right."
+                # --- FIX: STRICT ANTI-AUTOCOMPLETE & ROLLING HINTS ---
+                if active_targets:
+                    exp_str = active_targets[0]["exp_target"]
+                    # We inject a critical rule directly into the expected text variable.
+                    # This FORCES the AI to fail Attempt 0 if letters are missing off the edge of the screen,
+                    # ensuring that the Rolling Batch Capture actually triggers!
+                    pass_hint = f"{exp_str}'. CRITICAL RULE: DO NOT AUTOCOMPLETE MISSING LETTERS! If the text is cut off at the edges (e.g. you only see 'inosità non cons'), you MUST output exactly 'inosità non cons'. Do NOT guess the missing letters!"
                 else:
-                    # STRICT MODE: No English hints allowed. AI must read exactly what is physically visible.
                     pass_hint = ""
 
                 # Pass GUI selections so AI has a general idea of allowed alphabets
                 pass_lang = args.language
+                
+                if used_rolling_this_attempt:
+                    pass_lang += ". HINT: The image contains a 4x4 grid of screenshots showing a scrolling screen. Read the text from left-to-right, top-to-bottom."
 
                 # --- FAST INTERCEPT FOR GENAI SAFETY REFUSALS ---
                 inner_refusals = 0
@@ -1478,7 +1507,7 @@ def main():
 
                     # --- NEW: STATIC REPEATING TEXT FIX (GRID CATCHER) ---
                     # If the text is fully static but got repeated in the 20-frame grid capture
-                    if used_rolling_this_attempt and corrected_obs != flat_exp:
+                    if used_rolling_this_attempt and not is_physically_rolling and corrected_obs != flat_exp:
                         clean_obs = corrected_obs.replace(" ", "")
                         clean_exp = flat_exp.replace(" ", "")
                         
@@ -1497,7 +1526,8 @@ def main():
                             # Do NOT set t_applied_rolling because the text was not genuinely scrambled
                             
                     # Fragment Summation Math Algorithm
-                    if used_rolling_this_attempt and corrected_obs != flat_exp:
+                    # ONLY run if batch capture triggered AND images are physically different
+                    if used_rolling_this_attempt and is_physically_rolling and corrected_obs != flat_exp:
                         clean_exp = flat_exp.replace(" ", "")
                         clean_obs = corrected_obs.replace(" ", "")
                         

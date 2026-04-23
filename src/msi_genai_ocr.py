@@ -914,7 +914,6 @@ class MSIGenAIOCR:
             ("H1A X", ""),
             ("J H1 AX", ""),
             ("H I A", ""),
-            ("HIA", ""),
             ("H1A", ""),
             ("H l A", ""),  # lowercase L
             ("DTETT", "DETT"),
