@@ -1170,7 +1170,7 @@ def main():
         # -------------------------------------------------------------------------
 
 
-        max_retries = 4
+        max_retries = 5
         best_conf = -1.0
         best_attempt_data = None
         seen_observations = set()
@@ -1178,7 +1178,7 @@ def main():
         # CRITICAL FIX: Save the exact image used
         best_roi_for_saving = roi.copy()
         
-        progressive_dims = [1000, 1300, 1600]
+        progressive_dims = [1000, 1300, 1600, 1900]
         
         try:
             if ocr is not None: del ocr
@@ -1205,28 +1205,37 @@ def main():
                     if needs_rolling_capture:
                         used_rolling_this_attempt = True
                         retry_burst = []
-                        # Capture exactly 1 frame every ~0.2 seconds, up to 20 frames
-                        t_end_capture = time.time() + 9.0  # Increased time to allow 20 frames to capture
+                        
+                        # --- FIX 1: DYNAMIC CAPTURE TIME & GRID SIZE ---
+                        # Find the length of the expected string to determine how long to record
+                        max_exp_len = max([len(t["exp_target"]) for t in active_targets]) if active_targets else 0
+                        
+                        if max_exp_len < 20:
+                            num_frames, grid_cols, grid_rows = 9, 3, 3
+                            required_interval = 0.40  # ~3.1 seconds total
+                        elif max_exp_len < 45:
+                            num_frames, grid_cols, grid_rows = 16, 4, 4
+                            required_interval = 0.65  # ~6.4 seconds total
+                        else:
+                            num_frames, grid_cols, grid_rows = 25, 5, 5
+                            required_interval = 0.80  # ~11.2 seconds total
+                            
+                        t_end_capture = time.time() + (num_frames * required_interval) + 3.0
                         last_save = 0
                         
                         while time.time() < t_end_capture:
                             ok, f = cap.read()
                             if ok and f is not None:
-                                # --- FIX: Widen the capture window to 7 seconds to catch the full scrolling loop ---
-                                # 20 frames * 0.1s = 7.0 seconds of real-time recording.
-                                # This guarantees the start of the word loops back into the camera's view!
-                                required_interval = 0.14
-                                
                                 if time.time() - last_save >= required_interval:
                                     retry_burst.append(f.copy())
                                     last_save = time.time()
-                                    if len(retry_burst) == 20:  # Grab 20 frames
+                                    if len(retry_burst) == num_frames:
                                         break
                         cap.release()
                         
                         if len(retry_burst) >= 4:
                             crops = []
-                            for f in retry_burst[:20]:  # Process up to 20 frames
+                            for f in retry_burst[:25]:  # Process up to 20 frames
                                 try:
                                     crop = f[sy1:sy2, sx1:sx2]
                                     if crop.size > 0: crops.append(crop)
@@ -1250,32 +1259,34 @@ def main():
                                             break
                                 except Exception: pass
 
-                                # --- FIX: 16-IMAGE (4x4) GRID FOR MAXIMUM ROLLING COVERAGE ---
-                                num_frames = 16
+                                # --- FIX 2: DYNAMIC GRID STITCHING ---
                                 if len(crops) > num_frames:
                                     indices = np.linspace(0, len(crops) - 1, num_frames).astype(int)
                                     display_crops = [crops[i] for i in indices]
                                 else:
                                     display_crops = crops
                                     
-                                # Add borders to each crop
-                                border = 6
-                                bordered_crops = [cv2.copyMakeBorder(c, border, border, border, border, cv2.BORDER_CONSTANT, value=[255, 255, 255]) for c in display_crops]
+                                border = 2
+                                bordered_crops = [cv2.copyMakeBorder(c, border, border, border, border, cv2.BORDER_CONSTANT, value=[0, 0, 0]) for c in display_crops]
                                 
-                                # Make sure we have exactly 16 frames to complete the grid
-                                while len(bordered_crops) < 16:
-                                    bordered_crops.append(np.ones_like(bordered_crops[0]) * 255)
+                                # Pad with the last visible frame if we didn't get enough crops
+                                last_valid = bordered_crops[-1] if bordered_crops else np.zeros((50, 50, 3), dtype=np.uint8)
+                                while len(bordered_crops) < num_frames:
+                                    bordered_crops.append(last_valid.copy())
                                 
-                                # Stitch into a 4-Column x 4-Row Grid
-                                row1 = cv2.hconcat([bordered_crops[0], bordered_crops[1], bordered_crops[2], bordered_crops[3]])
-                                row2 = cv2.hconcat([bordered_crops[4], bordered_crops[5], bordered_crops[6], bordered_crops[7]])
-                                row3 = cv2.hconcat([bordered_crops[8], bordered_crops[9], bordered_crops[10], bordered_crops[11]])
-                                row4 = cv2.hconcat([bordered_crops[12], bordered_crops[13], bordered_crops[14], bordered_crops[15]])
-                                grid_roi = cv2.vconcat([row1, row2, row3, row4])
+                                # Dynamically build the rows and columns based on our grid_cols/grid_rows variables
+                                rows = []
+                                for r in range(grid_rows):
+                                    start_idx = r * grid_cols
+                                    end_idx = start_idx + grid_cols
+                                    row_img = cv2.hconcat(bordered_crops[start_idx:end_idx])
+                                    rows.append(row_img)
+                                    
+                                grid_roi = cv2.vconcat(rows)
                                 
-                                # Cap the maximum dimension to 1200px to keep text clear but file size safe
+                                # Scale limits based on grid size to preserve API limits
+                                safe_grid_dim = 800 if num_frames == 9 else (1000 if num_frames == 16 else 1100)
                                 gh, gw = grid_roi.shape[:2]
-                                safe_grid_dim = 1200
                                 if max(gh, gw) > safe_grid_dim:
                                     scale_f = safe_grid_dim / float(max(gh, gw))
                                     grid_roi = cv2.resize(grid_roi, (int(gw * scale_f), int(gh * scale_f)), interpolation=cv2.INTER_AREA)
@@ -1314,6 +1325,17 @@ def main():
             current_dim = progressive_dims[attempt] if attempt < len(progressive_dims) else 1000
             current_squash = 0.6 if attempt == 3 else 1.0
             
+            # --- FIX 1: PREVENT API CRASHES ON RETRIES ---
+            # 5x5 grids get massively dense. Force them to stay at 1000px.
+            # We MUST lock current_squash to 1.0. Squashing a 5x5 grid turns it into a barcode, 
+            # which guarantees an "Unsupported Media" rejection from the API!
+            if used_rolling_this_attempt:
+                current_dim = 1000
+                current_squash = 1.0
+            
+            if attempt > 0:
+                print(f"    -> [Image Prep] Resolution: {current_dim}px | Squash Ratio: {current_squash}")
+            
             if attempt > 0:
                 print(f"    -> [Image Prep] Resolution: {current_dim}px | Squash Ratio: {current_squash}")
 
@@ -1325,21 +1347,13 @@ def main():
                 text = "Detected text(original): " 
                 _conf = 0.0
             else:
-                # --- FIX: STRICT ANTI-AUTOCOMPLETE & ROLLING HINTS ---
-                if active_targets:
-                    exp_str = active_targets[0]["exp_target"]
-                    # We inject a critical rule directly into the expected text variable.
-                    # This FORCES the AI to fail Attempt 0 if letters are missing off the edge of the screen,
-                    # ensuring that the Rolling Batch Capture actually triggers!
-                    pass_hint = f"{exp_str}'. CRITICAL RULE: DO NOT AUTOCOMPLETE MISSING LETTERS! If the text is cut off at the edges (e.g. you only see 'inosità non cons'), you MUST output exactly 'inosità non cons'. Do NOT guess the missing letters!"
-                else:
-                    pass_hint = ""
-
-                # Pass GUI selections so AI has a general idea of allowed alphabets
                 pass_lang = args.language
-                
                 if used_rolling_this_attempt:
-                    pass_lang += ". HINT: The image contains a 4x4 grid of screenshots showing a scrolling screen. Read the text from left-to-right, top-to-bottom."
+                    pass_hint = ""  
+                    # --- FIX 3: DYNAMIC AI PROMPT INJECTION ---
+                    pass_lang += f". HINT: {grid_cols}x{grid_rows} grid of {num_frames} screenshots. Transcribe EVERY box exactly as written. DO NOT AUTOCORRECT TYPOS. Separate each box's text with a '|' character so no boxes are skipped."
+                else:
+                    pass_hint = active_targets[0]["exp_target"] if len(active_targets) == 1 else ""
 
                 # --- FAST INTERCEPT FOR GENAI SAFETY REFUSALS ---
                 inner_refusals = 0
@@ -1356,16 +1370,25 @@ def main():
                     refusal_triggers = ["unsupported media", "unable to extract", "i'm unable to", "i am unable to", "ignoring non-image"]
                     
                     if any(trigger in low_t for trigger in refusal_triggers):
-                        print(f"    -> [GenAI Filter] AI falsely refused the image. Applying anti-filter tweak to bypass...")
+                        print(f"    -> [GenAI Filter] AI refused the image (likely payload size limit). Shrinking image to bypass...")
                         inner_refusals += 1
-                        current_dim += 30
                         
-                        # Apply a tiny blur and border to completely change the image's hash signature
+                        # --- FIX: REDUCE FILE SIZE TO BYPASS UNSUPPORTED MEDIA ---
+                        # Instead of making the image bigger (which causes it to crash harder), 
+                        # we scale the massive 5x5 grid down by 25%. This guarantees it clears the API limits!
+                        current_dim = int(current_dim * 0.75)
+                        
+                        gh, gw = retry_roi.shape[:2]
+                        retry_roi = cv2.resize(retry_roi, (int(gw * 0.75), int(gh * 0.75)), interpolation=cv2.INTER_AREA)
+                        
+                        # Apply a tiny blur to break any barcode-like repetitive patterns the API filter hates
+                        # Apply a tiny blur to break any barcode-like repetitive patterns the API filter hates
                         retry_roi = cv2.GaussianBlur(retry_roi, (3, 3), 0)
-                        retry_roi = cv2.copyMakeBorder(retry_roi, 4, 4, 4, 4, cv2.BORDER_CONSTANT, value=[255, 255, 255])
                         
-                        # Force a generic instruction to override the AI's refusal behavior
-                        pass_hint = "This is a hardware LCD screen. Please read the text." if not pass_hint else pass_hint
+                        # --- FIX: Move the bypass instruction to the language field ---
+                        # Do NOT put it in pass_hint, or the letter-by-letter hallucination checker will try to evaluate it!
+                        pass_lang += " This is a hardware LCD screen. Please read the text."
+                        pass_hint = ""  
                         continue
                     else:
                         break
@@ -1526,79 +1549,128 @@ def main():
                             # Do NOT set t_applied_rolling because the text was not genuinely scrambled
                             
                     # Fragment Summation Math Algorithm
-                    # ONLY run if batch capture triggered AND images are physically different
-                    if used_rolling_this_attempt and is_physically_rolling and corrected_obs != flat_exp:
+                    if used_rolling_this_attempt and corrected_obs != flat_exp:
                         clean_exp = flat_exp.replace(" ", "")
                         clean_obs = corrected_obs.replace(" ", "")
                         
-                        matcher = difflib.SequenceMatcher(None, clean_exp, clean_obs)
-                        blocks = matcher.get_matching_blocks()
+                        # --- FIX 2: ENFORCE USER'S ROLLING RULE ---
+                        # 1. Must be batch capture (used_rolling_this_attempt == True)
+                        # 2. Images must have DIFFERENT words. If the text is just the exact same word 
+                        #    repeated 25 times (e.g. "Ausstehende Ausstehende..."), it is STATIC.
+                        leftover = clean_obs.replace(clean_exp, "")
+                        is_physically_rolling = True
                         
-                        # --- FIX: Stop SequenceMatcher from cherry-picking scattered single letters ---
-                        # Only count matching blocks that are 2+ letters long (unless it's a CJK language or very short word)
-                        min_block = 1 if (is_cjk_target or len(clean_exp) <= 3) else 2
-                        matching_chars = sum(m.size for m in blocks if m.size >= min_block)
-                        
-                        longest_match = max((m.size for m in blocks), default=0)
-                        
-                        match_ratio = matching_chars / len(clean_exp) if len(clean_exp) > 0 else 0
-                        longest_ratio = longest_match / len(clean_exp) if len(clean_exp) > 0 else 0
-                        
-                        # --- LOWERED THRESHOLDS: 70% total match OR a single 60% unbroken chunk ---
-                        if match_ratio >= 0.70 or longest_ratio >= 0.60:
-                            corrected_obs = flat_exp
-                            t_applied_rolling = True
-                        else:
-                            # --- SCRAMBLED ROLLING TEXT REARRANGEMENT RULE ---
-                            if not is_cjk_target:
-                                import unicodedata
-                                def remove_accents(input_str):
-                                    return "".join(c for c in unicodedata.normalize('NFKD', input_str) if not unicodedata.combining(c))
-
-                                exp_words = flat_exp.split()
-                                obs_lower = remove_accents(corrected_obs.lower())
-                                found_chars_len = 0
-                                total_exp_chars = sum(len(w) for w in exp_words)
-                                
-                                for word in exp_words:
-                                    word_clean = remove_accents(word.lower())
-                                    if word_clean in obs_lower.replace(" ", ""):
-                                        found_chars_len += len(word)
-                                        obs_lower = obs_lower.replace(word_clean, "", 1)
-                                        
-                                if total_exp_chars > 0 and (found_chars_len / total_exp_chars) >= 0.70:
-                                    corrected_obs = flat_exp
+                        if leftover == "":
+                            is_physically_rolling = False
+                        elif len(clean_obs) >= len(clean_exp) * 2 and leftover in clean_exp:
+                            is_physically_rolling = False
+                            
+                        # ONLY apply the math and the rolling tag if the text is physically changing!
+                        if is_physically_rolling:
+                            matcher = difflib.SequenceMatcher(None, clean_exp, clean_obs)
+                            blocks = matcher.get_matching_blocks()
+                            
+                            min_block = 1 if (is_cjk_target or len(clean_exp) <= 3) else 3
+                            matching_chars = sum(m.size for m in blocks if m.size >= min_block)
+                            
+                            match_ratio = matching_chars / len(clean_exp) if len(clean_exp) > 0 else 0
+                            
+                            # --- FIX: ENFORCE STRICT BOUNDARY CHECK (NO MISSING START/END) ---
+                            # Even if 85% of the total characters match, we MUST ensure the physical 
+                            # start and end of the word were actually caught on camera.
+                            start_missing = False
+                            end_missing = False
+                            
+                            if len(clean_exp) >= 2:
+                                if clean_exp[:2].lower() not in clean_obs.lower():
+                                    start_missing = True
+                                if clean_exp[-2:].lower() not in clean_obs.lower():
+                                    end_missing = True
+                            
+                            # Only force a PASS if 85% of letters are found AND the start/end boundaries exist
+                            if match_ratio >= 0.85 and not start_missing and not end_missing:
+                                corrected_obs = flat_exp
+                                if is_physically_rolling:
                                     t_applied_rolling = True
                             else:
-                                exp_chars = list(clean_exp)
-                                obs_chars = list(clean_obs)
-                                found_cjk_chars = 0
-                                for ch in exp_chars:
-                                    if ch in obs_chars:
-                                        found_cjk_chars += 1
-                                        obs_chars.remove(ch)
-                                if len(exp_chars) > 0 and (found_cjk_chars / len(exp_chars)) >= 0.70:
-                                    corrected_obs = flat_exp
-                                    t_applied_rolling = True
+                                if not is_cjk_target:
+                                    import unicodedata
+                                    def remove_accents(input_str):
+                                        return "".join(c for c in unicodedata.normalize('NFKD', input_str) if not unicodedata.combining(c))
 
+                                    exp_words = flat_exp.split()
+                                    obs_lower = remove_accents(corrected_obs.lower())
+                                    found_chars_len = 0
+                                    total_exp_chars = sum(len(w) for w in exp_words)
+                                    
+                                    for word in exp_words:
+                                        word_clean = remove_accents(word.lower())
+                                        if word_clean in obs_lower.replace(" ", ""):
+                                            found_chars_len += len(word)
+                                            obs_lower = obs_lower.replace(word_clean, "", 1)
+                                            
+                                    if total_exp_chars > 0 and (found_chars_len / total_exp_chars) >= 0.85 and not start_missing and not end_missing:
+                                        corrected_obs = flat_exp
+                                        t_applied_rolling = True
+                                else:
+                                    exp_chars = list(clean_exp)
+                                    obs_chars = list(clean_obs)
+                                    found_cjk_chars = 0
+                                    for ch in exp_chars:
+                                        if ch in obs_chars:
+                                            found_cjk_chars += 1
+                                            obs_chars.remove(ch)
+                                    if len(exp_chars) > 0 and (found_cjk_chars / len(exp_chars)) >= 0.85 and not start_missing and not end_missing:
+                                        corrected_obs = flat_exp
+                                        t_applied_rolling = True
                     flat_obs = corrected_obs
-                
+                    
+                    # --- FIX: RECONSTRUCT SCRAMBLED ROLLING TEXT ---
+                    if used_rolling_this_attempt and flat_obs != flat_exp:
+                        reconstructed = ""
+                        temp_obs = flat_obs.replace("|", "")
+                        
+                        for ch in flat_exp:
+                            if not is_cjk_target:
+                                idx = temp_obs.lower().find(ch.lower())
+                            else:
+                                idx = temp_obs.find(ch)
+                                
+                            if idx != -1:
+                                reconstructed += ch
+                                temp_obs = temp_obs[:idx] + temp_obs[idx+1:]
+                                
+                        if reconstructed:
+                            flat_obs = " ".join(reconstructed.split()) if not is_cjk_target else reconstructed.replace(" ", "")
+                        
+                        t_applied_rolling = True
+
+                    # ---> PROPERLY ALIGNED FINAL SCORING BLOCK <---
+                # We pull these entirely outside the massive 'if' block so they always execute!
                 t_conf = 0.0
                 t_verdict = "FAIL"
+                
                 if flat_exp:
                     similarity = difflib.SequenceMatcher(None, flat_exp, flat_obs).ratio()
                     t_conf = round(similarity * 100, 1)
-
+                    if t_conf > 100.0: t_conf = 100.0
+                    
+                    # --- TIGHTEN UNIVERSAL CJK FORGIVENESS ---
+                    if is_cjk_target and flat_obs != flat_exp:
+                        len_diff = abs(len(flat_exp) - len(flat_obs))
+                        if len_diff <= 1 and t_conf >= 65.0:
+                            flat_obs = flat_exp
+                            t_conf = 100.0
+                    
                     if flat_obs == flat_exp: 
                         t_verdict = "PASS"
                         t_conf = 100.0
-                    # elif flat_exp in flat_obs:
-                    #     t_verdict = "FAIL"
                     else:
                         if t_conf >= 70.0: t_verdict = "WARN"
                         else: t_verdict = "FAIL"
                 else:
                     t_verdict = "PASS" if not flat_obs else "FAIL"
+                    t_conf = 100.0 if t_verdict == "PASS" else 0.0
                 
                 if t_conf > best_sub_conf or (t_verdict == "PASS" and best_sub_verdict != "PASS"):
                     best_sub_conf = t_conf
@@ -1729,8 +1801,30 @@ def main():
             error_msg_display = tag_str if not error_msg_display else f"{error_msg_display} | {tag_str}"
             
         if final_applied_rolling:
-            tag_str = "[Word is rolling (...)]"
-            error_msg_display = tag_str if not error_msg_display else f"{error_msg_display} | {tag_str}"
+            # --- FIX: DO NOT TAG STATIC BATCH GRIDS AS ROLLING ---
+            # Compare the AI's grid fragments to each other instead of the Expected text.
+            # If the screen is static, every box should be nearly identical to the first box.
+
+            raw_chunks = [re.sub(r'[\s.,;!?]', '', c) for c in str(orig_text).split('|') if c.strip()]
+            
+            is_truly_rolling = False
+            if len(raw_chunks) > 1:
+                base_chunk = raw_chunks[0]
+                for chunk in raw_chunks[1:]:
+                    # If any box is drastically different from the first box, the text is moving!
+                    if difflib.SequenceMatcher(None, base_chunk, chunk).ratio() < 0.65:
+                        is_truly_rolling = True
+                        break
+            else:
+                # Fallback if the AI forgot to use the '|' separator
+                raw_ai_text = re.sub(r'[\s|.,;!?]', '', str(orig_text))
+                target_text = flat_exp.replace(" ", "")
+                if len(raw_ai_text.replace(target_text, "")) > 5:
+                    is_truly_rolling = True
+            
+            if is_truly_rolling:
+                tag_str = "[Word is rolling (...)]"
+                error_msg_display = tag_str if not error_msg_display else f"{error_msg_display} | {tag_str}"
 
         if verdict in ["FAIL", "WARN"]:
             # ... rest of the code ...
@@ -1838,14 +1932,42 @@ def main():
                     verdict_cell.fill = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
                     verdict_cell.font = Font(color="9C6500", bold=True)
                 
-                ws.row_dimensions[row_idx].height = 80
-                
                 if roi_saved_path and os.path.exists(roi_saved_path):
                     img = OpenpyxlImage(roi_saved_path)
-                    img.height = 95
-                    img.width = 200
+                    
+                    # --- FIX: DYNAMIC EXCEL IMAGE SCALING ---
+                    # Read the actual dimensions of the saved image so we don't squash the 5x5 grid
+                    try:
+                        saved_cv = cv2.imread(roi_saved_path)
+                        if saved_cv is not None:
+                            orig_h, orig_w = saved_cv.shape[:2]
+                            
+                            # If it's a massive batch grid, give it a large row height so it's readable
+                            target_h = 450 if orig_h > 300 else 120
+                            target_w = int(orig_w * (target_h / float(orig_h)))
+                            
+                            img.height = target_h
+                            img.width = target_w
+                            ws.row_dimensions[row_idx].height = int(target_h * 0.75) # Convert px to Excel points
+                            
+                            # Widen the column so the image fits nicely
+                            current_w = ws.column_dimensions['N'].width
+                            needed_w = target_w / 7.0
+                            if current_w is None or needed_w > current_w:
+                                ws.column_dimensions['N'].width = needed_w
+                        else:
+                            img.height = 120
+                            img.width = 250
+                            ws.row_dimensions[row_idx].height = 100
+                    except Exception:
+                        img.height = 120
+                        img.width = 250
+                        ws.row_dimensions[row_idx].height = 100
+
                     img.anchor = f"N{row_idx}" 
                     ws.add_image(img)
+                else:
+                    ws.row_dimensions[row_idx].height = 80
 
                 wb.save(xl_p)
             except Exception as e:

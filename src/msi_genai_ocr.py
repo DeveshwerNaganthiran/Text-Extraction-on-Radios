@@ -594,16 +594,13 @@ class MSIGenAIOCR:
                         softkey_hint = f"Device has {int(exp_softkeys)} softkey buttons. "
                 except Exception: pass
 
-                # --- NEW: AGGRESSIVE ANTI-AUTOCORRECT VOCAB HINT ---
+                # --- FIX: REMOVE EXACT STRING LEAK TO PREVENT AI CHEATING ---
                 vocab_hint = ""
                 if expected_text and str(expected_text).strip():
                     vocab_hint = (
-                        f"EXPECTED EXACT STRING: '{expected_text}'. \n"
                         "CRITICAL ANTI-AUTOCORRECT WARNING: The text on this screen often contains spelling mistakes, "
-                        "missing vowels, or UI truncation (e.g., missing an 'İ' or 'E'). "
-                        "DO NOT AUTOCORRECT. DO NOT FIX GRAMMAR OR SPELLING. "
-                        "If the physical screen shows a typo like 'KAYDEDLDİ', you MUST output exactly 'KAYDEDLDİ'. "
-                        "If you autocorrect typos to valid dictionary words, the test will fail. Output only the physical pixels.\n"
+                        "missing vowels, or UI truncation. DO NOT AUTOCORRECT. DO NOT FIX GRAMMAR OR SPELLING. "
+                        "Output ONLY the exact physical letters you see. If it is cut off or misspelled, you MUST output the exact misspelling/cut-off.\n"
                     )
                 prompt = (
                     "Extract ALL text from this walkie-talkie screen. Ignore all icons/symbols (♪, battery, power indicators). "
