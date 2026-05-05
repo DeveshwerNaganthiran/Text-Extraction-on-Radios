@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import os
 from loguru import logger
-# or
 import loguru
 import sys
 import time
@@ -1338,9 +1337,6 @@ def main():
             
             if attempt > 0:
                 print(f"    -> [Image Prep] Resolution: {current_dim}px | Squash Ratio: {current_squash}")
-            
-            if attempt > 0:
-                print(f"    -> [Image Prep] Resolution: {current_dim}px | Squash Ratio: {current_squash}")
 
             # Pass only the English text as a generic context reference to avoid hallucination
             hint_str = exp_dict.get("expected_en", "")
@@ -1384,7 +1380,6 @@ def main():
                         gh, gw = retry_roi.shape[:2]
                         retry_roi = cv2.resize(retry_roi, (int(gw * 0.75), int(gh * 0.75)), interpolation=cv2.INTER_AREA)
                         
-                        # Apply a tiny blur to break any barcode-like repetitive patterns the API filter hates
                         # Apply a tiny blur to break any barcode-like repetitive patterns the API filter hates
                         retry_roi = cv2.GaussianBlur(retry_roi, (3, 3), 0)
                         
@@ -1446,7 +1441,7 @@ def main():
                     
                     if is_cjk:
                         c = " ".join(c.split())
-                        # If expected string doesn't contain English letters, strip English letters from observation (fixes hallucinated English in pure CJK)
+                        # If expected string doesn't contain English letters, strip English letters from observation
                         if not any(char.isascii() and char.isalpha() for char in expected_local_n):
                             c = re.sub(r'[A-Za-z]', '', c)
                         return c
@@ -1459,15 +1454,12 @@ def main():
                 flat_exp = _clean_for_compare(expected_local_n, is_cjk_target)
                 
                 # --- FIX: CASE AND ACCENT INSENSITIVITY ---
-                import unicodedata
-                def _strip_accents(s):
-                    return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+                # (Commented out to ensure strict matching - Do NOT uncomment)
+                # def _strip_accents(s):
+                #     return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+                # if _strip_accents(flat_obs.lower()) == _strip_accents(flat_exp.lower()):
+                #     flat_obs = flat_exp 
                 
-                # If they match exactly when converted to lowercase and accents are removed, force a PASS
-                if _strip_accents(flat_obs.lower()) == _strip_accents(flat_exp.lower()):
-                    flat_obs = flat_exp  
-                
-                # --- STRICT EXACT MATCHING ---
                 if flat_exp and flat_obs != flat_exp:
                     corrected_obs = flat_obs
                     
@@ -1482,7 +1474,6 @@ def main():
                         "タイカヘンシン": "クイックヘンシン", "タイカ": "クイック",
                         "발기": "밝기", "받기": "밝기",
                         "흰&라이트커기": "혼&라이트켜기", "흰": "혼", "커기": "켜기",
-                        # Rolling/Optical Illusions
                         "30S": "30ビ", "30L": "30ビ", "ヨウ": "ョウ", 
                         "ピョウ": "ビョウ", "ビヨウ": "ビョウ", "ヒョウ": "ビョウ", "トウ": "ョウ",
                         "ヨ": "ョ", "ヤ": "ャ", "ユ": "ュ"
@@ -1492,100 +1483,45 @@ def main():
                         if bad in corrected_obs and good in flat_exp:
                             corrected_obs = corrected_obs.replace(bad, good)
                     
-                    # --- NEW: SMART TRUNCATION (...) MATCH ---
                     if args.enable_truncation:
                         has_ellipsis = ("..." in flat_obs or "…" in flat_obs or "..." in str(orig_text) or "…" in str(orig_text))
                         if has_ellipsis:
+                            def _strip_accents(s):
+                                return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+
                             obs_no_ellipsis = flat_obs.replace("...", "").replace("…", "").strip()
-                            
-                            # Ignore accents and casing for the truncation check (fixes Össz vs Ossz)
                             obs_compare = _strip_accents(obs_no_ellipsis.lower())
                             exp_compare = _strip_accents(flat_exp.lower())
                             
-                            # MUST be strictly shorter to be considered a truncation (fixes fake tags on perfect matches)
+                            # ONLY set t_applied_truncation here, do NOT explicitly overwrite corrected_obs!
                             if len(obs_compare) < len(exp_compare):
                                 if len(obs_compare) >= 2 and exp_compare.startswith(obs_compare):
-                                    corrected_obs = flat_exp
                                     t_applied_truncation = True
                                 elif is_cjk_target and len(obs_compare) >= 1 and exp_compare.startswith(obs_compare):
-                                    corrected_obs = flat_exp
                                     t_applied_truncation = True
-                                
-                    # --- STRICT UNIVERSAL CJK FORGIVENESS ---
-                    if is_cjk_target and flat_obs != flat_exp:
-                        len_diff = abs(len(flat_exp) - len(flat_obs))
-                        
-                        if len(flat_obs) > len(flat_exp):
-                            pass 
-                        elif len(flat_exp) - len(flat_obs) == 1 and t_conf >= 85.0:
-                            if " " not in flat_exp and " " in flat_obs:
-                                pass
-                            else:
-                                flat_obs = flat_exp
-                                t_conf = 100.0
                     
-                    # # Handle minor cut-offs
-                    # if len(flat_obs) >= 2 and flat_exp.endswith(flat_obs):
-                    #     if len(flat_exp) - len(flat_obs) <= 2:
-                    #         corrected_obs = flat_exp
-
-                    # # Handle minor 1-2 character cut-offs at the edges (safe to allow)
-                    # if len(flat_obs) >= 2 and flat_exp.endswith(flat_obs) and len(flat_exp) - len(flat_obs) <= 2:
-                    #     corrected_obs = flat_exp
-
-                    # # STRICT TRUNCATION RULE: If the AI reads a fragment (start, middle, or end),
-                    # # it MUST make up at least 99% of the expected text length to pass.
-                    # if len(flat_obs) >= 5 and flat_obs in flat_exp:
-                    #     if len(flat_obs) >= int(len(flat_exp) * 0.99):
-                    #         corrected_obs = flat_exp
-
-                    # if is_cjk_target and flat_exp in flat_obs and len(flat_obs) <= len(flat_exp) + 2:
-                    #     corrected_obs = flat_exp
-
                     if is_cjk_target and flat_exp in flat_obs:
                         stripped_obs = re.sub(r'[A-Za-z]', '', flat_obs)
                         if stripped_obs == flat_exp:
                             corrected_obs = flat_exp
 
-                    # --- NEW: STATIC REPEATING TEXT FIX (GRID CATCHER) ---
-                    # If the text is fully static but got repeated in the 20-frame grid capture
+                    # --- FIX: STATIC REPEATING TEXT FIX (GRID CATCHER) ---
+                    # Only applies if text was stitched and repeated due to rolling logic
                     if used_rolling_this_attempt and not is_physically_rolling and corrected_obs != flat_exp:
                         clean_obs = corrected_obs.replace(" ", "")
                         clean_exp = flat_exp.replace(" ", "")
                         
-                        # Remove all full instances of the expected word to see what's left
                         leftover = clean_obs.replace(clean_exp, "")
                         
-                        # If the leftover is empty, or just a small clean fragment of the word, it's static!
                         is_static_repeat = False
                         if leftover == "":
                             is_static_repeat = True
                         elif len(clean_obs) > len(clean_exp) and leftover in clean_exp:
                             is_static_repeat = True
                             
+                        # If the camera stitched static repeated text, we shouldn't fail it.
                         if is_static_repeat:
                             corrected_obs = flat_exp
-                            # Do NOT set t_applied_rolling because the text was not genuinely scrambled
-                            
-                   # --- NEW: STATIC REPEATING TEXT FIX (GRID CATCHER) ---
-                    # If the text is fully static but got repeated in the 20-frame grid capture
-                    if used_rolling_this_attempt and not is_physically_rolling and corrected_obs != flat_exp:
-                        clean_obs = corrected_obs.replace(" ", "")
-                        clean_exp = flat_exp.replace(" ", "")
-                        
-                        # Remove all full instances of the expected word to see what's left
-                        leftover = clean_obs.replace(clean_exp, "")
-                        
-                        # If the leftover is empty, or just a small clean fragment of the word, it's static!
-                        is_static_repeat = False
-                        if leftover == "":
-                            is_static_repeat = True
-                        elif len(clean_obs) > len(clean_exp) and leftover in clean_exp:
-                            is_static_repeat = True
-                            
-                        if is_static_repeat:
-                            corrected_obs = flat_exp
-                            # Do NOT set t_applied_rolling because the text was not genuinely scrambled
                             
                     flat_obs = corrected_obs
                     
@@ -1617,8 +1553,6 @@ def main():
                                         for i in range(match.b, match.b + match.size):
                                             total_matched_chars_in_exp.add(i)
                             
-                            # STRICT RULE 1: NO EXTRA TEXT ALLOWED
-                            # If a frame has letters that don't match the Expected string, FAIL IMMEDIATELY.
                             unmatched_chars = len(chunk_compare) - matched_len_in_chunk
                             allowed_hallucination = 1 if is_cjk_target else 2 
                             
@@ -1626,62 +1560,13 @@ def main():
                                 is_valid_rolling = False
                                 break
                                 
-                        # STRICT RULE 2: COMPLETENESS
                         if is_valid_rolling and len(exp_compare) > 0:
                             coverage_ratio = len(total_matched_chars_in_exp) / len(exp_compare)
                             if coverage_ratio >= 0.90:
-                                flat_obs = flat_exp
+                                # DO NOT override the text to 100%. We only want to set the tag.
                                 t_applied_rolling = True
 
                 # ---> PROPERLY ALIGNED FINAL SCORING BLOCK <---
-                    flat_obs = corrected_obs
-                    
-                    # --- FIX: STRICT ROLLING TEXT VALIDATOR (PENALIZE EXTRA TEXT & ENFORCE SEQUENCE) ---
-                    if used_rolling_this_attempt and flat_obs != flat_exp:
-                        chunks = [c.strip() for c in flat_obs.split("|") if c.strip()]
-                        
-                        clean_exp = flat_exp.replace(" ", "") if is_cjk_target else " ".join(flat_exp.split())
-                        exp_compare = clean_exp.lower() if not is_cjk_target else clean_exp
-                        
-                        is_valid_rolling = True
-                        total_matched_chars_in_exp = set()
-                        
-                        for chunk in chunks:
-                            clean_chunk = chunk.replace(" ", "") if is_cjk_target else " ".join(chunk.split())
-                            chunk_compare = clean_chunk.lower() if not is_cjk_target else clean_chunk
-                            
-                            if not chunk_compare: continue
-                            
-                            matcher = difflib.SequenceMatcher(None, chunk_compare, exp_compare)
-                            blocks = matcher.get_matching_blocks()
-                            
-                            matched_len_in_chunk = 0
-                            for match in blocks:
-                                if match.size > 0:
-                                    min_size = 1 if is_cjk_target else 2
-                                    if match.size >= min_size:
-                                        matched_len_in_chunk += match.size
-                                        for i in range(match.b, match.b + match.size):
-                                            total_matched_chars_in_exp.add(i)
-                            
-                            # STRICT RULE 1: NO EXTRA TEXT ALLOWED
-                            # If a frame has letters that don't match the Expected string, FAIL IMMEDIATELY.
-                            unmatched_chars = len(chunk_compare) - matched_len_in_chunk
-                            allowed_hallucination = 1 if is_cjk_target else 2 
-                            
-                            if unmatched_chars > allowed_hallucination:
-                                is_valid_rolling = False
-                                break
-                                
-                        # STRICT RULE 2: COMPLETENESS
-                        if is_valid_rolling and len(exp_compare) > 0:
-                            coverage_ratio = len(total_matched_chars_in_exp) / len(exp_compare)
-                            if coverage_ratio >= 0.90:
-                                flat_obs = flat_exp
-                                t_applied_rolling = True
-
-                    # ---> PROPERLY ALIGNED FINAL SCORING BLOCK <---
-                # We pull these entirely outside the massive 'if' block so they always execute!
                 t_conf = 0.0
                 t_verdict = "FAIL"
                 
@@ -1690,15 +1575,16 @@ def main():
                     t_conf = round(similarity * 100, 1)
                     if t_conf > 100.0: t_conf = 100.0
                     
-                    # --- STRICT UNIVERSAL CJK FORGIVENESS ---
+                    # --- FIX: STRICT UNIVERSAL CJK FORGIVENESS ---
                     if is_cjk_target and flat_obs != flat_exp:
                         len_diff = abs(len(flat_exp) - len(flat_obs))
-                        
                         if len(flat_obs) > len(flat_exp) + 1:
                             pass 
                         elif len_diff <= 1 and t_conf >= 90.0:
-                            flat_obs = flat_exp
-                            t_conf = 100.0
+                            pass
+                            # DO NOT override here. Let it gracefully fail/warn based on score.
+                            # flat_obs = flat_exp
+                            # t_conf = 100.0
                     
                     if flat_obs == flat_exp: 
                         t_verdict = "PASS"
@@ -1719,8 +1605,8 @@ def main():
                         "exp_target": t_exp,
                         "flat_obs": flat_obs,
                         "flat_exp": flat_exp,
-                        "applied_truncation": t_applied_truncation, # <--- ADD THIS
-                        "applied_rolling": t_applied_rolling        # <--- ADD THIS
+                        "applied_truncation": t_applied_truncation, 
+                        "applied_rolling": t_applied_rolling        
                     }
                 if t_verdict == "PASS":
                     break
@@ -1732,8 +1618,8 @@ def main():
             exp_target = best_sub_data.get("exp_target", "")
             flat_obs = best_sub_data.get("flat_obs", "")
             flat_exp = best_sub_data.get("flat_exp", "")
-            flat_applied_truncation = best_sub_data.get("applied_truncation", False) # <--- ADD THIS
-            flat_applied_rolling = best_sub_data.get("applied_rolling", False)       # <--- ADD THIS
+            flat_applied_truncation = best_sub_data.get("applied_truncation", False) 
+            flat_applied_rolling = best_sub_data.get("applied_rolling", False)       
             final_error_red = False
             final_error_evidence = ""
             final_error_type = ""
@@ -1746,20 +1632,16 @@ def main():
             if verdict != "PASS" and attempt < max_retries - 1:
                 if len(flat_obs) < len(flat_exp):
                     if "..." in str(orig_text) or "…" in str(orig_text) or "..." in flat_obs:
-                        # Only set to False if it hasn't already been triggered
                         if not needs_rolling_capture:
                             needs_rolling_capture = False
                             print("    -> [Next Retry Status] Missing words, but '...' detected. This text is statically truncated. Normal retry is enough.")
                     else:
-                        # --- GATE ROLLING BEHIND THE ENABLE ARGUMENT ---
                         if args.enable_rolling:
                             needs_rolling_capture = True
                             print("    -> [Next Retry Status] Missing words and no '...' detected. Text may be rolling. Triggering Rolling Batch Capture!")
                         else:
                             needs_rolling_capture = False
                 else:
-                    # REMOVED: needs_rolling_capture = False 
-                    # If it was already True from a previous attempt, leave it True!
                     pass
 
             if confidence_pct > best_conf:
@@ -1779,8 +1661,8 @@ def main():
                     "exp_target": exp_target,
                     "flat_obs": flat_obs,
                     "flat_exp": flat_exp,
-                    "final_applied_truncation": flat_applied_truncation, # <--- ADD THIS
-                    "final_applied_rolling": flat_applied_rolling        # <--- ADD THIS
+                    "final_applied_truncation": flat_applied_truncation, 
+                    "final_applied_rolling": flat_applied_rolling        
                 }
             if verdict == "PASS":
                 break
@@ -1799,8 +1681,8 @@ def main():
             exp_target = best_attempt_data["exp_target"]
             flat_obs = best_attempt_data["flat_obs"]
             flat_exp = best_attempt_data["flat_exp"]
-            final_applied_truncation = best_attempt_data.get("final_applied_truncation", False) # <--- ADD THIS
-            final_applied_rolling = best_attempt_data.get("final_applied_rolling", False)       # <--- ADD THIS
+            final_applied_truncation = best_attempt_data.get("final_applied_truncation", False) 
+            final_applied_rolling = best_attempt_data.get("final_applied_rolling", False)       
         observed_display = flat_obs 
         
         exp_lines = [
@@ -1833,28 +1715,21 @@ def main():
             error_msg_display = f"[{err_type_str} ERROR: {words_str}]"
             print(error_msg_display)
             
-        # --- NEW TRUNCATION/ROLLING TAGS GO HERE (Aligned with the 'if' above) ---
         if final_applied_truncation:
             tag_str = "[Word is truncated (...)]"
             error_msg_display = tag_str if not error_msg_display else f"{error_msg_display} | {tag_str}"
             
         if final_applied_rolling:
-            # --- FIX: DO NOT TAG STATIC BATCH GRIDS AS ROLLING ---
-            # Compare the AI's grid fragments to each other instead of the Expected text.
-            # If the screen is static, every box should be nearly identical to the first box.
-
             raw_chunks = [re.sub(r'[\s.,;!?]', '', c) for c in str(orig_text).split('|') if c.strip()]
             
             is_truly_rolling = False
             if len(raw_chunks) > 1:
                 base_chunk = raw_chunks[0]
                 for chunk in raw_chunks[1:]:
-                    # If any box is drastically different from the first box, the text is moving!
                     if difflib.SequenceMatcher(None, base_chunk, chunk).ratio() < 0.65:
                         is_truly_rolling = True
                         break
             else:
-                # Fallback if the AI forgot to use the '|' separator
                 raw_ai_text = re.sub(r'[\s|.,;!?]', '', str(orig_text))
                 target_text = flat_exp.replace(" ", "")
                 if len(raw_ai_text.replace(target_text, "")) > 5:
@@ -1865,7 +1740,6 @@ def main():
                 error_msg_display = tag_str if not error_msg_display else f"{error_msg_display} | {tag_str}"
 
         if verdict in ["FAIL", "WARN"]:
-            # ... rest of the code ...
             mismatch_reason = ""
             if len(flat_obs) > len(flat_exp) and flat_exp.lower() in flat_obs.lower():
                 extra_text = re.sub(re.escape(flat_exp), "", flat_obs, flags=re.IGNORECASE).strip()
@@ -1973,22 +1847,18 @@ def main():
                 if roi_saved_path and os.path.exists(roi_saved_path):
                     img = OpenpyxlImage(roi_saved_path)
                     
-                    # --- FIX: DYNAMIC EXCEL IMAGE SCALING ---
-                    # Read the actual dimensions of the saved image so we don't squash the 5x5 grid
                     try:
                         saved_cv = cv2.imread(roi_saved_path)
                         if saved_cv is not None:
                             orig_h, orig_w = saved_cv.shape[:2]
                             
-                            # If it's a massive batch grid, give it a large row height so it's readable
                             target_h = 450 if orig_h > 300 else 120
                             target_w = int(orig_w * (target_h / float(orig_h)))
                             
                             img.height = target_h
                             img.width = target_w
-                            ws.row_dimensions[row_idx].height = int(target_h * 0.75) # Convert px to Excel points
+                            ws.row_dimensions[row_idx].height = int(target_h * 0.75)
                             
-                            # Widen the column so the image fits nicely
                             current_w = ws.column_dimensions['N'].width
                             needed_w = target_w / 7.0
                             if current_w is None or needed_w > current_w:
