@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import os
+from loguru import logger
+# or
+import loguru
 import sys
 import time
 import unicodedata
@@ -1170,7 +1173,7 @@ def main():
         # -------------------------------------------------------------------------
 
 
-        max_retries = 5
+        max_retries = 4  # REDUCED: Stops endless looping on hard failures
         best_conf = -1.0
         best_attempt_data = None
         seen_observations = set()
@@ -1178,7 +1181,7 @@ def main():
         # CRITICAL FIX: Save the exact image used
         best_roi_for_saving = roi.copy()
         
-        progressive_dims = [1000, 1300, 1600, 1900]
+        progressive_dims = [1000, 1100, 1100]  # REDUCED: Caps resolution scaling
         
         try:
             if ocr is not None: del ocr
@@ -1442,7 +1445,7 @@ def main():
                     c = re.sub(r'^(!|\?|⏹|\[\]|\'|\"|️)\s*', '', c)
                     
                     if is_cjk:
-                        c = re.sub(r'\s+', '', c) # Remove spaces for CJK
+                        c = " ".join(c.split())
                         # If expected string doesn't contain English letters, strip English letters from observation (fixes hallucinated English in pure CJK)
                         if not any(char.isascii() and char.isalpha() for char in expected_local_n):
                             c = re.sub(r'[A-Za-z]', '', c)
@@ -1494,16 +1497,32 @@ def main():
                         has_ellipsis = ("..." in flat_obs or "…" in flat_obs or "..." in str(orig_text) or "…" in str(orig_text))
                         if has_ellipsis:
                             obs_no_ellipsis = flat_obs.replace("...", "").replace("…", "").strip()
-                            if len(obs_no_ellipsis) >= 2 and flat_exp.startswith(obs_no_ellipsis):
-                                corrected_obs = flat_exp
-                                t_applied_truncation = True   # <--- ADD THIS
-                            elif is_cjk_target and len(obs_no_ellipsis) >= 1 and flat_exp.startswith(obs_no_ellipsis):
-                                corrected_obs = flat_exp
-                                t_applied_truncation = True   # <--- ADD THIS
+                            
+                            # Ignore accents and casing for the truncation check (fixes Össz vs Ossz)
+                            obs_compare = _strip_accents(obs_no_ellipsis.lower())
+                            exp_compare = _strip_accents(flat_exp.lower())
+                            
+                            # MUST be strictly shorter to be considered a truncation (fixes fake tags on perfect matches)
+                            if len(obs_compare) < len(exp_compare):
+                                if len(obs_compare) >= 2 and exp_compare.startswith(obs_compare):
+                                    corrected_obs = flat_exp
+                                    t_applied_truncation = True
+                                elif is_cjk_target and len(obs_compare) >= 1 and exp_compare.startswith(obs_compare):
+                                    corrected_obs = flat_exp
+                                    t_applied_truncation = True
                                 
-                    sim = difflib.SequenceMatcher(None, flat_exp, corrected_obs).ratio()
-                    if sim >= 0.80 and len(corrected_obs) == len(flat_exp):
-                        corrected_obs = flat_exp
+                    # --- STRICT UNIVERSAL CJK FORGIVENESS ---
+                    if is_cjk_target and flat_obs != flat_exp:
+                        len_diff = abs(len(flat_exp) - len(flat_obs))
+                        
+                        if len(flat_obs) > len(flat_exp):
+                            pass 
+                        elif len(flat_exp) - len(flat_obs) == 1 and t_conf >= 85.0:
+                            if " " not in flat_exp and " " in flat_obs:
+                                pass
+                            else:
+                                flat_obs = flat_exp
+                                t_conf = 100.0
                     
                     # # Handle minor cut-offs
                     # if len(flat_obs) >= 2 and flat_exp.endswith(flat_obs):
@@ -1548,102 +1567,118 @@ def main():
                             corrected_obs = flat_exp
                             # Do NOT set t_applied_rolling because the text was not genuinely scrambled
                             
-                    # Fragment Summation Math Algorithm
-                    if used_rolling_this_attempt and corrected_obs != flat_exp:
-                        clean_exp = flat_exp.replace(" ", "")
+                   # --- NEW: STATIC REPEATING TEXT FIX (GRID CATCHER) ---
+                    # If the text is fully static but got repeated in the 20-frame grid capture
+                    if used_rolling_this_attempt and not is_physically_rolling and corrected_obs != flat_exp:
                         clean_obs = corrected_obs.replace(" ", "")
+                        clean_exp = flat_exp.replace(" ", "")
                         
-                        # --- FIX 2: ENFORCE USER'S ROLLING RULE ---
-                        # 1. Must be batch capture (used_rolling_this_attempt == True)
-                        # 2. Images must have DIFFERENT words. If the text is just the exact same word 
-                        #    repeated 25 times (e.g. "Ausstehende Ausstehende..."), it is STATIC.
+                        # Remove all full instances of the expected word to see what's left
                         leftover = clean_obs.replace(clean_exp, "")
-                        is_physically_rolling = True
                         
+                        # If the leftover is empty, or just a small clean fragment of the word, it's static!
+                        is_static_repeat = False
                         if leftover == "":
-                            is_physically_rolling = False
-                        elif len(clean_obs) >= len(clean_exp) * 2 and leftover in clean_exp:
-                            is_physically_rolling = False
+                            is_static_repeat = True
+                        elif len(clean_obs) > len(clean_exp) and leftover in clean_exp:
+                            is_static_repeat = True
                             
-                        # ONLY apply the math and the rolling tag if the text is physically changing!
-                        if is_physically_rolling:
-                            matcher = difflib.SequenceMatcher(None, clean_exp, clean_obs)
-                            blocks = matcher.get_matching_blocks()
+                        if is_static_repeat:
+                            corrected_obs = flat_exp
+                            # Do NOT set t_applied_rolling because the text was not genuinely scrambled
                             
-                            min_block = 1 if (is_cjk_target or len(clean_exp) <= 3) else 3
-                            matching_chars = sum(m.size for m in blocks if m.size >= min_block)
-                            
-                            match_ratio = matching_chars / len(clean_exp) if len(clean_exp) > 0 else 0
-                            
-                            # --- FIX: ENFORCE STRICT BOUNDARY CHECK (NO MISSING START/END) ---
-                            # Even if 85% of the total characters match, we MUST ensure the physical 
-                            # start and end of the word were actually caught on camera.
-                            start_missing = False
-                            end_missing = False
-                            
-                            if len(clean_exp) >= 2:
-                                if clean_exp[:2].lower() not in clean_obs.lower():
-                                    start_missing = True
-                                if clean_exp[-2:].lower() not in clean_obs.lower():
-                                    end_missing = True
-                            
-                            # Only force a PASS if 85% of letters are found AND the start/end boundaries exist
-                            if match_ratio >= 0.85 and not start_missing and not end_missing:
-                                corrected_obs = flat_exp
-                                if is_physically_rolling:
-                                    t_applied_rolling = True
-                            else:
-                                if not is_cjk_target:
-                                    import unicodedata
-                                    def remove_accents(input_str):
-                                        return "".join(c for c in unicodedata.normalize('NFKD', input_str) if not unicodedata.combining(c))
-
-                                    exp_words = flat_exp.split()
-                                    obs_lower = remove_accents(corrected_obs.lower())
-                                    found_chars_len = 0
-                                    total_exp_chars = sum(len(w) for w in exp_words)
-                                    
-                                    for word in exp_words:
-                                        word_clean = remove_accents(word.lower())
-                                        if word_clean in obs_lower.replace(" ", ""):
-                                            found_chars_len += len(word)
-                                            obs_lower = obs_lower.replace(word_clean, "", 1)
-                                            
-                                    if total_exp_chars > 0 and (found_chars_len / total_exp_chars) >= 0.85 and not start_missing and not end_missing:
-                                        corrected_obs = flat_exp
-                                        t_applied_rolling = True
-                                else:
-                                    exp_chars = list(clean_exp)
-                                    obs_chars = list(clean_obs)
-                                    found_cjk_chars = 0
-                                    for ch in exp_chars:
-                                        if ch in obs_chars:
-                                            found_cjk_chars += 1
-                                            obs_chars.remove(ch)
-                                    if len(exp_chars) > 0 and (found_cjk_chars / len(exp_chars)) >= 0.85 and not start_missing and not end_missing:
-                                        corrected_obs = flat_exp
-                                        t_applied_rolling = True
                     flat_obs = corrected_obs
                     
-                    # --- FIX: RECONSTRUCT SCRAMBLED ROLLING TEXT ---
+                    # --- FIX: STRICT ROLLING TEXT VALIDATOR (PENALIZE EXTRA TEXT & ENFORCE SEQUENCE) ---
                     if used_rolling_this_attempt and flat_obs != flat_exp:
-                        reconstructed = ""
-                        temp_obs = flat_obs.replace("|", "")
+                        chunks = [c.strip() for c in flat_obs.split("|") if c.strip()]
                         
-                        for ch in flat_exp:
-                            if not is_cjk_target:
-                                idx = temp_obs.lower().find(ch.lower())
-                            else:
-                                idx = temp_obs.find(ch)
-                                
-                            if idx != -1:
-                                reconstructed += ch
-                                temp_obs = temp_obs[:idx] + temp_obs[idx+1:]
-                                
-                        if reconstructed:
-                            flat_obs = " ".join(reconstructed.split()) if not is_cjk_target else reconstructed.replace(" ", "")
+                        clean_exp = flat_exp.replace(" ", "") if is_cjk_target else " ".join(flat_exp.split())
+                        exp_compare = clean_exp.lower() if not is_cjk_target else clean_exp
                         
-                        t_applied_rolling = True
+                        is_valid_rolling = True
+                        total_matched_chars_in_exp = set()
+                        
+                        for chunk in chunks:
+                            clean_chunk = chunk.replace(" ", "") if is_cjk_target else " ".join(chunk.split())
+                            chunk_compare = clean_chunk.lower() if not is_cjk_target else clean_chunk
+                            
+                            if not chunk_compare: continue
+                            
+                            matcher = difflib.SequenceMatcher(None, chunk_compare, exp_compare)
+                            blocks = matcher.get_matching_blocks()
+                            
+                            matched_len_in_chunk = 0
+                            for match in blocks:
+                                if match.size > 0:
+                                    min_size = 1 if is_cjk_target else 2
+                                    if match.size >= min_size:
+                                        matched_len_in_chunk += match.size
+                                        for i in range(match.b, match.b + match.size):
+                                            total_matched_chars_in_exp.add(i)
+                            
+                            # STRICT RULE 1: NO EXTRA TEXT ALLOWED
+                            # If a frame has letters that don't match the Expected string, FAIL IMMEDIATELY.
+                            unmatched_chars = len(chunk_compare) - matched_len_in_chunk
+                            allowed_hallucination = 1 if is_cjk_target else 2 
+                            
+                            if unmatched_chars > allowed_hallucination:
+                                is_valid_rolling = False
+                                break
+                                
+                        # STRICT RULE 2: COMPLETENESS
+                        if is_valid_rolling and len(exp_compare) > 0:
+                            coverage_ratio = len(total_matched_chars_in_exp) / len(exp_compare)
+                            if coverage_ratio >= 0.90:
+                                flat_obs = flat_exp
+                                t_applied_rolling = True
+
+                # ---> PROPERLY ALIGNED FINAL SCORING BLOCK <---
+                    flat_obs = corrected_obs
+                    
+                    # --- FIX: STRICT ROLLING TEXT VALIDATOR (PENALIZE EXTRA TEXT & ENFORCE SEQUENCE) ---
+                    if used_rolling_this_attempt and flat_obs != flat_exp:
+                        chunks = [c.strip() for c in flat_obs.split("|") if c.strip()]
+                        
+                        clean_exp = flat_exp.replace(" ", "") if is_cjk_target else " ".join(flat_exp.split())
+                        exp_compare = clean_exp.lower() if not is_cjk_target else clean_exp
+                        
+                        is_valid_rolling = True
+                        total_matched_chars_in_exp = set()
+                        
+                        for chunk in chunks:
+                            clean_chunk = chunk.replace(" ", "") if is_cjk_target else " ".join(chunk.split())
+                            chunk_compare = clean_chunk.lower() if not is_cjk_target else clean_chunk
+                            
+                            if not chunk_compare: continue
+                            
+                            matcher = difflib.SequenceMatcher(None, chunk_compare, exp_compare)
+                            blocks = matcher.get_matching_blocks()
+                            
+                            matched_len_in_chunk = 0
+                            for match in blocks:
+                                if match.size > 0:
+                                    min_size = 1 if is_cjk_target else 2
+                                    if match.size >= min_size:
+                                        matched_len_in_chunk += match.size
+                                        for i in range(match.b, match.b + match.size):
+                                            total_matched_chars_in_exp.add(i)
+                            
+                            # STRICT RULE 1: NO EXTRA TEXT ALLOWED
+                            # If a frame has letters that don't match the Expected string, FAIL IMMEDIATELY.
+                            unmatched_chars = len(chunk_compare) - matched_len_in_chunk
+                            allowed_hallucination = 1 if is_cjk_target else 2 
+                            
+                            if unmatched_chars > allowed_hallucination:
+                                is_valid_rolling = False
+                                break
+                                
+                        # STRICT RULE 2: COMPLETENESS
+                        if is_valid_rolling and len(exp_compare) > 0:
+                            coverage_ratio = len(total_matched_chars_in_exp) / len(exp_compare)
+                            if coverage_ratio >= 0.90:
+                                flat_obs = flat_exp
+                                t_applied_rolling = True
 
                     # ---> PROPERLY ALIGNED FINAL SCORING BLOCK <---
                 # We pull these entirely outside the massive 'if' block so they always execute!
@@ -1655,10 +1690,13 @@ def main():
                     t_conf = round(similarity * 100, 1)
                     if t_conf > 100.0: t_conf = 100.0
                     
-                    # --- TIGHTEN UNIVERSAL CJK FORGIVENESS ---
+                    # --- STRICT UNIVERSAL CJK FORGIVENESS ---
                     if is_cjk_target and flat_obs != flat_exp:
                         len_diff = abs(len(flat_exp) - len(flat_obs))
-                        if len_diff <= 1 and t_conf >= 65.0:
+                        
+                        if len(flat_obs) > len(flat_exp) + 1:
+                            pass 
+                        elif len_diff <= 1 and t_conf >= 90.0:
                             flat_obs = flat_exp
                             t_conf = 100.0
                     
