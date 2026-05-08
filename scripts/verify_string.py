@@ -1490,15 +1490,30 @@ def main():
                                 return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
 
                             obs_no_ellipsis = flat_obs.replace("...", "").replace("…", "").strip()
-                            obs_compare = _strip_accents(obs_no_ellipsis.lower())
-                            exp_compare = _strip_accents(flat_exp.lower())
                             
-                            # ONLY set t_applied_truncation here, do NOT explicitly overwrite corrected_obs!
+                            obs_compare = _strip_accents(obs_no_ellipsis.lower()).replace(" ", "")
+                            exp_compare = _strip_accents(flat_exp.lower()).replace(" ", "")
+                            
                             if len(obs_compare) < len(exp_compare):
-                                if len(obs_compare) >= 2 and exp_compare.startswith(obs_compare):
-                                    t_applied_truncation = True
-                                elif is_cjk_target and len(obs_compare) >= 1 and exp_compare.startswith(obs_compare):
-                                    t_applied_truncation = True
+                                if (len(obs_compare) >= 2 and exp_compare.startswith(obs_compare)) or \
+                                   (is_cjk_target and len(obs_compare) >= 1 and exp_compare.startswith(obs_compare)):
+                                    
+                                    # --- FIX: TRUNCATION vs ROLLING COLLISION ---
+                                    if args.enable_rolling:
+                                        if not used_rolling_this_attempt:
+                                            # Attempt 0: Do NOT force a PASS yet. Wait for the rolling camera to check for movement!
+                                            corrected_obs = obs_no_ellipsis
+                                        elif is_physically_rolling:
+                                            # Attempt 1+: The text is actually moving! Let the Rolling block handle it.
+                                            corrected_obs = obs_no_ellipsis
+                                        else:
+                                            # Attempt 1+: The text is NOT moving. It is a true static truncation.
+                                            t_applied_truncation = True
+                                            corrected_obs = flat_exp
+                                    else:
+                                        # Rolling is disabled, just force the truncation PASS immediately.
+                                        t_applied_truncation = True
+                                        corrected_obs = flat_exp
                     
                     if is_cjk_target and flat_exp in flat_obs:
                         stripped_obs = re.sub(r'[A-Za-z]', '', flat_obs)
@@ -1508,26 +1523,50 @@ def main():
                     # --- FIX: STATIC REPEATING TEXT FIX (GRID CATCHER) ---
                     # Only applies if text was stitched and repeated due to rolling logic
                     if used_rolling_this_attempt and not is_physically_rolling and corrected_obs != flat_exp:
-                        clean_obs = corrected_obs.replace(" ", "")
+                        # 공백, AI의 구분자('|'), 그리고 환각으로 생긴 '...'을 모두 깔끔하게 제거합니다.
+                        clean_obs = corrected_obs.replace(" ", "").replace("|", "").replace("...", "").replace("…", "")
                         clean_exp = flat_exp.replace(" ", "")
                         
+                        # 1. 완벽하게 일치하는 단어 먼저 모두 제거
                         leftover = clean_obs.replace(clean_exp, "")
                         
                         is_static_repeat = False
+                        is_pure_fragment = False
+                        
                         if leftover == "":
                             is_static_repeat = True
-                        elif len(clean_obs) > len(clean_exp) and leftover in clean_exp:
-                            is_static_repeat = True
+                        elif len(clean_obs) > len(clean_exp):
+                            # 2. 카메라 가장자리가 잘려서 생긴 조각(Fragment)인지 검사
+                            temp_leftover = leftover
+                            min_frag_len = 1 if is_cjk_target else 2
                             
-                        # If the camera stitched static repeated text, we shouldn't fail it.
+                            for i in range(1, len(clean_exp) - min_frag_len + 1):
+                                prefix = clean_exp[:len(clean_exp)-i]
+                                suffix = clean_exp[i:]
+                                if len(prefix) >= min_frag_len: 
+                                    temp_leftover = temp_leftover.replace(prefix, "")
+                                if len(suffix) >= min_frag_len: 
+                                    temp_leftover = temp_leftover.replace(suffix, "")
+                                    
+                            # 조각들을 다 지웠을 때 아무것도 남지 않는다면 정적 반복 화면으로 인정!
+                            if temp_leftover == "":
+                                is_static_repeat = True
+                                # 전체 단어가 한 번도 온전하게 등장하지 않았다면, 화면이 실제로 잘린(Truncated) 것입니다!
+                                if clean_exp not in clean_obs:
+                                    is_pure_fragment = True
+                                
                         if is_static_repeat:
                             corrected_obs = flat_exp
+                            # 파편만 반복되는 정지 화면이라면 Truncated 태그를 발동시킵니다.
+                            if is_pure_fragment and args.enable_truncation:
+                                t_applied_truncation = True
                             
                     flat_obs = corrected_obs
                     
                     # --- FIX: STRICT ROLLING TEXT VALIDATOR (PENALIZE EXTRA TEXT & ENFORCE SEQUENCE) ---
                     if used_rolling_this_attempt and flat_obs != flat_exp:
-                        chunks = [c.strip() for c in flat_obs.split("|") if c.strip()]
+                        # The AI sometimes forgets the '|' separator, so we replace it with a space and split by spaces
+                        chunks = [c.strip() for c in flat_obs.replace("|", " ").split() if c.strip()]
                         
                         clean_exp = flat_exp.replace(" ", "") if is_cjk_target else " ".join(flat_exp.split())
                         exp_compare = clean_exp.lower() if not is_cjk_target else clean_exp
@@ -1560,11 +1599,13 @@ def main():
                                 is_valid_rolling = False
                                 break
                                 
+                        # STRICT RULE 2: COMPLETENESS
                         if is_valid_rolling and len(exp_compare) > 0:
                             coverage_ratio = len(total_matched_chars_in_exp) / len(exp_compare)
-                            if coverage_ratio >= 0.90:
-                                # DO NOT override the text to 100%. We only want to set the tag.
+                            # Lower threshold to 80% to forgive consistently cutoff edges (like the missing "П")
+                            if coverage_ratio >= 0.80:
                                 t_applied_rolling = True
+                                corrected_obs = flat_exp  # Force a 100% PASS
 
                 # ---> PROPERLY ALIGNED FINAL SCORING BLOCK <---
                 t_conf = 0.0
@@ -1631,16 +1672,11 @@ def main():
 
             if verdict != "PASS" and attempt < max_retries - 1:
                 if len(flat_obs) < len(flat_exp):
-                    if "..." in str(orig_text) or "…" in str(orig_text) or "..." in flat_obs:
-                        if not needs_rolling_capture:
-                            needs_rolling_capture = False
-                            print("    -> [Next Retry Status] Missing words, but '...' detected. This text is statically truncated. Normal retry is enough.")
+                    if args.enable_rolling:
+                        needs_rolling_capture = True
+                        print("    -> [Next Retry Status] Incomplete text detected. Triggering Rolling Batch Capture to check for movement!")
                     else:
-                        if args.enable_rolling:
-                            needs_rolling_capture = True
-                            print("    -> [Next Retry Status] Missing words and no '...' detected. Text may be rolling. Triggering Rolling Batch Capture!")
-                        else:
-                            needs_rolling_capture = False
+                        needs_rolling_capture = False
                 else:
                     pass
 
@@ -1718,6 +1754,14 @@ def main():
         if final_applied_truncation:
             tag_str = "[Word is truncated (...)]"
             error_msg_display = tag_str if not error_msg_display else f"{error_msg_display} | {tag_str}"
+            
+        # --- FIX: ALWAYS PRINT THE TAG IF IT WAS VALIDATED ---
+        if final_applied_rolling:
+            tag_str = "[Word is rolling (...)]"
+            error_msg_display = tag_str if not error_msg_display else f"{error_msg_display} | {tag_str}"
+
+        if verdict in ["FAIL", "WARN"]:
+            mismatch_reason = ""
             
         if final_applied_rolling:
             raw_chunks = [re.sub(r'[\s.,;!?]', '', c) for c in str(orig_text).split('|') if c.strip()]
