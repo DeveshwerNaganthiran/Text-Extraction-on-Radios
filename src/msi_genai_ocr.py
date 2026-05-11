@@ -840,6 +840,39 @@ class MSIGenAIOCR:
                 
         except Exception as e:
             return ""
+        
+    def explain_mismatch(self, expected_text: str, actual_text: str) -> str:
+        """Asks the GenAI to explain the difference between expected and actual text."""
+        if not expected_text:
+            return "Expected text was empty."
+        if not actual_text:
+            return "No text was detected by the camera."
+            
+        prompt = (
+            f"The expected text on the screen was '{expected_text}', but the camera/OCR read '{actual_text}'. "
+            "In 15 words or less, briefly explain what is wrong (e.g., 'Missing the last letter', 'Extra word at the end', 'Typo in the second word', 'Completely different text')."
+        )
+        
+        try:
+            session_id = self.get_or_init_session()
+            
+            # --- BYPASS FIX: Upload a tiny 1x1 black pixel to satisfy the image requirement ---
+            import numpy as np
+            dummy_img = np.zeros((1, 1, 3), dtype=np.uint8)
+            dummy_base64 = self.encode_image_to_base64(dummy_img)
+            self.upload_image(session_id, dummy_base64)
+            # -------------------------------------------------------------------------------
+            
+            result = self.send_prompt(session_id, prompt)
+            explanation = self.extract_text_from_response(result)
+            
+            # --- NEW FIX: Strip out the Gateway's automated warning message ---
+            warning_text = "**Unsupported media type found. Ignoring non-image media.**"
+            explanation = explanation.replace(warning_text, "")
+            
+            return explanation.replace('\n', ' ').strip('."\' ')
+        except Exception as e:
+            return "AI could not generate an explanation."
     
     def clean_text(self, text: str) -> str:
         if not text:

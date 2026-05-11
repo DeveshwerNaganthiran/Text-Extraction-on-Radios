@@ -744,8 +744,8 @@ def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float
     
     burst_frames = []
     
-    # We ONLY capture 5 frames initially.
-    t_end = time.time() + 0.5
+    # Allow the camera time to adjust exposure and focus
+    t_end = time.time() + warmup_sec
     last_t = 0
     while time.time() < t_end:
         ok, frame = cap.read()
@@ -1212,15 +1212,17 @@ def main():
                         # Find the length of the expected string to determine how long to record
                         max_exp_len = max([len(t["exp_target"]) for t in active_targets]) if active_targets else 0
                         
+                        # --- AI GATEWAY FIX: PREVENT BASE64 TOKEN SPIKES ---
+                        # Massive 3x3 or 5x5 grids get rejected by Corporate Gateway limits.
+                        # When rejected, it dumps the raw Base64 string into the text prompt, 
+                        # causing massive 28k token spikes!
+                        # Solution: Use a simple vertical stack of 4 to 5 frames.
                         if max_exp_len < 20:
-                            num_frames, grid_cols, grid_rows = 9, 3, 3
-                            required_interval = 0.60  # Increased time for short words
-                        elif max_exp_len < 45:
-                            num_frames, grid_cols, grid_rows = 16, 4, 4
-                            required_interval = 1.00  # Increased time for medium words
+                            num_frames, grid_cols, grid_rows = 4, 1, 4
+                            required_interval = 0.80  # Time for short words
                         else:
-                            num_frames, grid_cols, grid_rows = 25, 5, 5
-                            required_interval = 1.50  # Increased time for long Russian words
+                            num_frames, grid_cols, grid_rows = 5, 1, 5
+                            required_interval = 1.20  # Time for long words
                             
                         t_end_capture = time.time() + (num_frames * required_interval) + 10.0
                         last_save = 0
@@ -1287,7 +1289,7 @@ def main():
                                 grid_roi = cv2.vconcat(rows)
                                 
                                 # Scale limits based on grid size to preserve API limits
-                                safe_grid_dim = 800 if num_frames == 9 else (1000 if num_frames == 16 else 1100)
+                                safe_grid_dim = 900
                                 gh, gw = grid_roi.shape[:2]
                                 if max(gh, gw) > safe_grid_dim:
                                     scale_f = safe_grid_dim / float(max(gh, gw))
@@ -1774,16 +1776,19 @@ def main():
             error_msg_display = tag_str if not error_msg_display else f"{error_msg_display} | {tag_str}"
 
         if verdict in ["FAIL", "WARN"]:
-            mismatch_reason = ""
-            if len(flat_obs) > len(flat_exp) and flat_exp.lower() in flat_obs.lower():
-                extra_text = re.sub(re.escape(flat_exp), "", flat_obs, flags=re.IGNORECASE).strip()
-                mismatch_reason = f"Extra text detected: '{extra_text}'"
-            elif len(flat_obs) < len(flat_exp) and flat_obs.lower() in flat_exp.lower():
-                mismatch_reason = "Missing part of the expected text."
+            print("    -> [AI Analysis] Asking GenAI to explain the mismatch...")
+            # Ask the AI to generate the human-readable mismatch reason
+            ai_mismatch_reason = ocr.explain_mismatch(flat_exp, flat_obs)
+            
+            # Combine the AI's reason with the confidence score requested
+            text_err = f"Mismatch (Conf: {confidence_pct}%): {ai_mismatch_reason}"
+            
+            if error_msg_display:
+                error_msg_display += f" | {text_err}"
             else:
-                mismatch_reason = "Text misspelled or completely changed."
-
-            text_err = f"Mismatch (Conf: {confidence_pct}%): {mismatch_reason}"
+                error_msg_display = text_err
+                
+            print(f"[VERDICT REASON] {text_err}")
             
             if error_msg_display:
                 error_msg_display += f" | {text_err}"

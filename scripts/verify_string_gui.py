@@ -941,8 +941,8 @@ class VerifyStringGUI:
                     self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
                     return
 
-        self.q.put("[CMD] Waiting 3s for devices to process...\n")
-        time.sleep(3.0) 
+        self.q.put("[CMD] Waiting 5s for devices to process...\n")
+        time.sleep(5.0) 
         self.q.put((_EVT_COMMG_DONE, None, None))
 
     def _putty_thread(self, payloads, batch_items):
@@ -1719,6 +1719,8 @@ class VerifyStringGUI:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    encoding="utf-8",    # <-- ADD THIS: Forces UTF-8 reading
+                    errors="replace",    # <-- ADD THIS: Prevents crashes on weird bytes
                     bufsize=1,
                     env=env,
                     creationflags=creationflags
