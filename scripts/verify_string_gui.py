@@ -1704,33 +1704,41 @@ class VerifyStringGUI:
                 json.dump({"devices": devices}, f, indent=2, ensure_ascii=False)
         except Exception: pass
 
+        # Ensure realtime terminal output when using subprocess
+        env["PYTHONUNBUFFERED"] = "1"
+
         def _worker():
-            module_name = 'verify_string' if is_verification else 'init_genai_session'
-            
-            old_argv = sys.argv
-            sys.argv = [module_name] + cmd[2:]
-            
-            old_env = os.environ.copy()
-            os.environ.update(env)
-            
-            q_stream = _QueueStream(self.q)
-            
+            import subprocess
             try:
-                with redirect_stdout(q_stream), redirect_stderr(q_stream):
-                    runpy.run_module(module_name, run_name="__main__")
-                self.q.put((_EVT_FINISHED, 0))
-            except SystemExit as e:
-                rc = e.code if e.code is not None else 0
+                # Hide the ugly black CMD popups on Windows
+                creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                
+                # Spawn a TRUE background process to completely avoid deadlocks
+                self.current_process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    env=env,
+                    creationflags=creationflags
+                )
+                
+                # Stream the output directly into the GUI Log
+                for line in self.current_process.stdout:
+                    if line:
+                        self.q.put(line)
+                        
+                self.current_process.wait()
+                rc = self.current_process.returncode
                 self.q.put((_EVT_FINISHED, rc))
+                
             except Exception as e:
-                self.q.put(f"[GUI ERROR] {e}\n")
+                self.q.put(f"[GUI ERROR] Failed to start process: {e}\n")
                 self.q.put((_EVT_FINISHED, 1))
             finally:
-                sys.argv = old_argv
-                os.environ.clear()
-                os.environ.update(old_env)
+                self.current_process = None
 
-        self.proc = None
         self.proc_thread = threading.Thread(target=_worker, daemon=True)
         self.proc_thread.start()
 
@@ -1970,7 +1978,14 @@ class VerifyStringGUI:
                     pass
             self.active_putty_apps = {}
 
-        if hasattr(self, "proc_thread") and self.proc_thread and self.proc_thread.is_alive():
+        # ---> INSTANTLY KILL THE HUNG PROCESS <---
+        if hasattr(self, "current_process") and self.current_process:
+            try:
+                self.current_process.kill()
+                self._append("\n[GUI] Background AI process force-stopped.\n", ("warn",))
+            except Exception:
+                pass
+        elif hasattr(self, "proc_thread") and self.proc_thread and self.proc_thread.is_alive():
             self._append("\n[WARNING] Note: Background script is still finishing its current execution loop.\n")
             
     def _write_final_excel_summary(self):

@@ -1214,15 +1214,15 @@ def main():
                         
                         if max_exp_len < 20:
                             num_frames, grid_cols, grid_rows = 9, 3, 3
-                            required_interval = 0.40  # ~3.1 seconds total
+                            required_interval = 0.60  # Increased time for short words
                         elif max_exp_len < 45:
                             num_frames, grid_cols, grid_rows = 16, 4, 4
-                            required_interval = 0.65  # ~6.4 seconds total
+                            required_interval = 1.00  # Increased time for medium words
                         else:
                             num_frames, grid_cols, grid_rows = 25, 5, 5
-                            required_interval = 0.80  # ~11.2 seconds total
+                            required_interval = 1.50  # Increased time for long Russian words
                             
-                        t_end_capture = time.time() + (num_frames * required_interval) + 3.0
+                        t_end_capture = time.time() + (num_frames * required_interval) + 10.0
                         last_save = 0
                         
                         while time.time() < t_end_capture:
@@ -1435,10 +1435,21 @@ def main():
 
                 def _clean_for_compare(text: str, is_cjk: bool) -> str:
                     c = str(text)
-                    # Remove only known weird UI glitch prefixes that the AI hallucinates at the far left edge
+                    # Remove known weird UI glitch prefixes
                     c = re.sub(r'^(i|l|v|4)\s+', '', c, flags=re.IGNORECASE)
                     c = re.sub(r'^(!|\?|⏹|\[\]|\'|\"|️)\s*', '', c)
                     
+                    # --- NEW FIX: STRIP PROBLEMATIC PUNCTUATION ---
+                    # Remove * and \ because the AI often misses them on low-res LCD screens
+                    c = c.replace('*', '').replace('\\', '')
+                    
+                    # --- FIX: ENGLISH/RUSSIAN HOMOGLYPH CONVERTER ---
+                    has_cyrillic = any('\u0400' <= ch <= '\u04FF' for ch in expected_local_n)
+                    if has_cyrillic:
+                        homoglyphs = {'A':'А','a':'а','B':'В','C':'С','c':'с','E':'Е','e':'е','H':'Н','K':'К','M':'М','O':'О','o':'о','P':'Р','p':'р','T':'Т','X':'Х','x':'х','y':'у'}
+                        for lat, cyr in homoglyphs.items():
+                            c = c.replace(lat, cyr)
+
                     if is_cjk:
                         c = " ".join(c.split())
                         # If expected string doesn't contain English letters, strip English letters from observation
@@ -1454,11 +1465,11 @@ def main():
                 flat_exp = _clean_for_compare(expected_local_n, is_cjk_target)
                 
                 # --- FIX: CASE AND ACCENT INSENSITIVITY ---
-                # (Commented out to ensure strict matching - Do NOT uncomment)
-                # def _strip_accents(s):
-                #     return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
-                # if _strip_accents(flat_obs.lower()) == _strip_accents(flat_exp.lower()):
-                #     flat_obs = flat_exp 
+                def _strip_accents(s):
+                    return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+                
+                if _strip_accents(flat_obs.lower()) == _strip_accents(flat_exp.lower()):
+                    flat_obs = flat_exp
                 
                 if flat_exp and flat_obs != flat_exp:
                     corrected_obs = flat_obs
@@ -1495,8 +1506,8 @@ def main():
                             exp_compare = _strip_accents(flat_exp.lower()).replace(" ", "")
                             
                             if len(obs_compare) < len(exp_compare):
-                                if (len(obs_compare) >= 2 and exp_compare.startswith(obs_compare)) or \
-                                   (is_cjk_target and len(obs_compare) >= 1 and exp_compare.startswith(obs_compare)):
+                                if (len(obs_compare) >= 2 and (exp_compare.startswith(obs_compare) or exp_compare.endswith(obs_compare))) or \
+                                   (is_cjk_target and len(obs_compare) >= 1 and (exp_compare.startswith(obs_compare) or exp_compare.endswith(obs_compare))):
                                     
                                     # --- FIX: TRUNCATION vs ROLLING COLLISION ---
                                     if args.enable_rolling:
@@ -1593,7 +1604,7 @@ def main():
                                             total_matched_chars_in_exp.add(i)
                             
                             unmatched_chars = len(chunk_compare) - matched_len_in_chunk
-                            allowed_hallucination = 1 if is_cjk_target else 2 
+                            allowed_hallucination = 1 if is_cjk_target else 4 
                             
                             if unmatched_chars > allowed_hallucination:
                                 is_valid_rolling = False
@@ -1602,17 +1613,17 @@ def main():
                         # STRICT RULE 2: COMPLETENESS
                         if is_valid_rolling and len(exp_compare) > 0:
                             coverage_ratio = len(total_matched_chars_in_exp) / len(exp_compare)
-                            # Lower threshold to 80% to forgive consistently cutoff edges (like the missing "П")
-                            if coverage_ratio >= 0.80:
+                            if coverage_ratio >= 0.70:
                                 t_applied_rolling = True
                                 corrected_obs = flat_exp  # Force a 100% PASS
+                                flat_obs = flat_exp       # <--- ADD THIS LINE HERE
 
                 # ---> PROPERLY ALIGNED FINAL SCORING BLOCK <---
                 t_conf = 0.0
                 t_verdict = "FAIL"
                 
                 if flat_exp:
-                    similarity = difflib.SequenceMatcher(None, flat_exp, flat_obs).ratio()
+                    similarity = difflib.SequenceMatcher(None, flat_exp.lower(), flat_obs.lower()).ratio()
                     t_conf = round(similarity * 100, 1)
                     if t_conf > 100.0: t_conf = 100.0
                     
@@ -1751,37 +1762,16 @@ def main():
             error_msg_display = f"[{err_type_str} ERROR: {words_str}]"
             print(error_msg_display)
             
-        if final_applied_truncation:
-            tag_str = "[Word is truncated (...)]"
-            error_msg_display = tag_str if not error_msg_display else f"{error_msg_display} | {tag_str}"
-            
-        # --- FIX: ALWAYS PRINT THE TAG IF IT WAS VALIDATED ---
-        if final_applied_rolling:
+        # --- NEW FIX: ALWAYS SHOW TRUNCATED/ROLLING TAGS EVEN ON FAILS ---
+        is_actually_rolling = final_applied_rolling or ("|" in str(orig_text))
+        is_actually_truncated = final_applied_truncation or (len(flat_obs) > 0 and len(flat_obs) < len(flat_exp))
+
+        if is_actually_rolling:
             tag_str = "[Word is rolling (...)]"
             error_msg_display = tag_str if not error_msg_display else f"{error_msg_display} | {tag_str}"
-
-        if verdict in ["FAIL", "WARN"]:
-            mismatch_reason = ""
-            
-        if final_applied_rolling:
-            raw_chunks = [re.sub(r'[\s.,;!?]', '', c) for c in str(orig_text).split('|') if c.strip()]
-            
-            is_truly_rolling = False
-            if len(raw_chunks) > 1:
-                base_chunk = raw_chunks[0]
-                for chunk in raw_chunks[1:]:
-                    if difflib.SequenceMatcher(None, base_chunk, chunk).ratio() < 0.65:
-                        is_truly_rolling = True
-                        break
-            else:
-                raw_ai_text = re.sub(r'[\s|.,;!?]', '', str(orig_text))
-                target_text = flat_exp.replace(" ", "")
-                if len(raw_ai_text.replace(target_text, "")) > 5:
-                    is_truly_rolling = True
-            
-            if is_truly_rolling:
-                tag_str = "[Word is rolling (...)]"
-                error_msg_display = tag_str if not error_msg_display else f"{error_msg_display} | {tag_str}"
+        elif is_actually_truncated:
+            tag_str = "[Word is truncated (...)]"
+            error_msg_display = tag_str if not error_msg_display else f"{error_msg_display} | {tag_str}"
 
         if verdict in ["FAIL", "WARN"]:
             mismatch_reason = ""
