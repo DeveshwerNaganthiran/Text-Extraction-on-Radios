@@ -441,6 +441,8 @@ class VerifyStringGUI:
         # --- ADD THESE TWO LINES ---
         self.enable_rolling_var = tk.BooleanVar(value=bool(self._settings.get("enable_rolling", False)))
         self.enable_truncation_var = tk.BooleanVar(value=bool(self._settings.get("enable_truncation", False)))
+        self.enable_retries_var = tk.BooleanVar(value=bool(self._settings.get("enable_retries", False)))
+        self.retry_count_var = tk.StringVar(value=str(self._settings.get("retry_count", "2")))
         self._log_fp = None
         self._log_session_dir = None
 
@@ -455,10 +457,15 @@ class VerifyStringGUI:
         # --- ADD THESE TWO CHECKBOXES ---
         tk.Checkbutton(extras, text="Rolling Text", variable=self.enable_rolling_var).pack(side=tk.LEFT, padx=(12, 0))
         tk.Checkbutton(extras, text="Truncation (...)", variable=self.enable_truncation_var).pack(side=tk.LEFT, padx=(6, 0))
-        
+        tk.Checkbutton(extras, text="Custom Retries", variable=self.enable_retries_var).pack(side=tk.LEFT, padx=(12, 0))
+        tk.Entry(extras, textvariable=self.retry_count_var, width=4).pack(side=tk.LEFT, padx=(2, 0))
         tk.Checkbutton(extras, text="Save log", variable=self.save_log_var).pack(side=tk.LEFT, padx=(12, 0))
         tk.Entry(extras, textvariable=self.log_path_var, width=28).pack(side=tk.LEFT, padx=(6, 0))
         tk.Button(extras, text="Browse...", command=self.browse_log).pack(side=tk.LEFT, padx=(6, 0))
+        self.drive_folder_var = tk.StringVar(value=str(self._settings.get("drive_folder", "Walkie_Logs")))
+        
+        tk.Label(extras, text="Drive Folder Name:").pack(side=tk.LEFT, padx=(12, 0))
+        tk.Entry(extras, textvariable=self.drive_folder_var, width=20).pack(side=tk.LEFT, padx=(6, 0))
         row += 1
 
         saved_model = str(self._settings.get("model_path") or "")
@@ -597,6 +604,7 @@ class VerifyStringGUI:
         tk.Button(self.summary_top, text="Clear Summary", command=self.clear_summary_data).pack(side=tk.RIGHT, padx=(10, 2))
         tk.Button(self.summary_top, text="Show All", command=lambda: self.filter_tree("ALL")).pack(side=tk.RIGHT, padx=2)
         tk.Button(self.summary_top, text="Show Fails", bg="#FFCCCB", command=lambda: self.filter_tree("FAIL")).pack(side=tk.RIGHT, padx=2)
+        tk.Button(self.summary_top, text="Show Warns", bg="#FFF3E0", command=lambda: self.filter_tree("WARN")).pack(side=tk.RIGHT, padx=2)
         tk.Button(self.summary_top, text="Show Passes", bg="#90EE90", command=lambda: self.filter_tree("PASS")).pack(side=tk.RIGHT, padx=2)
 
         tree_columns = ("device", "index", "tag", "expected", "actual", "verdict", "error")
@@ -1104,6 +1112,8 @@ class VerifyStringGUI:
         if not batch_items:
             return
 
+        self._current_batch_items = batch_items # <-- SAVE THIS SO WE CAN RESTORE IT ON PAUSE
+
         cmds = []
         tags = []
         indices = []
@@ -1409,7 +1419,10 @@ class VerifyStringGUI:
             "save_log": bool(self.save_log_var.get()),
             "enable_rolling": bool(self.enable_rolling_var.get()),     # <-- ADD THIS
             "enable_truncation": bool(self.enable_truncation_var.get()), # <-- ADD THIS
+            "enable_retries": bool(self.enable_retries_var.get()),
+            "retry_count": (self.retry_count_var.get() or "2").strip(),
             "log_path": (self.log_path_var.get() or "").strip(),
+            "drive_folder": (self.drive_folder_var.get() or "Walkie_Logs").strip(), # <-- ADD THIS
             "integration_enable": bool(self.integration_enable_var.get()),
             "integration_type": (self.integration_type_var.get() or "CommG"),
             "telnet_port": (self.telnet_port_var.get() or "23"),
@@ -1599,6 +1612,11 @@ class VerifyStringGUI:
             cmd += ["--enable-rolling"]
         if self.enable_truncation_var.get():
             cmd += ["--enable-truncation"]
+        if self.enable_retries_var.get():
+            cmd += ["--enable-retries"]
+            retry_val = self.retry_count_var.get().strip()
+            if retry_val.isdigit():
+                cmd += ["--max-retries", retry_val]
 
         if getattr(self, "_commg_is_active_run", False) and hasattr(self, "_current_batch_cmds"):
             cmd += ["--command", ",".join(self._current_batch_cmds)]
@@ -1674,6 +1692,8 @@ class VerifyStringGUI:
                 Path(p).parent.mkdir(parents=True, exist_ok=True)
                 self._log_fp = open(p, "a", encoding="utf-8")
             except Exception: self._log_fp = None
+            self._current_log_file_name = name
+            self._current_log_full_path = p
 
         try:
             self.output.insert(tk.END, "$ " + " ".join(cmd) + "\n\n", ("cmd",))
@@ -1811,6 +1831,7 @@ class VerifyStringGUI:
                 self._is_paused = False
                 self._commg_is_active_run = True
                 self._auto_start_verify = True
+                self._summary_written = False # <--- ADD THIS
                 self.init_genai()
                 return
             else:
@@ -1948,15 +1969,23 @@ class VerifyStringGUI:
             if action["result"] != "stop":
                 return
                 
-        if getattr(self, "_commg_is_active_run", False) and getattr(self, "_commg_pending_queue", []):
+        if getattr(self, "_commg_is_active_run", False):
             self._is_paused = True
             self.status_var.set("Automation Paused")
             self.status_label.configure(fg="#E65100")
             self.q.put("\n[GUI] Sequence stopped manually. State saved. Click 'Start' to resume.\n", ("warn",))
+            
+            # Restore the currently executing items so they aren't skipped on resume!
+            if hasattr(self, "_current_batch_items") and self._current_batch_items:
+                self._commg_pending_queue = self._current_batch_items + getattr(self, "_commg_pending_queue", [])
+                self._current_batch_items = []
         else:
             self._commg_pending_queue = []
             
         self._commg_is_active_run = False
+        
+        # CRITICAL FIX: Explicitly re-enable the Start button since we are ignoring the background process exit event!
+        self._set_running(False)
         
         # Cleanup CMD Telnet Sessions
         if getattr(self, "active_sockets", []):
@@ -1984,6 +2013,7 @@ class VerifyStringGUI:
         if hasattr(self, "current_process") and self.current_process:
             try:
                 self.current_process.kill()
+                self._ignore_next_finish = True # <--- ADD THIS
                 self._append("\n[GUI] Background AI process force-stopped.\n", ("warn",))
             except Exception:
                 pass
@@ -2085,6 +2115,9 @@ class VerifyStringGUI:
                         self._set_running(False)
                         self._write_final_excel_summary() 
                     else:
+                        # CRITICAL FIX: If we clicked stop while it was waiting, ignore this event!
+                        if not getattr(self, "_commg_is_active_run", False):
+                            continue
                         all_skip = True
                         for t, idx in zip(self.tag_var.get().split(","), self.index_var.get().split(",")):
                             if t.strip() != "SKIP_VERIFY" and idx.strip() != "SKIP_VERIFY":
@@ -2178,7 +2211,49 @@ class VerifyStringGUI:
 
                 if isinstance(s, tuple) and len(s) == 2 and s[0] == _EVT_FINISHED:
                     rc = s[1]
+                    
+                    # CRITICAL FIX: Throw away the fake exit=1 crash from the killed process!
+                    if getattr(self, "_ignore_next_finish", False):
+                        self._ignore_next_finish = False
+                        continue 
+                        
                     is_verify = bool(self._last_run_is_verification)
+                    
+                    # --- GOOGLE DRIVE UPLOAD LOGIC (EXCEL ONLY) ---
+                    if self.save_log_var.get() and getattr(self, "_log_session_dir", None):
+                        def upload_to_drive():
+                            WEBHOOK_URL = "https://script.google.com/a/macros/motorolasolutions.com/s/AKfycby7H3J6fmWSE5XomVteawKTt9m4o1zdD8YBOPGptJ64k1yx3RtdUFRwguZ9ZGjc7WDbgA/exec" # <-- PASTE NEW URL HERE
+                            drive_folder = self.drive_folder_var.get().strip()
+                            
+                            # Point to the Excel file instead of the text log
+                            excel_path = Path(self._log_session_dir) / "Batch_Summary_Report.xlsx"
+                            
+                            if excel_path.exists():
+                                try:
+                                    import requests
+                                    import base64
+                                    
+                                    # Read the Excel file as binary and encode it to Base64
+                                    with open(excel_path, "rb") as f:
+                                        encoded_string = base64.b64encode(f.read()).decode('utf-8')
+                                    
+                                    payload = {
+                                        "folderName": drive_folder,
+                                        "fileName": "Batch_Summary_Report.xlsx",
+                                        "contentBase64": encoded_string
+                                    }
+                                    
+                                    response = requests.post(WEBHOOK_URL, json=payload, timeout=15)
+                                    if response.status_code == 200:
+                                        self.q.put(f"[GUI] Successfully backed up Excel Report to Google Drive folder '{drive_folder}'.\n", ("pass",))
+                                    else:
+                                        self.q.put(f"[GUI ERROR] Google Drive Webhook Error: {response.text}\n", ("error",))
+                                except Exception as e:
+                                    self.q.put(f"[GUI ERROR] Failed to upload Excel to Google Drive: {e}\n", ("error",))
+                        
+                        # Run the upload in a background thread
+                        threading.Thread(target=upload_to_drive, daemon=True).start()
+                    # ---------------------------------
 
                     # Cleanup CMD Telnet Sessions on Verification Complete
                     if is_verify and getattr(self, "active_sockets", []):
@@ -2229,8 +2304,12 @@ class VerifyStringGUI:
                     if will_autostart:
                         self.status_var.set("Init GenAI finished, starting verification...")
                     else:
-                        if is_verify: msg = "Finished" if rc in [0, None] else f"Finished (exit={rc})"
-                        else: msg = "Init GenAI finished" if rc in [0, None] else f"Init GenAI finished (exit={rc})"
+                        if is_verify: 
+                            if getattr(self, "_is_paused", False): msg = "Automation Paused"
+                            else: msg = "Finished" if rc in [0, None] else f"Finished (exit={rc})"
+                        else: 
+                            if getattr(self, "_is_paused", False): msg = "Automation Paused"
+                            else: msg = "Init GenAI finished" if rc in [0, None] else f"Init GenAI finished (exit={rc})"
                         self.status_var.set(msg)
 
                         try:

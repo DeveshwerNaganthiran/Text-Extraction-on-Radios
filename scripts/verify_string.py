@@ -1002,6 +1002,8 @@ def main():
     # --- ADD THESE TWO ARGUMENTS ---
     parser.add_argument("--enable-rolling", action="store_true")
     parser.add_argument("--enable-truncation", action="store_true")
+    parser.add_argument("--enable-retries", action="store_true")
+    parser.add_argument("--max-retries", type=int, default=2)
 
     args = parser.parse_args()
     try: args.region = _norm_col(args.region)
@@ -1172,7 +1174,12 @@ def main():
         # -------------------------------------------------------------------------
 
 
-        max_retries = 4  # REDUCED: Stops endless looping on hard failures
+        # Check GUI setting: Default to 2 (first normal, second retry for rolling/truncation) unless Custom Retries is checked
+        if args.enable_retries:
+            max_retries = max(1, args.max_retries) # Ensure at least 1 attempt
+        else:
+            max_retries = 2
+            
         best_conf = -1.0
         best_attempt_data = None
         seen_observations = set()
@@ -1508,23 +1515,28 @@ def main():
                             exp_compare = _strip_accents(flat_exp.lower()).replace(" ", "")
                             
                             if len(obs_compare) < len(exp_compare):
-                                if (len(obs_compare) >= 2 and (exp_compare.startswith(obs_compare) or exp_compare.endswith(obs_compare))) or \
-                                   (is_cjk_target and len(obs_compare) >= 1 and (exp_compare.startswith(obs_compare) or exp_compare.endswith(obs_compare))):
+                                # CRITICAL FIX: Dynamic minimum match length. 
+                                # A 6-letter word requires 4 letters. A 4-letter word requires 3.
+                                if is_cjk_target:
+                                    min_match_len = 1
+                                else:
+                                    if len(exp_compare) <= 4:
+                                        min_match_len = max(1, len(exp_compare) - 1)
+                                    else:
+                                        min_match_len = max(4, int(len(exp_compare) * 0.60))
+                                
+                                if len(obs_compare) >= min_match_len and (exp_compare.startswith(obs_compare) or exp_compare.endswith(obs_compare)):
                                     
                                     # --- FIX: TRUNCATION vs ROLLING COLLISION ---
                                     if args.enable_rolling:
                                         if not used_rolling_this_attempt:
-                                            # Attempt 0: Do NOT force a PASS yet. Wait for the rolling camera to check for movement!
                                             corrected_obs = obs_no_ellipsis
-                                        elif is_physically_rolling:
-                                            # Attempt 1+: The text is actually moving! Let the Rolling block handle it.
+                                        elif getattr(self, "final_physically_rolling", False) or is_physically_rolling:
                                             corrected_obs = obs_no_ellipsis
                                         else:
-                                            # Attempt 1+: The text is NOT moving. It is a true static truncation.
                                             t_applied_truncation = True
                                             corrected_obs = flat_exp
                                     else:
-                                        # Rolling is disabled, just force the truncation PASS immediately.
                                         t_applied_truncation = True
                                         corrected_obs = flat_exp
                     
@@ -1536,9 +1548,8 @@ def main():
                     # --- FIX: STATIC REPEATING TEXT FIX (GRID CATCHER) ---
                     # Only applies if text was stitched and repeated due to rolling logic
                     if used_rolling_this_attempt and not is_physically_rolling and corrected_obs != flat_exp:
-                        # 공백, AI의 구분자('|'), 그리고 환각으로 생긴 '...'을 모두 깔끔하게 제거합니다.
-                        clean_obs = corrected_obs.replace(" ", "").replace("|", "").replace("...", "").replace("…", "")
-                        clean_exp = flat_exp.replace(" ", "")
+                        clean_obs = corrected_obs.replace("|", "").replace("...", "").replace("…", "")
+                        clean_exp = flat_exp
                         
                         # 1. 완벽하게 일치하는 단어 먼저 모두 제거
                         leftover = clean_obs.replace(clean_exp, "")
@@ -1548,23 +1559,32 @@ def main():
                         
                         if leftover == "":
                             is_static_repeat = True
-                        elif len(clean_obs) > len(clean_exp):
-                            # 2. 카메라 가장자리가 잘려서 생긴 조각(Fragment)인지 검사
+                        elif clean_obs != "" and len(clean_obs) > len(clean_exp):
+                            # 2. Fragment checker
                             temp_leftover = leftover
-                            min_frag_len = 1 if is_cjk_target else 2
                             
-                            for i in range(1, len(clean_exp) - min_frag_len + 1):
-                                prefix = clean_exp[:len(clean_exp)-i]
-                                suffix = clean_exp[i:]
-                                if len(prefix) >= min_frag_len: 
-                                    temp_leftover = temp_leftover.replace(prefix, "")
-                                if len(suffix) >= min_frag_len: 
-                                    temp_leftover = temp_leftover.replace(suffix, "")
-                                    
-                            # 조각들을 다 지웠을 때 아무것도 남지 않는다면 정적 반복 화면으로 인정!
+                            # CRITICAL FIX: Stop "HIV | HIV" from passing against "HIVoPo"!
+                            # We must enforce the exact same dynamic minimum length here in the Grid Catcher.
+                            if is_cjk_target:
+                                min_frag_len = 1
+                            else:
+                                if len(clean_exp) <= 4:
+                                    min_frag_len = max(1, len(clean_exp) - 1)
+                                else:
+                                    min_frag_len = max(4, int(len(clean_exp) * 0.60))
+                            
+                            # Only allow the checker to run if the expected string is long enough
+                            if len(clean_exp) > min_frag_len:
+                                for i in range(1, len(clean_exp) - min_frag_len + 1):
+                                    prefix = clean_exp[:len(clean_exp)-i]
+                                    suffix = clean_exp[i:]
+                                    if len(prefix) >= min_frag_len: 
+                                        temp_leftover = temp_leftover.replace(prefix, "")
+                                    if len(suffix) >= min_frag_len: 
+                                        temp_leftover = temp_leftover.replace(suffix, "")
+                                        
                             if temp_leftover == "":
                                 is_static_repeat = True
-                                # 전체 단어가 한 번도 온전하게 등장하지 않았다면, 화면이 실제로 잘린(Truncated) 것입니다!
                                 if clean_exp not in clean_obs:
                                     is_pure_fragment = True
                                 
@@ -1711,7 +1731,8 @@ def main():
                     "flat_obs": flat_obs,
                     "flat_exp": flat_exp,
                     "final_applied_truncation": flat_applied_truncation, 
-                    "final_applied_rolling": flat_applied_rolling        
+                    "final_applied_rolling": flat_applied_rolling,
+                    "final_physically_rolling": is_physically_rolling # <-- ADD THIS LINE
                 }
             if verdict == "PASS":
                 break
@@ -1731,7 +1752,8 @@ def main():
             flat_obs = best_attempt_data["flat_obs"]
             flat_exp = best_attempt_data["flat_exp"]
             final_applied_truncation = best_attempt_data.get("final_applied_truncation", False) 
-            final_applied_rolling = best_attempt_data.get("final_applied_rolling", False)       
+            final_applied_rolling = best_attempt_data.get("final_applied_rolling", False)
+            final_physically_rolling = best_attempt_data.get("final_physically_rolling", False) # <-- ADD THIS LINE       
         observed_display = flat_obs 
         
         exp_lines = [
@@ -1764,9 +1786,16 @@ def main():
             error_msg_display = f"[{err_type_str} ERROR: {words_str}]"
             print(error_msg_display)
             
-        # --- NEW FIX: ALWAYS SHOW TRUNCATED/ROLLING TAGS EVEN ON FAILS ---
-        is_actually_rolling = final_applied_rolling or ("|" in str(orig_text))
-        is_actually_truncated = final_applied_truncation or (len(flat_obs) > 0 and len(flat_obs) < len(flat_exp))
+        # --- NEW FIX: STRICT ROLLING VS TRUNCATION TAGGING ---
+        has_ellipsis = ("..." in flat_obs or "…" in flat_obs or "..." in str(orig_text) or "…" in str(orig_text))
+        
+        # --- STRICT TRUNCATION LOGIC: ONLY IF '...' IS PRESENT ---
+        has_ellipsis = ("..." in flat_obs or "…" in flat_obs or "..." in str(orig_text) or "…" in str(orig_text))
+        
+        is_actually_rolling = final_applied_rolling or final_physically_rolling
+        
+        # Absolute strict rule: If there are no dots, it is NEVER truncated. Period.
+        is_actually_truncated = has_ellipsis
 
         if is_actually_rolling:
             tag_str = "[Word is rolling (...)]"
