@@ -1262,9 +1262,9 @@ def main():
                                         diff = cv2.absdiff(gray_base, gray_curr)
                                         
                                         # Threshold high enough to ignore LCD moire, but low enough to catch letters
-                                        _, thresh = cv2.threshold(diff, 35, 255, cv2.THRESH_BINARY)
+                                        _, thresh = cv2.threshold(diff, 40, 255, cv2.THRESH_BINARY)
                                         
-                                        # Text is thin. If just 0.8% of the screen pixels changed, text is moving!
+                                        # Text is thin. We must use 0.8% so we don't miss thin rolling letters!
                                         if (np.count_nonzero(thresh) / float(thresh.size)) > 0.008: 
                                             is_physically_rolling = True
                                             break
@@ -1504,41 +1504,38 @@ def main():
                             corrected_obs = corrected_obs.replace(bad, good)
                     
                     if args.enable_truncation:
-                        has_ellipsis = ("..." in flat_obs or "…" in flat_obs or "..." in str(orig_text) or "…" in str(orig_text))
-                        if has_ellipsis:
-                            def _strip_accents(s):
-                                return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+                        # REMOVED the strict 'has_ellipsis' check so it can forgive AI blindness!
+                        def _strip_accents(s):
+                            return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
 
-                            obs_no_ellipsis = flat_obs.replace("...", "").replace("…", "").strip()
-                            
-                            obs_compare = _strip_accents(obs_no_ellipsis.lower()).replace(" ", "")
-                            exp_compare = _strip_accents(flat_exp.lower()).replace(" ", "")
-                            
-                            if len(obs_compare) < len(exp_compare):
-                                # CRITICAL FIX: Dynamic minimum match length. 
-                                # A 6-letter word requires 4 letters. A 4-letter word requires 3.
-                                if is_cjk_target:
-                                    min_match_len = 1
+                        obs_no_ellipsis = flat_obs.replace("...", "").replace("…", "").strip()
+                        
+                        obs_compare = _strip_accents(obs_no_ellipsis.lower()).replace(" ", "")
+                        exp_compare = _strip_accents(flat_exp.lower()).replace(" ", "")
+                        
+                        if len(obs_compare) < len(exp_compare):
+                            # CRITICAL FIX: Dynamic minimum match length with a CAP. 
+                            if is_cjk_target:
+                                min_match_len = 1
+                            else:
+                                if len(exp_compare) <= 4:
+                                    min_match_len = max(1, len(exp_compare) - 1)
                                 else:
-                                    if len(exp_compare) <= 4:
-                                        min_match_len = max(1, len(exp_compare) - 1)
-                                    else:
-                                        min_match_len = max(4, int(len(exp_compare) * 0.60))
+                                    # Cap the maximum required letters at 8
+                                    min_match_len = min(8, max(4, int(len(exp_compare) * 0.60)))
+                            
+                            if len(obs_compare) >= min_match_len and (exp_compare.startswith(obs_compare) or exp_compare.endswith(obs_compare)):
                                 
-                                if len(obs_compare) >= min_match_len and (exp_compare.startswith(obs_compare) or exp_compare.endswith(obs_compare)):
-                                    
-                                    # --- FIX: TRUNCATION vs ROLLING COLLISION ---
-                                    if args.enable_rolling:
-                                        if not used_rolling_this_attempt:
-                                            corrected_obs = obs_no_ellipsis
-                                        elif getattr(self, "final_physically_rolling", False) or is_physically_rolling:
-                                            corrected_obs = obs_no_ellipsis
-                                        else:
-                                            t_applied_truncation = True
-                                            corrected_obs = flat_exp
-                                    else:
-                                        t_applied_truncation = True
-                                        corrected_obs = flat_exp
+                                # --- FIX: TRUNCATION vs ROLLING COLLISION ---
+                                if args.enable_rolling and is_physically_rolling:
+                                    # The text is physically moving across the screen. 
+                                    # Do NOT grant a truncation pass yet, let the grid-stitcher handle it!
+                                    corrected_obs = obs_no_ellipsis
+                                else:
+                                    # The screen is perfectly static. This is a genuine truncation. 
+                                    # Force the 100% PASS!
+                                    t_applied_truncation = True
+                                    corrected_obs = flat_exp
                     
                     if is_cjk_target and flat_exp in flat_obs:
                         stripped_obs = re.sub(r'[A-Za-z]', '', flat_obs)
@@ -1551,17 +1548,17 @@ def main():
                         clean_obs = corrected_obs.replace("|", "").replace("...", "").replace("…", "")
                         clean_exp = flat_exp
                         
-                        # 1. 완벽하게 일치하는 단어 먼저 모두 제거
                         leftover = clean_obs.replace(clean_exp, "")
                         
                         is_static_repeat = False
                         is_pure_fragment = False
                         
-                        if leftover == "":
+                        # CRITICAL FIX: Ignore spaces leftover from the grid stitching
+                        if clean_obs != "" and leftover.replace(" ", "") == "":
                             is_static_repeat = True
                         elif clean_obs != "" and len(clean_obs) > len(clean_exp):
                             # 2. Fragment checker
-                            temp_leftover = leftover
+                            temp_leftover = leftover.replace(" ", "")
                             
                             # CRITICAL FIX: Stop "HIV | HIV" from passing against "HIVoPo"!
                             # We must enforce the exact same dynamic minimum length here in the Grid Catcher.
@@ -1597,7 +1594,7 @@ def main():
                     flat_obs = corrected_obs
                     
                     # --- FIX: STRICT ROLLING TEXT VALIDATOR (PENALIZE EXTRA TEXT & ENFORCE SEQUENCE) ---
-                    if used_rolling_this_attempt and flat_obs != flat_exp:
+                    if used_rolling_this_attempt and is_physically_rolling and flat_obs != flat_exp:
                         # The AI sometimes forgets the '|' separator, so we replace it with a space and split by spaces
                         chunks = [c.strip() for c in flat_obs.replace("|", " ").split() if c.strip()]
                         
@@ -1635,7 +1632,7 @@ def main():
                         # STRICT RULE 2: COMPLETENESS
                         if is_valid_rolling and len(exp_compare) > 0:
                             coverage_ratio = len(total_matched_chars_in_exp) / len(exp_compare)
-                            if coverage_ratio >= 0.70:
+                            if coverage_ratio >= 0.85: #change this higher for stricter validation
                                 t_applied_rolling = True
                                 corrected_obs = flat_exp  # Force a 100% PASS
                                 flat_obs = flat_exp       # <--- ADD THIS LINE HERE
@@ -1786,16 +1783,20 @@ def main():
             error_msg_display = f"[{err_type_str} ERROR: {words_str}]"
             print(error_msg_display)
             
-        # --- NEW FIX: STRICT ROLLING VS TRUNCATION TAGGING ---
-        has_ellipsis = ("..." in flat_obs or "…" in flat_obs or "..." in str(orig_text) or "…" in str(orig_text))
-        
-        # --- STRICT TRUNCATION LOGIC: ONLY IF '...' IS PRESENT ---
+       # --- TRUNCATION & ROLLING TAG LOGIC ---
         has_ellipsis = ("..." in flat_obs or "…" in flat_obs or "..." in str(orig_text) or "…" in str(orig_text))
         
         is_actually_rolling = final_applied_rolling or final_physically_rolling
         
-        # Absolute strict rule: If there are no dots, it is NEVER truncated. Period.
-        is_actually_truncated = has_ellipsis
+        # Tag it if dots were seen, OR if our math proved it was truncated implicitly!
+        is_actually_truncated = final_applied_truncation or has_ellipsis
+        
+        # --- NEW FIX: SILENCE THE AI EVALUATOR'S HALLUCINATED TAGS ---
+        if not has_ellipsis:
+            if 'final_reason' in locals() and type(final_reason) is str:
+                final_reason = final_reason.replace("[Word is truncated (...)] | ", "").replace("[Word is truncated (...)]", "").strip()
+                if final_reason.startswith("| "):
+                    final_reason = final_reason[2:]
 
         if is_actually_rolling:
             tag_str = "[Word is rolling (...)]"
