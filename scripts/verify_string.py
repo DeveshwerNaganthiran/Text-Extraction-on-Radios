@@ -1784,12 +1784,16 @@ def main():
             print(error_msg_display)
             
        # --- TRUNCATION & ROLLING TAG LOGIC ---
-        has_ellipsis = ("..." in flat_obs or "…" in flat_obs or "..." in str(orig_text) or "…" in str(orig_text))
+        # Stop checking raw 'orig_text' so AI grid hallucinations don't trigger the tag!
+        has_ellipsis = ("..." in flat_obs or "…" in flat_obs)
         
         is_actually_rolling = final_applied_rolling or final_physically_rolling
         
-        # Tag it if dots were seen, OR if our math proved it was truncated implicitly!
         is_actually_truncated = final_applied_truncation or has_ellipsis
+        
+        # CRITICAL FIX: If it is a perfect match, it is NEVER truncated!
+        if not final_applied_truncation and flat_obs.replace("...", "").replace("…", "").strip() == flat_exp:
+            is_actually_truncated = False
         
         # --- NEW FIX: SILENCE THE AI EVALUATOR'S HALLUCINATED TAGS ---
         if not has_ellipsis:

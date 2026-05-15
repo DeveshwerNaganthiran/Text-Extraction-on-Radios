@@ -961,6 +961,7 @@ class MSIGenAIOCR:
             ("!", ""),
             ("🔊", ""),
             ("🔕", ""),
+            ("🔔", ""),
             # --- NEW: VAPORIZE SPECIFIC SHEET1 HALLUCINATIONS ---
             ("i TXT", "TXT"),
             ("i 按", "按"),

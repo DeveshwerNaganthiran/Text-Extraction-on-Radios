@@ -2219,37 +2219,35 @@ class VerifyStringGUI:
                         
                     is_verify = bool(self._last_run_is_verification)
                     
-                    # --- GOOGLE DRIVE UPLOAD LOGIC (EXCEL ONLY) ---
+                    # --- GOOGLE DRIVE UPLOAD LOGIC (ENTERPRISE LOCAL SYNC) ---
                     if self.save_log_var.get() and getattr(self, "_log_session_dir", None):
                         def upload_to_drive():
-                            WEBHOOK_URL = "https://script.google.com/a/macros/motorolasolutions.com/s/AKfycby7H3J6fmWSE5XomVteawKTt9m4o1zdD8YBOPGptJ64k1yx3RtdUFRwguZ9ZGjc7WDbgA/exec" # <-- PASTE NEW URL HERE
-                            drive_folder = self.drive_folder_var.get().strip()
+                            import shutil
+                            import os
+                            from pathlib import Path
                             
-                            # Point to the Excel file instead of the text log
+                            drive_folder_name = self.drive_folder_var.get().strip()
+                            if not drive_folder_name:
+                                drive_folder_name = "Walkie_Tracker_Logs"
+                                
                             excel_path = Path(self._log_session_dir) / "Batch_Summary_Report.xlsx"
                             
                             if excel_path.exists():
                                 try:
-                                    import requests
-                                    import base64
+                                    # Try the standard Enterprise Google Drive letter (G:)
+                                    # If your Google Drive is on a different letter like D:, change it here!
+                                    target_dir = Path("G:/My Drive") / drive_folder_name
                                     
-                                    # Read the Excel file as binary and encode it to Base64
-                                    with open(excel_path, "rb") as f:
-                                        encoded_string = base64.b64encode(f.read()).decode('utf-8')
+                                    # Create the folder in your Google Drive if it doesn't exist yet
+                                    target_dir.mkdir(parents=True, exist_ok=True)
                                     
-                                    payload = {
-                                        "folderName": drive_folder,
-                                        "fileName": "Batch_Summary_Report.xlsx",
-                                        "contentBase64": encoded_string
-                                    }
+                                    # Copy the Excel file into the Google Drive folder
+                                    target_file = target_dir / "Batch_Summary_Report.xlsx"
+                                    shutil.copy2(excel_path, target_file)
                                     
-                                    response = requests.post(WEBHOOK_URL, json=payload, timeout=15)
-                                    if response.status_code == 200:
-                                        self.q.put(f"[GUI] Successfully backed up Excel Report to Google Drive folder '{drive_folder}'.\n", ("pass",))
-                                    else:
-                                        self.q.put(f"[GUI ERROR] Google Drive Webhook Error: {response.text}\n", ("error",))
+                                    self.q.put(f"[GUI] Successfully synced Excel Report to Motorola Google Drive: {target_file}\n", ("pass",))
                                 except Exception as e:
-                                    self.q.put(f"[GUI ERROR] Failed to upload Excel to Google Drive: {e}\n", ("error",))
+                                    self.q.put(f"[GUI ERROR] Failed to sync to Google Drive desktop folder: {e}\n", ("error",))
                         
                         # Run the upload in a background thread
                         threading.Thread(target=upload_to_drive, daemon=True).start()
