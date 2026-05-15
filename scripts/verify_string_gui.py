@@ -465,7 +465,13 @@ class VerifyStringGUI:
         self.drive_folder_var = tk.StringVar(value=str(self._settings.get("drive_folder", "Walkie_Logs")))
         
         tk.Label(extras, text="Drive Folder Name:").pack(side=tk.LEFT, padx=(12, 0))
-        tk.Entry(extras, textvariable=self.drive_folder_var, width=20).pack(side=tk.LEFT, padx=(6, 0))
+        tk.Entry(extras, textvariable=self.drive_folder_var, width=15).pack(side=tk.LEFT, padx=(6, 0))
+        
+        # --- NEW EXCEL FILENAME FIELD ---
+        self.excel_filename_var = tk.StringVar(value=str(self._settings.get("excel_filename", "Batch_Summary_Report.xlsx")))
+        tk.Label(extras, text="Excel Name:").pack(side=tk.LEFT, padx=(12, 0))
+        tk.Entry(extras, textvariable=self.excel_filename_var, width=20).pack(side=tk.LEFT, padx=(6, 0))
+        
         row += 1
 
         saved_model = str(self._settings.get("model_path") or "")
@@ -1422,7 +1428,8 @@ class VerifyStringGUI:
             "enable_retries": bool(self.enable_retries_var.get()),
             "retry_count": (self.retry_count_var.get() or "2").strip(),
             "log_path": (self.log_path_var.get() or "").strip(),
-            "drive_folder": (self.drive_folder_var.get() or "Walkie_Logs").strip(), # <-- ADD THIS
+            "drive_folder": (self.drive_folder_var.get() or "Walkie_Logs").strip(), 
+            "excel_filename": (self.excel_filename_var.get() or "Batch_Summary_Report.xlsx").strip(), # <-- ADD THIS
             "integration_enable": bool(self.integration_enable_var.get()),
             "integration_type": (self.integration_type_var.get() or "CommG"),
             "telnet_port": (self.telnet_port_var.get() or "23"),
@@ -1703,7 +1710,11 @@ class VerifyStringGUI:
         try:
             if self.save_log_var.get() and bool(is_verification) and self._log_session_dir:
                 cmd = list(cmd) + ["--save-roi-dir", self._log_session_dir]
-                excel_path = str(Path(self._log_session_dir) / "Batch_Summary_Report.xlsx")
+                
+                filename = self.excel_filename_var.get().strip() or "Batch_Summary_Report.xlsx"
+                if not filename.lower().endswith(".xlsx"): filename += ".xlsx"
+                
+                excel_path = str(Path(self._log_session_dir) / filename)
                 cmd = list(cmd) + ["--summary-excel", excel_path]
         except Exception as e:
             self.q.put(f"[GUI ERROR] Failed to initialize log paths: {e}\n")
@@ -2028,7 +2039,10 @@ class VerifyStringGUI:
         if not self.save_log_var.get() or not getattr(self, "_log_session_dir", None):
             return
             
-        xl_p = Path(self._log_session_dir) / "Batch_Summary_Report.xlsx"
+        filename = self.excel_filename_var.get().strip() or "Batch_Summary_Report.xlsx"
+        if not filename.lower().endswith(".xlsx"): filename += ".xlsx"
+        
+        xl_p = Path(self._log_session_dir) / filename
         if not xl_p.exists():
             return
             
@@ -2148,7 +2162,9 @@ class VerifyStringGUI:
                             self._update_summary_ui(self.current_filter)
                             
                             if getattr(self, "_log_session_dir", None):
-                                xl_p = Path(self._log_session_dir) / "Batch_Summary_Report.xlsx"
+                                filename = self.excel_filename_var.get().strip() or "Batch_Summary_Report.xlsx"
+                                if not filename.lower().endswith(".xlsx"): filename += ".xlsx"
+                                xl_p = Path(self._log_session_dir) / filename
                                 try:
                                     if not xl_p.exists():
                                         wb = Workbook()
@@ -2230,19 +2246,16 @@ class VerifyStringGUI:
                             if not drive_folder_name:
                                 drive_folder_name = "Walkie_Tracker_Logs"
                                 
-                            excel_path = Path(self._log_session_dir) / "Batch_Summary_Report.xlsx"
+                            filename = self.excel_filename_var.get().strip() or "Batch_Summary_Report.xlsx"
+                            if not filename.lower().endswith(".xlsx"): filename += ".xlsx"
+                                
+                            excel_path = Path(self._log_session_dir) / filename
                             
                             if excel_path.exists():
                                 try:
-                                    # Try the standard Enterprise Google Drive letter (G:)
-                                    # If your Google Drive is on a different letter like D:, change it here!
                                     target_dir = Path("G:/My Drive") / drive_folder_name
-                                    
-                                    # Create the folder in your Google Drive if it doesn't exist yet
                                     target_dir.mkdir(parents=True, exist_ok=True)
-                                    
-                                    # Copy the Excel file into the Google Drive folder
-                                    target_file = target_dir / "Batch_Summary_Report.xlsx"
+                                    target_file = target_dir / filename
                                     shutil.copy2(excel_path, target_file)
                                     
                                     self.q.put(f"[GUI] Successfully synced Excel Report to Motorola Google Drive: {target_file}\n", ("pass",))

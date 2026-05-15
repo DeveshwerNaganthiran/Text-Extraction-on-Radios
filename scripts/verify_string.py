@@ -1265,7 +1265,8 @@ def main():
                                         _, thresh = cv2.threshold(diff, 40, 255, cv2.THRESH_BINARY)
                                         
                                         # Text is thin. We must use 0.8% so we don't miss thin rolling letters!
-                                        if (np.count_nonzero(thresh) / float(thresh.size)) > 0.008: 
+                                        # BUMPED TO 2.5% to ignore LCD moire patterns and camera auto-exposure flicker
+                                        if (np.count_nonzero(thresh) / float(thresh.size)) > 0.025: 
                                             is_physically_rolling = True
                                             break
                                 except Exception: pass
@@ -1504,7 +1505,9 @@ def main():
                             corrected_obs = corrected_obs.replace(bad, good)
                     
                     if args.enable_truncation:
-                        # REMOVED the strict 'has_ellipsis' check so it can forgive AI blindness!
+                        # --- STRICT ELLIPSIS FIX ---
+                        has_ellipsis = ("..." in flat_obs or "…" in flat_obs)
+                        
                         def _strip_accents(s):
                             return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
 
@@ -1516,7 +1519,7 @@ def main():
                         if len(obs_compare) < len(exp_compare):
                             # CRITICAL FIX: Dynamic minimum match length with a CAP. 
                             if is_cjk_target:
-                                min_match_len = 1
+                                min_match_len = 1 if len(exp_compare) == 1 else 2
                             else:
                                 if len(exp_compare) <= 4:
                                     min_match_len = max(1, len(exp_compare) - 1)
@@ -1532,10 +1535,10 @@ def main():
                                     # Do NOT grant a truncation pass yet, let the grid-stitcher handle it!
                                     corrected_obs = obs_no_ellipsis
                                 else:
-                                    # The screen is perfectly static. This is a genuine truncation. 
-                                    # Force the 100% PASS!
-                                    t_applied_truncation = True
-                                    corrected_obs = flat_exp
+                                    # CRITICAL FIX: Only force the 100% PASS if it actually has an ellipsis!
+                                    if has_ellipsis:
+                                        t_applied_truncation = True
+                                        corrected_obs = flat_exp
                     
                     if is_cjk_target and flat_exp in flat_obs:
                         stripped_obs = re.sub(r'[A-Za-z]', '', flat_obs)
@@ -1586,12 +1589,14 @@ def main():
                                     is_pure_fragment = True
                                 
                         if is_static_repeat:
-                            corrected_obs = flat_exp
-                            # 파편만 반복되는 정지 화면이라면 Truncated 태그를 발동시킵니다.
-                            if is_pure_fragment and args.enable_truncation:
-                                t_applied_truncation = True
-                            
-                    flat_obs = corrected_obs
+                            # CRITICAL FIX: Don't pass pure fragments from rolling attempts unless they explicitly have an ellipsis
+                            if is_pure_fragment:
+                                has_ellipsis_grid = ("..." in flat_obs or "…" in flat_obs)
+                                if has_ellipsis_grid and args.enable_truncation:
+                                    corrected_obs = flat_exp
+                                    t_applied_truncation = True
+                            else:
+                                corrected_obs = flat_exp
                     
                     # --- FIX: STRICT ROLLING TEXT VALIDATOR (PENALIZE EXTRA TEXT & ENFORCE SEQUENCE) ---
                     if used_rolling_this_attempt and is_physically_rolling and flat_obs != flat_exp:
@@ -1788,12 +1793,14 @@ def main():
         has_ellipsis = ("..." in flat_obs or "…" in flat_obs)
         
         is_actually_rolling = final_applied_rolling or final_physically_rolling
-        
         is_actually_truncated = final_applied_truncation or has_ellipsis
         
-        # CRITICAL FIX: If it is a perfect match, it is NEVER truncated!
-        if not final_applied_truncation and flat_obs.replace("...", "").replace("…", "").strip() == flat_exp:
-            is_actually_truncated = False
+        # CRITICAL FIX: If it is a perfect match, it is NEVER truncated OR rolling!
+        if flat_obs.replace("...", "").replace("…", "").replace("|", "").strip() == flat_exp:
+            if not final_applied_truncation:
+                is_actually_truncated = False
+            if not final_applied_rolling:
+                is_actually_rolling = False
         
         # --- NEW FIX: SILENCE THE AI EVALUATOR'S HALLUCINATED TAGS ---
         if not has_ellipsis:
