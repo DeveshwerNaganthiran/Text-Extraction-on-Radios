@@ -275,7 +275,11 @@ def _language_options_from_excel(excel_path: str, region: str) -> list[str]:
     if not p.exists():
         return []
 
-    sheet = _sheet_name_for_region(str(p), region)
+    try:
+        sheet = _sheet_name_for_region(str(p), region)
+    except Exception:
+        return []
+        
     wb = load_workbook(filename=str(p), read_only=True, data_only=True)
     try:
         ws = wb[sheet]
@@ -373,6 +377,7 @@ class VerifyStringGUI:
         self._batch_log_dir = None  
 
         self._settings = _load_settings()
+        self.available_languages = ["English"]
 
         self.COMMG_PATH = r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Motorola\CommG_LTD\CommG_LTD.lnk"
         self.WINDOW_SEARCH_TERM = "CommuniGATOR"
@@ -390,8 +395,6 @@ class VerifyStringGUI:
         row = 0
 
         self.excel_var = tk.StringVar(value=str(self._settings.get("excel") or _default_excel_path()))
-        self.region_var = tk.StringVar(value=str(self._settings.get("region") or "Multiple"))
-        self.language_var = tk.StringVar(value=str(self._settings.get("language") or ""))
         self.tag_var = tk.StringVar(value=str(self._settings.get("tag") or ""))
         self.index_var = tk.StringVar(value=str(self._settings.get("index") or ""))
         
@@ -400,25 +403,6 @@ class VerifyStringGUI:
         tk.Label(frm, text="Excel (.xlsm/.xlsx)").grid(row=row, column=0, sticky="w")
         tk.Entry(frm, textvariable=self.excel_var, width=60).grid(row=row, column=1, sticky="we", padx=(8, 8))
         tk.Button(frm, text="Browse...", command=self.browse_excel).grid(row=row, column=2, sticky="e")
-        row += 1
-
-        tk.Label(frm, text="Region").grid(row=row, column=0, sticky="w", pady=(6, 0))
-        self.region_combo = ttk.Combobox(frm, textvariable=self.region_var, width=20, state="normal", values=["Multiple", "APAC", "EMEA", "LACR", "English"])
-        self.region_combo.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
-        self.region_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_languages())
-        self.region_combo.bind("<<ComboboxSelected>>", lambda _e: self.refresh_tags(), add=True)
-        row += 1
-
-        tk.Label(frm, text="Language(s)").grid(row=row, column=0, sticky="w", pady=(6, 0))
-        lang_frame = tk.Frame(frm)
-        lang_frame.grid(row=row, column=1, sticky="w", padx=(8, 0), pady=(6, 0))
-        
-        self.language_entry = ttk.Entry(lang_frame, textvariable=self.language_var, width=30)
-        self.language_entry.pack(side=tk.LEFT)
-        
-        self.language_combo = ttk.Combobox(lang_frame, width=18, state="readonly")
-        self.language_combo.pack(side=tk.LEFT, padx=(5, 0))
-        self.language_combo.bind("<<ComboboxSelected>>", self._add_language)
         row += 1
 
         tk.Label(frm, text="String Tag").grid(row=row, column=0, sticky="w", pady=(6, 0))
@@ -438,7 +422,6 @@ class VerifyStringGUI:
         self.save_log_var = tk.BooleanVar(value=bool(self._settings.get("save_log", False)))
         self.log_path_var = tk.StringVar(value=str(self._settings.get("log_path") or ""))
         
-        # --- ADD THESE TWO LINES ---
         self.enable_rolling_var = tk.BooleanVar(value=bool(self._settings.get("enable_rolling", False)))
         self.enable_truncation_var = tk.BooleanVar(value=bool(self._settings.get("enable_truncation", False)))
         self.enable_retries_var = tk.BooleanVar(value=bool(self._settings.get("enable_retries", False)))
@@ -454,7 +437,6 @@ class VerifyStringGUI:
         self.camera_combo.pack(side=tk.LEFT)
         tk.Button(extras, text="Refresh", command=self.refresh_cameras).pack(side=tk.LEFT, padx=(6, 0))
         
-        # --- ADD THESE TWO CHECKBOXES ---
         tk.Checkbutton(extras, text="Rolling Text", variable=self.enable_rolling_var).pack(side=tk.LEFT, padx=(12, 0))
         tk.Checkbutton(extras, text="Truncation (...)", variable=self.enable_truncation_var).pack(side=tk.LEFT, padx=(6, 0))
         tk.Checkbutton(extras, text="Custom Retries", variable=self.enable_retries_var).pack(side=tk.LEFT, padx=(12, 0))
@@ -467,7 +449,6 @@ class VerifyStringGUI:
         tk.Label(extras, text="Drive Folder Name:").pack(side=tk.LEFT, padx=(12, 0))
         tk.Entry(extras, textvariable=self.drive_folder_var, width=15).pack(side=tk.LEFT, padx=(6, 0))
         
-        # --- NEW EXCEL FILENAME FIELD ---
         self.excel_filename_var = tk.StringVar(value=str(self._settings.get("excel_filename", "Batch_Summary_Report.xlsx")))
         tk.Label(extras, text="Excel Name:").pack(side=tk.LEFT, padx=(12, 0))
         tk.Entry(extras, textvariable=self.excel_filename_var, width=20).pack(side=tk.LEFT, padx=(6, 0))
@@ -551,12 +532,14 @@ class VerifyStringGUI:
         self.device_rows = []
 
         tk.Label(self.lf_devices, text="ID").grid(row=0, column=0, sticky="w", padx=(0, 10))
-        tk.Label(self.lf_devices, text="Name").grid(row=0, column=1, sticky="w")
+        tk.Label(self.lf_devices, text="Name").grid(row=0, column=1, sticky="w", padx=(0, 10))
+        tk.Label(self.lf_devices, text="Language").grid(row=0, column=2, sticky="w")
 
         dev_btns = tk.Frame(self.lf_devices)
-        dev_btns.grid(row=0, column=2, rowspan=5, sticky="ne", padx=(12, 0))
+        dev_btns.grid(row=0, column=3, rowspan=5, sticky="ne", padx=(12, 0))
         tk.Label(dev_btns, text="Devices auto-sync\nwith IP addresses", fg="gray", font=("Arial", 8)).pack(fill="x", pady=(8, 2))
 
+        self.refresh_languages()
         self._sync_devices_to_ips(initial_load=True)
         row += 1
 
@@ -655,7 +638,6 @@ class VerifyStringGUI:
                 self.camera_combo["values"] = [cur]
         except Exception:
             pass
-        self.refresh_languages()
         self.refresh_tags()
 
         try:
@@ -664,18 +646,6 @@ class VerifyStringGUI:
             pass
 
         self.root.after(50, self._drain_queue)
-
-    def _add_language(self, event=None):
-        val = self.language_combo.get()
-        if not val: return
-        current = self.language_var.get().strip()
-        if current:
-            existing = [x.strip().lower() for x in current.split(",")]
-            if val.lower() not in existing:
-                self.language_var.set(current + ", " + val)
-        else:
-            self.language_var.set(val)
-        self.language_combo.set('')
 
     def _on_index_changed(self, *args):
         if getattr(self, "_commg_is_active_run", False): return
@@ -1179,10 +1149,11 @@ class VerifyStringGUI:
         for idx, row in enumerate(self.device_rows):
             row_idx = idx + 1
             widgets = row.get("widgets") or ()
-            if len(widgets) >= 2:
-                lbl_id, ent_name = widgets[:2]
+            if len(widgets) >= 3:
+                lbl_id, ent_name, cb_lang = widgets[:3]
                 lbl_id.grid(row=row_idx, column=0, sticky="w", padx=(0, 10), pady=2)
-                ent_name.grid(row=row_idx, column=1, sticky="ew", pady=2)
+                ent_name.grid(row=row_idx, column=1, sticky="ew", pady=2, padx=(0, 10))
+                cb_lang.grid(row=row_idx, column=2, sticky="ew", pady=2)
 
     def _renumber_device_rows(self):
         for idx, row in enumerate(self.device_rows):
@@ -1196,22 +1167,29 @@ class VerifyStringGUI:
                 except Exception:
                     pass
 
-    def _add_device_row(self, did: int, name: str = ""):
+    def _add_device_row(self, did: int, name: str = "", lang: str = "English"):
         var_name = tk.StringVar(value=str(name or ""))
+        var_lang = tk.StringVar(value=str(lang or "English"))
 
         lbl_id = tk.Label(self.lf_devices, text=f"D{int(did)}")
-        ent_name = tk.Entry(self.lf_devices, textvariable=var_name, width=30)
+        ent_name = tk.Entry(self.lf_devices, textvariable=var_name, width=20)
+        cb_lang = ttk.Combobox(self.lf_devices, textvariable=var_lang, width=15, state="readonly")
+        
+        if hasattr(self, 'available_languages'):
+            cb_lang['values'] = self.available_languages
 
         self.device_rows.append({
             "id": int(did),
             "var_name": var_name,
-            "widgets": (lbl_id, ent_name),
+            "var_lang": var_lang,
+            "widgets": (lbl_id, ent_name, cb_lang),
         })
 
     def _sync_devices_to_ips(self, initial_load=False):
         ips = list(self.ip_listbox.get(0, tk.END))
         
         names_dict = {}
+        langs_dict = {}
         if initial_load:
             try:
                 cfgp = Path(__file__).resolve().parents[1] / "configs" / "device_profiles.json"
@@ -1220,6 +1198,7 @@ class VerifyStringGUI:
                         obj = json.load(f) or {}
                     for d in obj.get("devices", []):
                         names_dict[int(d.get("id"))] = d.get("name", "")
+                        langs_dict[int(d.get("id"))] = d.get("language", "English")
             except Exception: pass
 
         while len(self.device_rows) > len(ips):
@@ -1231,7 +1210,8 @@ class VerifyStringGUI:
         while len(self.device_rows) < len(ips):
             next_id = len(self.device_rows) + 1
             name = names_dict.get(next_id, f"Device {next_id}") if initial_load else f"Device {next_id}"
-            self._add_device_row(next_id, name)
+            lang = langs_dict.get(next_id, "English") if initial_load else "English"
+            self._add_device_row(next_id, name, lang)
 
         self._regrid_device_rows()
         self._renumber_device_rows()
@@ -1416,20 +1396,18 @@ class VerifyStringGUI:
         
         return {
             "excel": (self.excel_var.get() or "").strip(),
-            "region": (self.region_var.get() or "").strip(),
-            "language": (self.language_var.get() or "").strip(),
             "tag": (self.tag_var.get() or "").strip(),
             "index": (self.index_var.get() or "").strip(),
             "model_path": (self.model_path_var.get() or "").strip(),
             "camera_id": camera_id,
             "save_log": bool(self.save_log_var.get()),
-            "enable_rolling": bool(self.enable_rolling_var.get()),     # <-- ADD THIS
-            "enable_truncation": bool(self.enable_truncation_var.get()), # <-- ADD THIS
+            "enable_rolling": bool(self.enable_rolling_var.get()),     
+            "enable_truncation": bool(self.enable_truncation_var.get()), 
             "enable_retries": bool(self.enable_retries_var.get()),
             "retry_count": (self.retry_count_var.get() or "2").strip(),
             "log_path": (self.log_path_var.get() or "").strip(),
             "drive_folder": (self.drive_folder_var.get() or "Walkie_Logs").strip(), 
-            "excel_filename": (self.excel_filename_var.get() or "Batch_Summary_Report.xlsx").strip(), # <-- ADD THIS
+            "excel_filename": (self.excel_filename_var.get() or "Batch_Summary_Report.xlsx").strip(), 
             "integration_enable": bool(self.integration_enable_var.get()),
             "integration_type": (self.integration_type_var.get() or "CommG"),
             "telnet_port": (self.telnet_port_var.get() or "23"),
@@ -1505,32 +1483,25 @@ class VerifyStringGUI:
 
     def refresh_languages(self):
         excel = (self.excel_var.get() or "").strip()
-        region = (self.region_var.get() or "").strip() or "Multiple"
-        
-        if region.lower() == "multiple":
+        opts = []
+        if excel:
             try: 
                 opts1 = _language_options_from_excel(excel, "apac")
                 opts2 = _language_options_from_excel(excel, "emea")
                 opts3 = _language_options_from_excel(excel, "lacr")
                 opts = list(set(opts1 + opts2 + opts3))
             except Exception:
-                opts = []
-            if not opts:
-                opts = ["Japanese", "Korean", "Simplified Chinese", "Traditional Chinese", "French", "Spanish", "German", "Italian", "Polish", "Russian", "Turkish", "Arabic", "Hungarian", "Hebrew", "Czech", "Portuguese", "English"]
-        elif region.lower() == "english":
-            opts = ["English"]
-        else:
-            try: opts = _language_options_from_excel(excel, region)
-            except Exception: opts = []
+                pass
+        if not opts:
+            opts = ["Japanese", "Korean", "Simplified Chinese", "Traditional Chinese", "French", "Spanish", "German", "Italian", "Polish", "Russian", "Turkish", "Arabic", "Hungarian", "Hebrew", "Czech", "Portuguese", "English"]
 
-            if not opts:
-                opts = ["Japanese", "Korean", "Simplified Chinese", "Traditional Chinese", "French", "Spanish", "German", "Italian", "Polish", "Russian", "Turkish", "Arabic", "Hungarian", "Hebrew", "Czech", "Portuguese", "English"]
-
-        try:
-            self.language_combo["values"] = sorted(opts)
-            if not self.language_var.get().strip() and opts:
-                self.language_var.set(opts[0])
-        except Exception: pass
+        self.available_languages = sorted(opts)
+        for r in self.device_rows:
+            if len(r.get("widgets", [])) >= 3:
+                cb = r["widgets"][2]
+                cb["values"] = self.available_languages
+                if not r["var_lang"].get() and self.available_languages:
+                    r["var_lang"].set(self.available_languages[0])
 
     def refresh_tags(self):
         excel = (self.excel_var.get() or "").strip()
@@ -1599,14 +1570,14 @@ class VerifyStringGUI:
         excel = self.excel_var.get().strip()
         if not excel: raise ValueError("Excel path is required")
 
-        region = self.region_var.get().strip()
-        language = self.language_var.get().strip()
         tag = self.tag_var.get().strip()
         idx = self.index_var.get().strip()
 
-        if not region: raise ValueError("Region is required (e.g., Multiple/APAC/EMEA/LACR/English)")
-        if not language: raise ValueError("Language is required (e.g., Auto/Japanese)")
         if not tag and not idx: raise ValueError("Provide either String Tag or Index")
+
+        region = "Multiple"
+        langs = [r.get("var_lang").get().strip() or "English" for r in self.device_rows]
+        language = ",".join(langs) if langs else "English"
 
         script_path = Path(__file__).resolve().parent / "verify_string.py"
         cmd = [_python_exe(), str(script_path), "--excel", excel, "--region", region, "--language", language]
@@ -1614,7 +1585,6 @@ class VerifyStringGUI:
         if tag: cmd += ["--tag", tag]
         if idx: cmd += ["--index", idx]
         
-        # --- ADD THESE FLAGS IF ENABLED ---
         if self.enable_rolling_var.get():
             cmd += ["--enable-rolling"]
         if self.enable_truncation_var.get():
@@ -1726,7 +1696,8 @@ class VerifyStringGUI:
             for r in self.device_rows:
                 did = int(r.get("id"))
                 nm = str(r.get("var_name").get() if r.get("var_name") else "").strip()
-                devices.append({"id": did, "name": nm})
+                lang = str(r.get("var_lang").get() if "var_lang" in r else "English").strip()
+                devices.append({"id": did, "name": nm, "language": lang})
             
             env["WALKIE_DEVICE_PROFILES_JSON"] = json.dumps({"devices": devices}, ensure_ascii=False)
             cfgp = Path(__file__).resolve().parents[1] / "configs" / "device_profiles.json"
@@ -1788,7 +1759,8 @@ class VerifyStringGUI:
             for r in self.device_rows:
                 did = int(r.get("id"))
                 nm = str(r.get("var_name").get() if r.get("var_name") else "").strip()
-                devices.append({"id": did, "name": nm})
+                lang = str(r.get("var_lang").get() if "var_lang" in r else "English").strip()
+                devices.append({"id": did, "name": nm, "language": lang})
             env["WALKIE_DEVICE_PROFILES_JSON"] = json.dumps({"devices": devices}, ensure_ascii=False)
             cfgp = Path(__file__).resolve().parents[1] / "configs" / "device_profiles.json"
             cfgp.parent.mkdir(parents=True, exist_ok=True)
@@ -2147,6 +2119,7 @@ class VerifyStringGUI:
                             for i, (t, idx) in enumerate(zip(self.tag_var.get().split(","), self.index_var.get().split(","))):
                                 dev_nm = ips[i] if i < len(ips) else f"Device {i+1}"
                                 cmd_str = cmds_for_skip[i] if i < len(cmds_for_skip) else "-"
+                                dev_lang = self.device_rows[i].get("var_lang").get() if i < len(self.device_rows) else "English"
                                 
                                 style_str = "-"
                                 try:
@@ -2191,8 +2164,8 @@ class VerifyStringGUI:
                                         ws.append([
                                             time.strftime("%Y-%m-%d %H:%M:%S"),
                                             rec["device"],
-                                            self.region_var.get().strip(),
-                                            self.language_var.get().strip(),
+                                            "Multiple",
+                                            dev_lang,
                                             rec.get("command", "-"),
                                             rec.get("display_style", "-"),
                                             rec["index"], 

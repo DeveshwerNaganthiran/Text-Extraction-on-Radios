@@ -415,7 +415,6 @@ def map_language_to_region(lang: str, text: str = "", allowed_langs: str = "") -
         ln = lang_name.lower().strip()
         if "korean" in ln or "japanese" in ln or "chinese" in ln or "thai" in ln: return "apac"
         if "portuguese" in ln: return "lacr" 
-        # ---> FIX: STRICT MATCHING SO 'FRENCH' IS NOT CONFUSED FOR 'EN' <---
         if "english" in ln or ln == "en": return "english"
         return "emea" 
 
@@ -1025,33 +1024,35 @@ def main():
     indices = [x.strip() for x in args.index.split(",")] if args.index else []
     tags = [x.strip() for x in args.tag.split(",")] if args.tag else []
     commands = [x.strip() for x in args.command.split(",")] if args.command else []
+    languages = [x.strip() for x in args.language.split(",")] if args.language else []
 
     expected_list = []
-    max_len = max(len(indices), len(tags), len(commands), 1)
+    max_len = max(len(indices), len(tags), len(commands), len(languages), 1)
 
     for i in range(max_len):
         idx_val = indices[i] if i < len(indices) else (indices[-1] if indices else "")
         tag_val = tags[i] if i < len(tags) else (tags[-1] if tags else "")
         cmd_val = commands[i] if i < len(commands) else (commands[-1] if commands else "")
+        lang_val = languages[i] if i < len(languages) else (languages[-1] if languages else "English")
         
         disp_style = get_display_style_name(cmd_val)
 
         if tag_val == "SKIP_VERIFY" or idx_val == "SKIP_VERIFY":
-            expected_list.append({"index": "SKIP_VERIFY", "tag": "SKIP_VERIFY", "command": cmd_val, "display_style": disp_style, "expected_en": "SKIP", "expected_local": "SKIP"})
+            expected_list.append({"index": "SKIP_VERIFY", "tag": "SKIP_VERIFY", "command": cmd_val, "display_style": disp_style, "expected_en": "SKIP", "expected_local": "SKIP", "language": lang_val, "region": "Multiple"})
             continue
             
         try:
-            exp = load_expected(args.excel, "english", "english", index=idx_val, tag=tag_val)
+            r, _ = map_language_to_region(lang_val, "", allowed_langs=lang_val)
+            exp = load_expected(args.excel, r, lang_val, index=idx_val, tag=tag_val)
             exp["command"] = cmd_val
             exp["display_style"] = disp_style
+            exp["language"] = lang_val
+            exp["region"] = r
             expected_list.append(exp)
         except Exception as e:
-            expected_list.append({"index": idx_val, "tag": tag_val, "command": cmd_val, "display_style": disp_style, "expected_en": "", "expected_local": ""})
+            expected_list.append({"index": idx_val, "tag": tag_val, "command": cmd_val, "display_style": disp_style, "expected_en": "", "expected_local": "", "language": lang_val, "region": "english"})
 
-    # We only save the languages chosen in the GUI, we DO NOT search Excel yet!
-    chosen_langs = [l.strip() for l in args.language.split(",") if l.strip()] if args.region.lower() == "multiple" else [args.language]
     print("Expected (Local): [Will detect language via AI first, then fetch from Excel]")
-
 
     if args.preview:
         detector = FastDetector(model_path)
@@ -1113,66 +1114,27 @@ def main():
         print(f"Index: {exp_dict.get('index', '')}")
         if exp_dict.get('tag'): print(f"Tag: {exp_dict.get('tag', '')}")
 
-        # --- PRE-FETCH EXCEL TARGETS BASED STRICTLY ON GUI SELECTION ---
-        chosen_langs = [l.strip() for l in args.language.split(",") if l.strip()] if args.region.lower() == "multiple" else [args.language]
         active_targets = []
+        cl = exp_dict.get("language", "English")
+        r = exp_dict.get("region", "english")
+        target_str = str(exp_dict.get("expected_local", "")).strip()
+        english_str = str(exp_dict.get("expected_en", "")).strip()
         
-        print("\n" + "="*60)
-        print(f"DEBUG EXCEL FETCH: File: {args.excel}")
-        print(f"Index: {exp_dict.get('index')} | Tag: {exp_dict.get('tag')}")
+        print(f"\n" + "="*60)
+        print(f"Language: {cl} | Region: {r}")
         
-        for cl in chosen_langs:
-            r, _ = map_language_to_region("", "", allowed_langs=cl)
-            try:
-                # --- DEEP DIAGNOSTIC ---
-                xls_debug = pd.ExcelFile(args.excel, engine="openpyxl")
-                sheet_name = _find_sheet(xls_debug, r)
-                df_debug = pd.read_excel(xls_debug, sheet_name=sheet_name, engine="openpyxl")
-                tag_col = _find_tag_column(df_debug) 
-                lang_col = _pick_language_column(df_debug, r, cl)
-                
-                print(f"  -> [Diagnostics] Searching Sheet: '{sheet_name}' | Tag Column: '{tag_col}' | Target Column: '{lang_col}'")
-                
-                if tag_col and lang_col:
-                    matched = df_debug[df_debug[tag_col].astype(str).str.strip().str.lower() == str(exp_dict.get('tag')).strip().lower()]
-                    print(f"  -> [Diagnostics] Found {len(matched)} matching row(s) for Tag '{exp_dict.get('tag')}'.")
-                    for i, (idx_num, row_data) in enumerate(matched.iterrows()):
-                        # Excel rows are 0-indexed in Pandas, plus header, so Excel Row is idx_num + 2
-                        val = row_data.get(lang_col, '')
-                        print(f"     - Match {i+1} (Excel Row {idx_num+2}): Value in '{lang_col}' is -> '{val}'")
-                # -----------------------
-
-                n_exp = load_expected(args.excel, r, cl, index=exp_dict.get("index"), tag=exp_dict.get("tag"))
-                target_str = str(n_exp.get("expected_local", "")).strip()
-                english_str = str(n_exp.get("expected_en", "")).strip()
-                
-                print(f"  -> Final Picked '{cl}' Value: '{target_str}'")
-                
-                if not target_str or target_str.lower() == "nan":
-                    target_str = english_str
-                    print(f"  -> [WARNING] Excel cell is empty! Falling back to English.")
-                elif target_str.upper() == english_str.upper():
-                    print(f"  -> [WARNING] The value extracted for {cl} exactly matches the English text! Is it untranslated in the spreadsheet?")
-                
-                active_targets.append({
-                    "region": r,
-                    "language": cl,
-                    "exp_target": target_str
-                })
-            except Exception as e:
-                print(f"  -> [ERROR] Failed to fetch '{cl}' from Excel. Reason: {e}")
-
+        if not target_str or target_str.lower() == "nan":
+            target_str = english_str
+            print(f"  -> [WARNING] Excel cell is empty! Falling back to English.")
+        elif target_str.upper() == english_str.upper() and cl.lower() not in ["english", "en"]:
+            print(f"  -> [WARNING] The value extracted for {cl} exactly matches the English text! Is it untranslated in the spreadsheet?")
+            
+        active_targets.append({
+            "region": r,
+            "language": cl,
+            "exp_target": target_str
+        })
         print("="*60 + "\n")
-
-        # Fallback if nothing was found in Excel
-        if not active_targets:
-            active_targets.append({
-                "region": args.region,
-                "language": args.language,
-                "exp_target": exp_dict.get("expected_local", "") or exp_dict.get("expected_en", "")
-            })
-        # -------------------------------------------------------------------------
-
 
         # Check GUI setting: Default to 2 (first normal, second retry for rolling/truncation) unless Custom Retries is checked
         if args.enable_retries:
@@ -1474,6 +1436,23 @@ def main():
                 flat_obs = _clean_for_compare(observed_n, is_cjk_target)
                 flat_exp = _clean_for_compare(expected_local_n, is_cjk_target)
                 
+                # --- FIX: COLLAPSE STATIC GRIDS ---
+                # If a rolling grid was captured but the text isn't actually moving, 
+                # the AI outputs repeated text (e.g. "Text... | Text...").
+                # We must collapse it back to a single chunk so the normal truncation scorer works.
+                if used_rolling_this_attempt and not is_physically_rolling:
+                    if "|" in flat_obs:
+                        chunks = [c.strip() for c in flat_obs.split('|') if c.strip()]
+                        if chunks:
+                            flat_obs = chunks[0]
+
+                # --- FIX: CASE AND ACCENT INSENSITIVITY ---
+                def _strip_accents(s):
+                    return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
+                
+                if _strip_accents(flat_obs.lower()) == _strip_accents(flat_exp.lower()):
+                    flat_obs = flat_exp
+                
                 # --- FIX: CASE AND ACCENT INSENSITIVITY ---
                 def _strip_accents(s):
                     return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
@@ -1530,7 +1509,10 @@ def main():
                             if len(obs_compare) >= min_match_len and (exp_compare.startswith(obs_compare) or exp_compare.endswith(obs_compare)):
                                 
                                 # --- FIX: TRUNCATION vs ROLLING COLLISION ---
-                                if args.enable_rolling and is_physically_rolling:
+                                if args.enable_rolling and not used_rolling_this_attempt:
+                                    # Attempt 0: Force a retry to check if text is physically moving!
+                                    pass
+                                elif args.enable_rolling and is_physically_rolling:
                                     # The text is physically moving across the screen. 
                                     # Do NOT grant a truncation pass yet, let the grid-stitcher handle it!
                                     corrected_obs = obs_no_ellipsis
@@ -1561,10 +1543,10 @@ def main():
                             is_static_repeat = True
                         elif clean_obs != "" and len(clean_obs) > len(clean_exp):
                             # 2. Fragment checker
-                            temp_leftover = leftover.replace(" ", "")
+                            temp_leftover = _strip_accents(leftover.lower()).replace(" ", "")
+                            clean_exp_nospace = _strip_accents(clean_exp.lower()).replace(" ", "")
                             
                             # CRITICAL FIX: Stop "HIV | HIV" from passing against "HIVoPo"!
-                            # We must enforce the exact same dynamic minimum length here in the Grid Catcher.
                             if is_cjk_target:
                                 min_frag_len = 1
                             else:
@@ -1574,10 +1556,10 @@ def main():
                                     min_frag_len = max(4, int(len(clean_exp) * 0.60))
                             
                             # Only allow the checker to run if the expected string is long enough
-                            if len(clean_exp) > min_frag_len:
-                                for i in range(1, len(clean_exp) - min_frag_len + 1):
-                                    prefix = clean_exp[:len(clean_exp)-i]
-                                    suffix = clean_exp[i:]
+                            if len(clean_exp_nospace) > min_frag_len:
+                                for i in range(1, len(clean_exp_nospace) - min_frag_len + 1):
+                                    prefix = clean_exp_nospace[:len(clean_exp_nospace)-i]
+                                    suffix = clean_exp_nospace[i:]
                                     if len(prefix) >= min_frag_len: 
                                         temp_leftover = temp_leftover.replace(prefix, "")
                                     if len(suffix) >= min_frag_len: 
@@ -1640,7 +1622,12 @@ def main():
                             if coverage_ratio >= 0.85: #change this higher for stricter validation
                                 t_applied_rolling = True
                                 corrected_obs = flat_exp  # Force a 100% PASS
-                                flat_obs = flat_exp       # <--- ADD THIS LINE HERE
+                                
+                    # -------------------------------------------------------------------
+                    # CRITICAL FIX: We must update the final observation variable so the 
+                    # truncation/dictionary fixes are actually passed to the scorer!
+                    # -------------------------------------------------------------------
+                    flat_obs = corrected_obs
 
                 # ---> PROPERLY ALIGNED FINAL SCORING BLOCK <---
                 t_conf = 0.0
@@ -1804,10 +1791,10 @@ def main():
         
         # --- NEW FIX: SILENCE THE AI EVALUATOR'S HALLUCINATED TAGS ---
         if not has_ellipsis:
-            if 'final_reason' in locals() and type(final_reason) is str:
-                final_reason = final_reason.replace("[Word is truncated (...)] | ", "").replace("[Word is truncated (...)]", "").strip()
-                if final_reason.startswith("| "):
-                    final_reason = final_reason[2:]
+            if error_msg_display:
+                error_msg_display = error_msg_display.replace("[Word is truncated (...)] | ", "").replace("[Word is truncated (...)]", "").strip()
+                if error_msg_display.startswith("| "):
+                    error_msg_display = error_msg_display[2:]
 
         if is_actually_rolling:
             tag_str = "[Word is rolling (...)]"
@@ -1823,13 +1810,6 @@ def main():
             
             # Combine the AI's reason with the confidence score requested
             text_err = f"Mismatch (Conf: {confidence_pct}%): {ai_mismatch_reason}"
-            
-            if error_msg_display:
-                error_msg_display += f" | {text_err}"
-            else:
-                error_msg_display = text_err
-                
-            print(f"[VERDICT REASON] {text_err}")
             
             if error_msg_display:
                 error_msg_display += f" | {text_err}"
