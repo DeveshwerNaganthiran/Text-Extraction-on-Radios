@@ -3,16 +3,17 @@ import time
 import uiautomator2 as u2
 from adbutils import adb
 
-# Mapping of requested languages to their display names in Android Locale Settings
+# Base native names for finding the language in the list or search results
+# (Removed the region brackets so it just matches the core name)
 LANGUAGE_MAP = {
-    "Czech": "Čeština (Česko)",
+    "Czech": "Čeština",
     "Simplified Chinese": "简体中文",
     "Portuguese": "Português",
     "Spanish": "Español",
     "Polish": "Polski",
     "Italian": "Italiano",
     "Turkish": "Türkçe",
-    "Hungarian": "Magyar (Magyarország)",
+    "Hungarian": "Magyar",
     "English": "English",
     "Japanese": "日本語",
     "Russian": "Русский",
@@ -20,6 +21,22 @@ LANGUAGE_MAP = {
     "German": "Deutsch",
     "Korean": "한국어",
     "Traditional Chinese": "繁體中文"
+}
+
+# Preferred regions if Android prompts for one. 
+# If not listed, it will just pick the first available option.
+REGION_MAP = {
+    "Czech": "Česko",
+    "Hungarian": "Magyarország",
+    "English": "United States",
+    "Simplified Chinese": "中国",  # China
+    "Traditional Chinese": "台灣", # Taiwan
+    "Spanish": "España",
+    "French": "France",
+    "German": "Deutschland",
+    "Italian": "Italia",
+    "Portuguese": "Brasil", 
+    "Russian": "Россия"
 }
 
 def get_device(serial=None):
@@ -43,6 +60,7 @@ def change_language(d, target_lang_name):
     time.sleep(2)
 
     target_ui_name = LANGUAGE_MAP.get(target_lang_name, target_lang_name)
+    target_region = REGION_MAP.get(target_lang_name, "")
 
     # 1. CHECK IF ALREADY IN MAIN LIST (Do a few short scrolls to check)
     found_in_main = False
@@ -79,17 +97,17 @@ def change_language(d, target_lang_name):
             if search_btn.exists:
                 search_btn.click()
                 time.sleep(1)
-                d.send_keys(target_ui_name)
+                d.send_keys(target_lang_name) # Search in English (e.g. "Hungarian")
                 time.sleep(1.5)
             else:
                 alt_search = d(descriptionMatches=".*[Ss]earch.*")
                 if alt_search.exists:
                     alt_search.click()
                     time.sleep(1)
-                    d.send_keys(target_ui_name)
+                    d.send_keys(target_lang_name) # Search in English
                     time.sleep(1.5)
 
-            # Click the language search result
+            # Click the language search result matching the Native Name (e.g. "Magyar")
             result = d(textContains=target_ui_name)
             if result.exists:
                 try:
@@ -99,27 +117,41 @@ def change_language(d, target_lang_name):
                 time.sleep(2.0)
                 
                 # =========================================================
-                # NEW: AUTOMATED REGION / COUNTRY SELECTION INTERCEPT
+                # AUTOMATED REGION / COUNTRY SELECTION INTERCEPT
                 # =========================================================
                 # If the '+ Add a language' button is still NOT visible, 
                 # it means Android is forcing a region choice screen.
                 if not d(resourceIdMatches=".*add_language.*").exists:
-                    print("Detected region selection screen. Picking the first available region...")
+                    print("Detected region selection screen. Picking the correct region...")
                     
-                    # Try to find the first clickable choice inside the list view
-                    region_option = d(resourceId="android:id/text1")
-                    if not region_option.exists:
-                        region_option = d(className="android.widget.TextView", clickable=True)
-                    if not region_option.exists:
-                        region_option = d(className="android.widget.LinearLayout", clickable=True, instance=0)
+                    region_clicked = False
                     
-                    if region_option.exists:
-                        try:
-                            region_option.click(timeout=3)
-                            print("Region chosen successfully.")
-                        except Exception as e:
-                            print(f"Warning clicking region: {e}")
-                        time.sleep(2.5)
+                    # Try to click the specific mapped region (e.g. Magyarország)
+                    if target_region:
+                        specific_region = d(textContains=target_region)
+                        if specific_region.exists:
+                            try:
+                                specific_region.click(timeout=3)
+                                print(f"Region '{target_region}' chosen successfully.")
+                                region_clicked = True
+                            except Exception as e:
+                                print(f"Warning clicking specific region: {e}")
+                                
+                    # Fallback to the first available choice if not mapped or not found
+                    if not region_clicked:
+                        region_option = d(resourceId="android:id/text1")
+                        if not region_option.exists:
+                            region_option = d(className="android.widget.TextView", clickable=True)
+                        if not region_option.exists:
+                            region_option = d(className="android.widget.LinearLayout", clickable=True, instance=0)
+                        
+                        if region_option.exists:
+                            try:
+                                region_option.click(timeout=3)
+                                print("First available region chosen successfully.")
+                            except Exception as e:
+                                print(f"Warning clicking fallback region: {e}")
+                    time.sleep(2.5)
                 # =========================================================
                 
             else:
@@ -164,10 +196,11 @@ def change_language(d, target_lang_name):
             # If stuck in same spot twice or very high up, it is in Slot #1
             if stuck_count >= 2 or sy < 200:
                 print(f"Verified: '{target_ui_name}' is currently active at the top (Y={sy}).")
+                time.sleep(2.0) # Ensure OS fully updates locale globally
                 return True
                 
             print(f"Dragging '{target_ui_name}' from Y={sy} upwards...")
-            d.drag(sx, sy, sx, 100, duration=0.4) # Drag it high up
+            d.drag(sx, sy, sx, 50, duration=1.0) # Drag it high up (slowed down duration to prevent dropped inputs)
             time.sleep(1.0)
             
             d.swipe(0.5, 0.3, 0.5, 0.8, duration=0.2)

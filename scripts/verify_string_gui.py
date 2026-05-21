@@ -1199,17 +1199,68 @@ class VerifyStringGUI:
                                     time.sleep(2.0)
                                 time.sleep(2.0)
                             
-                            # STEP B: SHIFT TO TARGET LANGUAGE (5 Retries Max)
+                            # STEP B: SHIFT TO TARGET LANGUAGE WITH CLOSED-LOOP VALIDATION (5 Retries Max)
                             self.q.put(f"[UI Auto] Executing language change on {ip} to '{target_lang}'...\n")
                             success = False
+                            
+                            def check_system_locale(target_lang_name):
+                                try:
+                                    # Fetch current system locale via ADB
+                                    res = subprocess.run(
+                                        ["adb", "-s", "199.0.0.4:5500", "shell", "getprop", "persist.sys.locale"], 
+                                        capture_output=True, text=True, creationflags=creationflags
+                                    )
+                                    current_locale = res.stdout.strip().lower()
+                                    
+                                    # Fallback for newer Android versions
+                                    if not current_locale:
+                                        res = subprocess.run(
+                                            ["adb", "-s", "199.0.0.4:5500", "shell", "settings", "get", "system", "system_locales"], 
+                                            capture_output=True, text=True, creationflags=creationflags
+                                        )
+                                        current_locale = res.stdout.strip().lower()
+
+                                    # Map Requested Language to Android Locale Code Prefix
+                                    prefix_map = {
+                                        "Czech": "cs", "Simplified Chinese": "zh", "Portuguese": "pt",
+                                        "Spanish": "es", "Polish": "pl", "Italian": "it", "Turkish": "tr",
+                                        "Hungarian": "hu", "English": "en", "Japanese": "ja",
+                                        "Russian": "ru", "French": "fr", "German": "de", "Korean": "ko",
+                                        "Traditional Chinese": "zh"
+                                    }
+                                    prefix = prefix_map.get(target_lang_name, target_lang_name[:2].lower())
+                                    
+                                    if prefix not in current_locale:
+                                        return False
+                                        
+                                    # Distinguish between Traditional and Simplified Chinese
+                                    if target_lang_name == "Traditional Chinese" and not any(x in current_locale for x in ["tw", "hk", "hant"]):
+                                        return False
+                                    if target_lang_name == "Simplified Chinese" and not any(x in current_locale for x in ["cn", "hans"]):
+                                        return False
+                                        
+                                    return True
+                                except Exception:
+                                    return False
+
                             for auto_try in range(5):
-                                success = android_lang_changer.change_language(device, target_lang)
-                                if success: break
-                                self.q.put(f"[UI Auto] Retry {auto_try+1}/5 for language shift...\n")
+                                # Attempt the UI automation
+                                android_lang_changer.change_language(device, target_lang)
+                                
+                                # Wait a moment for Android OS to fully apply the locale change
+                                time.sleep(3.0)
+                                
+                                # Validate the change via ADB
+                                if check_system_locale(target_lang):
+                                    success = True
+                                    self.q.put(f"[UI Auto] Success: Verified system locale changed to {target_lang}!\n")
+                                    break
+                                    
+                                self.q.put(f"[UI Auto] Retry {auto_try+1}/5: Drag finished, but system locale did not update. Retrying...\n")
                                 time.sleep(2.0)
                             
                             if not success:
-                                self.q.put(f"[UI Auto Warning] Automated UI swipe failed on {ip}.\n")
+                                self.q.put(f"[UI Auto Warning] Language change to {target_lang} FAILED on {ip}. Verification might read the wrong language.\n")
                         else:
                             self.q.put(f"[ADB Error] UI Automator could not find device at 199.0.0.4:5500.\n")
                     except Exception as e:
