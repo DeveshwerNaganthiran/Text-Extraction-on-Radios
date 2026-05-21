@@ -1437,31 +1437,17 @@ def main():
                 flat_exp = _clean_for_compare(expected_local_n, is_cjk_target)
                 
                 # --- FIX: COLLAPSE STATIC GRIDS ---
-                # If a rolling grid was captured but the text isn't actually moving, 
-                # the AI outputs repeated text (e.g. "Text... | Text...").
-                # We must collapse it back to a single chunk so the normal truncation scorer works.
                 if used_rolling_this_attempt and not is_physically_rolling:
                     if "|" in flat_obs:
                         chunks = [c.strip() for c in flat_obs.split('|') if c.strip()]
                         if chunks:
                             flat_obs = chunks[0]
 
-                # --- FIX: CASE AND ACCENT INSENSITIVITY ---
-                def _strip_accents(s):
-                    return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
-                
-                if _strip_accents(flat_obs.lower()) == _strip_accents(flat_exp.lower()):
-                    flat_obs = flat_exp
-                
-                # --- FIX: CASE AND ACCENT INSENSITIVITY ---
-                def _strip_accents(s):
-                    return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
-                
-                if _strip_accents(flat_obs.lower()) == _strip_accents(flat_exp.lower()):
-                    flat_obs = flat_exp
+                # (Removed case & accent insensitivity. We now enforce STRICT EXACT MATCHES).
+
+                corrected_obs = flat_obs
                 
                 if flat_exp and flat_obs != flat_exp:
-                    corrected_obs = flat_obs
                     
                     known_illusions = {
                         "RETRY": "RETRV", "Retry": "Retrv", "retry": "retrv",
@@ -1483,44 +1469,21 @@ def main():
                         if bad in corrected_obs and good in flat_exp:
                             corrected_obs = corrected_obs.replace(bad, good)
                     
+                    # =================================================================
+                    # STRICT TRUNCATION LOGIC (Case & Spacing Sensitive)
+                    # =================================================================
                     if args.enable_truncation:
-                        # --- STRICT ELLIPSIS FIX ---
                         has_ellipsis = ("..." in flat_obs or "…" in flat_obs)
                         
-                        def _strip_accents(s):
-                            return "".join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
-
-                        obs_no_ellipsis = flat_obs.replace("...", "").replace("…", "").strip()
-                        
-                        obs_compare = _strip_accents(obs_no_ellipsis.lower()).replace(" ", "")
-                        exp_compare = _strip_accents(flat_exp.lower()).replace(" ", "")
-                        
-                        if len(obs_compare) < len(exp_compare):
-                            # CRITICAL FIX: Dynamic minimum match length with a CAP. 
-                            if is_cjk_target:
-                                min_match_len = 1 if len(exp_compare) == 1 else 2
-                            else:
-                                if len(exp_compare) <= 4:
-                                    min_match_len = max(1, len(exp_compare) - 1)
-                                else:
-                                    # Cap the maximum required letters at 8
-                                    min_match_len = min(8, max(4, int(len(exp_compare) * 0.60)))
+                        if has_ellipsis:
+                            # Extract everything exactly before the ellipsis
+                            obs_prefix = flat_obs.split("...")[0].split("…")[0].rstrip()
                             
-                            if len(obs_compare) >= min_match_len and (exp_compare.startswith(obs_compare) or exp_compare.endswith(obs_compare)):
-                                
-                                # --- FIX: TRUNCATION vs ROLLING COLLISION ---
-                                if args.enable_rolling and not used_rolling_this_attempt:
-                                    # Attempt 0: Force a retry to check if text is physically moving!
-                                    pass
-                                elif args.enable_rolling and is_physically_rolling:
-                                    # The text is physically moving across the screen. 
-                                    # Do NOT grant a truncation pass yet, let the grid-stitcher handle it!
-                                    corrected_obs = obs_no_ellipsis
-                                else:
-                                    # CRITICAL FIX: Only force the 100% PASS if it actually has an ellipsis!
-                                    if has_ellipsis:
-                                        t_applied_truncation = True
-                                        corrected_obs = flat_exp
+                            # CRITICAL FIX: Prefix must EXACTLY match the beginning of the expected string.
+                            # If even a single space or case is off, flat_exp.startswith() will fail.
+                            if len(obs_prefix) > 0 and flat_exp.startswith(obs_prefix):
+                                corrected_obs = flat_exp
+                                t_applied_truncation = True
                     
                     if is_cjk_target and flat_exp in flat_obs:
                         stripped_obs = re.sub(r'[A-Za-z]', '', flat_obs)
@@ -1528,105 +1491,31 @@ def main():
                             corrected_obs = flat_exp
 
                     # --- FIX: STATIC REPEATING TEXT FIX (GRID CATCHER) ---
-                    # Only applies if text was stitched and repeated due to rolling logic
                     if used_rolling_this_attempt and not is_physically_rolling and corrected_obs != flat_exp:
                         clean_obs = corrected_obs.replace("|", "").replace("...", "").replace("…", "")
-                        clean_exp = flat_exp
-                        
-                        leftover = clean_obs.replace(clean_exp, "")
-                        
-                        is_static_repeat = False
-                        is_pure_fragment = False
-                        
-                        # CRITICAL FIX: Ignore spaces leftover from the grid stitching
-                        if clean_obs != "" and leftover.replace(" ", "") == "":
-                            is_static_repeat = True
-                        elif clean_obs != "" and len(clean_obs) > len(clean_exp):
-                            # 2. Fragment checker
-                            temp_leftover = _strip_accents(leftover.lower()).replace(" ", "")
-                            clean_exp_nospace = _strip_accents(clean_exp.lower()).replace(" ", "")
-                            
-                            # CRITICAL FIX: Stop "HIV | HIV" from passing against "HIVoPo"!
-                            if is_cjk_target:
-                                min_frag_len = 1
-                            else:
-                                if len(clean_exp) <= 4:
-                                    min_frag_len = max(1, len(clean_exp) - 1)
-                                else:
-                                    min_frag_len = max(4, int(len(clean_exp) * 0.60))
-                            
-                            # Only allow the checker to run if the expected string is long enough
-                            if len(clean_exp_nospace) > min_frag_len:
-                                for i in range(1, len(clean_exp_nospace) - min_frag_len + 1):
-                                    prefix = clean_exp_nospace[:len(clean_exp_nospace)-i]
-                                    suffix = clean_exp_nospace[i:]
-                                    if len(prefix) >= min_frag_len: 
-                                        temp_leftover = temp_leftover.replace(prefix, "")
-                                    if len(suffix) >= min_frag_len: 
-                                        temp_leftover = temp_leftover.replace(suffix, "")
-                                        
-                            if temp_leftover == "":
-                                is_static_repeat = True
-                                if clean_exp not in clean_obs:
-                                    is_pure_fragment = True
-                                
-                        if is_static_repeat:
-                            # CRITICAL FIX: Don't pass pure fragments from rolling attempts unless they explicitly have an ellipsis
-                            if is_pure_fragment:
-                                has_ellipsis_grid = ("..." in flat_obs or "…" in flat_obs)
-                                if has_ellipsis_grid and args.enable_truncation:
-                                    corrected_obs = flat_exp
-                                    t_applied_truncation = True
-                            else:
+                        if clean_obs != "" and len(clean_obs) > len(flat_exp):
+                            # If it's just exactly repeated, handle it
+                            if flat_exp in clean_obs and clean_obs.replace(flat_exp, "").strip() == "":
                                 corrected_obs = flat_exp
-                    
-                    # --- FIX: STRICT ROLLING TEXT VALIDATOR (PENALIZE EXTRA TEXT & ENFORCE SEQUENCE) ---
-                    if used_rolling_this_attempt and is_physically_rolling and flat_obs != flat_exp:
-                        # The AI sometimes forgets the '|' separator, so we replace it with a space and split by spaces
-                        chunks = [c.strip() for c in flat_obs.replace("|", " ").split() if c.strip()]
+
+                    # =================================================================
+                    # STRICT ROLLING LOGIC (High Confidence Exact Match)
+                    # =================================================================
+                    if used_rolling_this_attempt and is_physically_rolling and corrected_obs != flat_exp:
+                        # Clean the rolling output (remove grid dividers but keep spaces)
+                        clean_obs_rolling = " ".join([c for c in flat_obs.replace("|", " ").split() if c])
+                        clean_exp_rolling = " ".join(flat_exp.split())
                         
-                        clean_exp = flat_exp.replace(" ", "") if is_cjk_target else " ".join(flat_exp.split())
-                        exp_compare = clean_exp.lower() if not is_cjk_target else clean_exp
+                        # Direct Sequence Match with Case Sensitivity
+                        matcher = difflib.SequenceMatcher(None, clean_obs_rolling, clean_exp_rolling)
+                        similarity = matcher.ratio()
                         
-                        is_valid_rolling = True
-                        total_matched_chars_in_exp = set()
-                        
-                        for chunk in chunks:
-                            clean_chunk = chunk.replace(" ", "") if is_cjk_target else " ".join(chunk.split())
-                            chunk_compare = clean_chunk.lower() if not is_cjk_target else clean_chunk
-                            
-                            if not chunk_compare: continue
-                            
-                            matcher = difflib.SequenceMatcher(None, chunk_compare, exp_compare)
-                            blocks = matcher.get_matching_blocks()
-                            
-                            matched_len_in_chunk = 0
-                            for match in blocks:
-                                if match.size > 0:
-                                    min_size = 1 if is_cjk_target else 2
-                                    if match.size >= min_size:
-                                        matched_len_in_chunk += match.size
-                                        for i in range(match.b, match.b + match.size):
-                                            total_matched_chars_in_exp.add(i)
-                            
-                            unmatched_chars = len(chunk_compare) - matched_len_in_chunk
-                            allowed_hallucination = 1 if is_cjk_target else 4 
-                            
-                            if unmatched_chars > allowed_hallucination:
-                                is_valid_rolling = False
-                                break
-                                
-                        # STRICT RULE 2: COMPLETENESS
-                        if is_valid_rolling and len(exp_compare) > 0:
-                            coverage_ratio = len(total_matched_chars_in_exp) / len(exp_compare)
-                            if coverage_ratio >= 0.85: #change this higher for stricter validation
-                                t_applied_rolling = True
-                                corrected_obs = flat_exp  # Force a 100% PASS
-                                
-                    # -------------------------------------------------------------------
-                    # CRITICAL FIX: We must update the final observation variable so the 
-                    # truncation/dictionary fixes are actually passed to the scorer!
-                    # -------------------------------------------------------------------
+                        # If the stitched string reconstructing the words is a >= 95% match, pass it
+                        if similarity >= 0.95 or clean_exp_rolling in clean_obs_rolling:
+                            corrected_obs = flat_exp
+                            t_applied_rolling = True
+
+                    # Feed the strict fixes back into the final observation
                     flat_obs = corrected_obs
 
                 # ---> PROPERLY ALIGNED FINAL SCORING BLOCK <---
@@ -1634,20 +1523,18 @@ def main():
                 t_verdict = "FAIL"
                 
                 if flat_exp:
-                    similarity = difflib.SequenceMatcher(None, flat_exp.lower(), flat_obs.lower()).ratio()
+                    # STRICT CASE & SPACE SENSITIVE SCORING
+                    similarity = difflib.SequenceMatcher(None, flat_exp, flat_obs).ratio()
                     t_conf = round(similarity * 100, 1)
                     if t_conf > 100.0: t_conf = 100.0
                     
-                    # --- FIX: STRICT UNIVERSAL CJK FORGIVENESS ---
+                    # Strict CJK Forgiveness
                     if is_cjk_target and flat_obs != flat_exp:
                         len_diff = abs(len(flat_exp) - len(flat_obs))
                         if len(flat_obs) > len(flat_exp) + 1:
                             pass 
                         elif len_diff <= 1 and t_conf >= 90.0:
                             pass
-                            # DO NOT override here. Let it gracefully fail/warn based on score.
-                            # flat_obs = flat_exp
-                            # t_conf = 100.0
                     
                     if flat_obs == flat_exp: 
                         t_verdict = "PASS"

@@ -43,67 +43,107 @@ def change_language(d, target_lang_name):
     time.sleep(2)
 
     target_ui_name = LANGUAGE_MAP.get(target_lang_name, target_lang_name)
-    lang_elem = d(textContains=target_ui_name)
 
-    # 1. Scroll down slowly to see if the language is already in the active list
+    # 1. CHECK IF ALREADY IN MAIN LIST (Do a few short scrolls to check)
     found_in_main = False
-    for _ in range(5):
-        if lang_elem.exists:
+    last_page = ""
+    for _ in range(3):
+        if d(textContains=target_ui_name).exists:
             found_in_main = True
             break
-        d.swipe(0.5, 0.8, 0.5, 0.3, duration=0.2) # Scroll down
+        current_page = d.dump_hierarchy()
+        if current_page == last_page:
+            break
+        last_page = current_page
+        d.swipe(0.5, 0.8, 0.5, 0.4, duration=0.2)
         time.sleep(0.5)
 
-    # 2. If it's not in the list, scroll down to find the Add button
+    # 2. IF NOT FOUND, ADD VIA SEARCH
     if not found_in_main:
-        print(f"'{target_ui_name}' not found in main list. Attempting to add it...")
-        add_btn = d(resourceId="com.android.settings:id/add_language")
-        found_add_btn = False
+        print(f"'{target_ui_name}' not in main list. Adding via Search...")
         
-        for _ in range(5):
-            if add_btn.exists:
-                found_add_btn = True
-                break
-            d.swipe(0.5, 0.8, 0.5, 0.3, duration=0.2) # Scroll down
-            time.sleep(0.5)
-            
-        if found_add_btn:
+        # Find the Add button
+        add_btn = d(resourceIdMatches=".*add_language.*")
+        if not add_btn.exists:
+            for _ in range(5):
+                if add_btn.exists: break
+                d.swipe(0.5, 0.8, 0.5, 0.3, duration=0.2)
+                time.sleep(0.5)
+        
+        if add_btn.exists:
             add_btn.click()
             time.sleep(1.5)
             
-            search_btn = d(resourceId="com.android.settings:id/action_search")
+            # FORCE SEARCH INSTEAD OF SCROLLING
+            search_btn = d(resourceIdMatches=".*action_search.*")
             if search_btn.exists:
                 search_btn.click()
                 time.sleep(1)
                 d.send_keys(target_ui_name)
                 time.sleep(1.5)
-            
+            else:
+                alt_search = d(descriptionMatches=".*[Ss]earch.*")
+                if alt_search.exists:
+                    alt_search.click()
+                    time.sleep(1)
+                    d.send_keys(target_ui_name)
+                    time.sleep(1.5)
+
+            # Click the language search result
             result = d(textContains=target_ui_name)
             if result.exists:
-                try: result[-1].click(timeout=3)
-                except Exception as e: print(f"Warning on search click: {e}")
-                time.sleep(1.5)
+                try:
+                    result[-1].click(timeout=3)
+                except Exception as e:
+                    print(f"Warning on search click: {e}")
+                time.sleep(2.0)
                 
-                if not d(resourceId="com.android.settings:id/add_language").exists:
-                    try:
-                        region_result = d(textContains=target_ui_name)
-                        if region_result.exists: region_result[-1].click(timeout=3)
-                    except: pass
-                    time.sleep(1.5)
+                # =========================================================
+                # NEW: AUTOMATED REGION / COUNTRY SELECTION INTERCEPT
+                # =========================================================
+                # If the '+ Add a language' button is still NOT visible, 
+                # it means Android is forcing a region choice screen.
+                if not d(resourceIdMatches=".*add_language.*").exists:
+                    print("Detected region selection screen. Picking the first available region...")
+                    
+                    # Try to find the first clickable choice inside the list view
+                    region_option = d(resourceId="android:id/text1")
+                    if not region_option.exists:
+                        region_option = d(className="android.widget.TextView", clickable=True)
+                    if not region_option.exists:
+                        region_option = d(className="android.widget.LinearLayout", clickable=True, instance=0)
+                    
+                    if region_option.exists:
+                        try:
+                            region_option.click(timeout=3)
+                            print("Region chosen successfully.")
+                        except Exception as e:
+                            print(f"Warning clicking region: {e}")
+                        time.sleep(2.5)
+                # =========================================================
+                
             else:
-                print(f"Could not find '{target_ui_name}' in the Add menu.")
+                print(f"Could not find '{target_ui_name}' in the Add menu search results.")
                 return False
         else:
             print("Could not find the '+ Add a language' button.")
             return False
 
-    # 3. Fast scroll to the top of the list
-    for _ in range(5):
+    # 3. FAST SCROLL TO ABSOLUTE TOP
+    last_page = ""
+    while True:
         d.swipe(0.5, 0.3, 0.5, 0.8, duration=0.1) # Fast Scroll UP
         time.sleep(0.2)
+        current_page = d.dump_hierarchy()
+        if current_page == last_page:
+            break # Reached the top
+        last_page = current_page
 
-    # 4. Iterative Dragging (Drag it up in steps)
-    for attempt in range(4):
+    # 4. CONTINUOUS DRAGGING (Bounce-Back Detection)
+    last_sy = -1
+    stuck_count = 0
+    
+    while True:
         lang_elem = d(textContains=target_ui_name)
         if not lang_elem.exists:
             d.swipe(0.5, 0.8, 0.5, 0.4, duration=0.2) # Scroll down slowly
@@ -112,42 +152,30 @@ def change_language(d, target_lang_name):
             
         try:
             sx, sy = lang_elem[-1].center()
-            if sy < 250: # Already near the top
-                if sy > 150: # Minor adjustment to strictly reach Slot 1
-                    d.drag(sx, sy, sx, 100, duration=0.2)
-                    time.sleep(1)
-                break
-                
-            print(f"Step {attempt+1}: Dragging '{target_ui_name}' from Y={sy} upwards...")
-            d.drag(sx, sy, sx, 150, duration=0.5) # Drag it high up
-            time.sleep(1.5)
             
-            # Scroll up slightly so the list adjusts
-            d.swipe(0.5, 0.3, 0.5, 0.7, duration=0.2)
-            time.sleep(0.5)
-        except Exception as e:
-            print(f"Error during drag operation: {e}")
-
-    # 5. Verification step
-    d.swipe(0.5, 0.3, 0.5, 0.8, duration=0.2) # Ensure we are viewing the absolute top
-    time.sleep(1)
-    lang_elem = d(textContains=target_ui_name)
-    if lang_elem.exists:
-        try:
-            # Since we dragged it up, it should be the top-most instance [0]
-            _, sy = lang_elem[0].center()
-            # Relaxed threshold: Just needs to be in the upper half of the screen
-            if sy < 500:
+            # Check if it bounced back to the exact same spot (hit the ceiling)
+            if last_sy != -1 and abs(last_sy - sy) < 20:
+                stuck_count += 1
+            else:
+                stuck_count = 0
+                
+            last_sy = sy
+            
+            # If stuck in same spot twice or very high up, it is in Slot #1
+            if stuck_count >= 2 or sy < 200:
                 print(f"Verified: '{target_ui_name}' is currently active at the top (Y={sy}).")
                 return True
-            else:
-                print(f"Verification Failed: '{target_ui_name}' is at Y={sy}, which is too low to be Slot 1.")
-        except Exception as e: 
-            print(f"Verification check error: {e}")
-            pass
+                
+            print(f"Dragging '{target_ui_name}' from Y={sy} upwards...")
+            d.drag(sx, sy, sx, 100, duration=0.4) # Drag it high up
+            time.sleep(1.0)
             
-    print(f"Verification Failed: '{target_ui_name}' is not at the top of the list.")
-    return False
+            d.swipe(0.5, 0.3, 0.5, 0.8, duration=0.2)
+            time.sleep(0.5)
+            
+        except Exception as e:
+            print(f"Error during drag operation: {e}")
+            time.sleep(1)
 
 def main():
     parser = argparse.ArgumentParser(description="Change Android device language via UI automation.")
