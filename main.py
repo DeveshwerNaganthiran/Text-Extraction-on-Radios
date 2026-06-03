@@ -4,7 +4,6 @@ import uiautomator2 as u2
 from adbutils import adb
 
 # Base native names for finding the language in the list or search results
-# (Removed the region brackets so it just matches the core name)
 LANGUAGE_MAP = {
     "Czech": "Čeština",
     "Simplified Chinese": "简体中文",
@@ -23,14 +22,12 @@ LANGUAGE_MAP = {
     "Traditional Chinese": "繁體中文"
 }
 
-# Preferred regions if Android prompts for one. 
-# If not listed, it will just pick the first available option.
 REGION_MAP = {
     "Czech": "Česko",
     "Hungarian": "Magyarország",
     "English": "United States",
-    "Simplified Chinese": "中国",  # China
-    "Traditional Chinese": "台灣", # Taiwan
+    "Simplified Chinese": "中国",  
+    "Traditional Chinese": "台灣", 
     "Spanish": "España",
     "French": "France",
     "German": "Deutschland",
@@ -54,161 +51,206 @@ def get_device(serial=None):
             return None
         return u2.connect(devices[0].serial)
 
+def click_list_item_safe(d, text_to_find):
+    elements = d(textContains=text_to_find)
+    if not elements.exists:
+        return False
+        
+    time.sleep(0.3) # SPEEDUP
+    
+    for i in range(elements.count):
+        try:
+            el = elements[i]
+            info = el.info
+            cls = str(info.get('className', '')).lower()
+            res = str(info.get('resourceName', '') or info.get('resourceId', '')).lower()
+            
+            if 'edittext' in cls: continue
+            if 'search' in res: continue
+            
+            bounds = info.get('bounds', {})
+            if bounds:
+                h = bounds.get('bottom', 0) - bounds.get('top', 0)
+                if h < 10: continue
+                
+            el.click(timeout=1)
+            return True
+        except Exception:
+            continue
+            
+    try:
+        tv_elements = d(textContains=text_to_find, className="android.widget.TextView")
+        if tv_elements.exists and tv_elements.count > 0:
+            tv_elements[-1].click(timeout=1)
+            return True
+        if elements.count > 0:
+            elements[-1].click(timeout=1)
+            return True
+    except Exception:
+        pass
+    return False
+
 def change_language(d, target_lang_name):
     print(f"Opening Locale Settings on {d.serial}...")
     d.shell("am start -a android.settings.LOCALE_SETTINGS")
-    time.sleep(2)
+    time.sleep(1.0) # SPEEDUP: Was 2.0
 
     target_ui_name = LANGUAGE_MAP.get(target_lang_name, target_lang_name)
     target_region = REGION_MAP.get(target_lang_name, "")
 
-    # 1. CHECK IF ALREADY IN MAIN LIST (Do a few short scrolls to check)
+    print(f"Scanning main language list for '{target_ui_name}'...")
     found_in_main = False
     last_page = ""
-    for _ in range(3):
+    stuck_count = 0
+    
+    while True:
         if d(textContains=target_ui_name).exists:
             found_in_main = True
+            print(f"-> Found '{target_ui_name}' in the main list.")
             break
+            
+        if d(textContains="Add a language").exists or d(resourceIdMatches=".*add_language.*").exists:
+            break
+            
         current_page = d.dump_hierarchy()
         if current_page == last_page:
-            break
+            stuck_count += 1
+            if stuck_count >= 2: break 
+        else:
+            stuck_count = 0
+            
         last_page = current_page
-        d.swipe(0.5, 0.8, 0.5, 0.4, duration=0.2)
-        time.sleep(0.5)
+        d.swipe(0.5, 0.8, 0.5, 0.3, duration=0.1) # SPEEDUP
+        time.sleep(0.2) # SPEEDUP
 
-    # 2. IF NOT FOUND, ADD VIA SEARCH
     if not found_in_main:
         print(f"'{target_ui_name}' not in main list. Adding via Search...")
         
-        # Find the Add button
         add_btn = d(resourceIdMatches=".*add_language.*")
         if not add_btn.exists:
-            for _ in range(5):
-                if add_btn.exists: break
-                d.swipe(0.5, 0.8, 0.5, 0.3, duration=0.2)
-                time.sleep(0.5)
+            add_btn = d(textContains="Add a language")
         
         if add_btn.exists:
             add_btn.click()
-            time.sleep(1.5)
+            time.sleep(0.5) # SPEEDUP: Was 1.5
             
-            # FORCE SEARCH INSTEAD OF SCROLLING
-            search_btn = d(resourceIdMatches=".*action_search.*")
-            if search_btn.exists:
-                search_btn.click()
-                time.sleep(1)
-                d.send_keys(target_lang_name) # Search in English (e.g. "Hungarian")
-                time.sleep(1.5)
+            search_clicked = False
+            for search_id in [".*action_search.*", ".*menu_search.*", ".*search_button.*", ".*search.*"]:
+                btn = d(resourceIdMatches=search_id, clickable=True)
+                if btn.exists:
+                    btn[0].click()
+                    search_clicked = True
+                    break
+            
+            if not search_clicked:
+                btn = d(descriptionMatches="(?i).*search.*", clickable=True)
+                if btn.exists:
+                    btn[0].click()
+                    search_clicked = True
+                    
+            if search_clicked:
+                time.sleep(0.3) # SPEEDUP
+                edit_text = d(className="android.widget.EditText")
+                if edit_text.exists:
+                    edit_text[0].set_text(target_ui_name)
+                else:
+                    d.send_keys(target_ui_name)
+                time.sleep(0.5) # SPEEDUP
             else:
-                alt_search = d(descriptionMatches=".*[Ss]earch.*")
-                if alt_search.exists:
-                    alt_search.click()
-                    time.sleep(1)
-                    d.send_keys(target_lang_name) # Search in English
-                    time.sleep(1.5)
+                d.send_keys(target_ui_name)
+                time.sleep(0.5)
 
-            # Click the language search result matching the Native Name (e.g. "Magyar")
-            result = d(textContains=target_ui_name)
-            if result.exists:
-                try:
-                    result[-1].click(timeout=3)
-                except Exception as e:
-                    print(f"Warning on search click: {e}")
-                time.sleep(2.0)
+            found_langs = d(textContains=target_ui_name)
+            if found_langs.exists:
+                click_list_item_safe(d, target_ui_name)
+                time.sleep(0.5) # SPEEDUP
                 
-                # =========================================================
-                # AUTOMATED REGION / COUNTRY SELECTION INTERCEPT
-                # =========================================================
-                # If the '+ Add a language' button is still NOT visible, 
-                # it means Android is forcing a region choice screen.
-                if not d(resourceIdMatches=".*add_language.*").exists:
-                    print("Detected region selection screen. Picking the correct region...")
-                    
+                if not d(resourceIdMatches=".*add_language.*").exists and not d(textContains="Add a language").exists:
                     region_clicked = False
-                    
-                    # Try to click the specific mapped region (e.g. Magyarország)
                     if target_region:
-                        specific_region = d(textContains=target_region)
-                        if specific_region.exists:
-                            try:
-                                specific_region.click(timeout=3)
-                                print(f"Region '{target_region}' chosen successfully.")
-                                region_clicked = True
-                            except Exception as e:
-                                print(f"Warning clicking specific region: {e}")
+                        reg_search_clicked = False
+                        for search_id in [".*action_search.*", ".*menu_search.*", ".*search_button.*", ".*search.*"]:
+                            btn = d(resourceIdMatches=search_id, clickable=True)
+                            if btn.exists:
+                                btn[0].click()
+                                reg_search_clicked = True
+                                break
                                 
-                    # Fallback to the first available choice if not mapped or not found
+                        if not reg_search_clicked:
+                            btn = d(descriptionMatches="(?i).*search.*", clickable=True)
+                            if btn.exists:
+                                btn[0].click()
+                                reg_search_clicked = True
+                                
+                        if reg_search_clicked:
+                            time.sleep(0.3) # SPEEDUP
+                            edit_text = d(className="android.widget.EditText")
+                            if edit_text.exists:
+                                edit_text[0].set_text(target_region)
+                            else:
+                                d.send_keys(target_region)
+                            time.sleep(0.5) # SPEEDUP
+                            
+                        if click_list_item_safe(d, target_region):
+                            region_clicked = True
+                            
                     if not region_clicked:
                         region_option = d(resourceId="android:id/text1")
                         if not region_option.exists:
                             region_option = d(className="android.widget.TextView", clickable=True)
-                        if not region_option.exists:
-                            region_option = d(className="android.widget.LinearLayout", clickable=True, instance=0)
-                        
                         if region_option.exists:
                             try:
-                                region_option.click(timeout=3)
-                                print("First available region chosen successfully.")
-                            except Exception as e:
-                                print(f"Warning clicking fallback region: {e}")
-                    time.sleep(2.5)
-                # =========================================================
-                
+                                clicked_fb = False
+                                for i in range(region_option.count):
+                                    item = region_option[i]
+                                    if item.info.get('className') != 'android.widget.EditText':
+                                        item.click(timeout=1)
+                                        clicked_fb = True
+                                        break
+                                if not clicked_fb:
+                                    region_option.click(timeout=1)
+                            except Exception: pass
+                    time.sleep(0.5) # SPEEDUP
             else:
-                print(f"Could not find '{target_ui_name}' in the Add menu search results.")
                 return False
         else:
-            print("Could not find the '+ Add a language' button.")
             return False
 
-    # 3. FAST SCROLL TO ABSOLUTE TOP
+    print("Scrolling back to the top of the list...")
     last_page = ""
     while True:
-        d.swipe(0.5, 0.3, 0.5, 0.8, duration=0.1) # Fast Scroll UP
-        time.sleep(0.2)
+        d.swipe(0.5, 0.3, 0.5, 0.8, duration=0.05) # SPEEDUP
+        time.sleep(0.1) # SPEEDUP
         current_page = d.dump_hierarchy()
-        if current_page == last_page:
-            break # Reached the top
+        if current_page == last_page: break
         last_page = current_page
 
-    # 4. CONTINUOUS DRAGGING (Bounce-Back Detection)
     last_sy = -1
     stuck_count = 0
-    
     while True:
         lang_elem = d(textContains=target_ui_name)
         if not lang_elem.exists:
-            d.swipe(0.5, 0.8, 0.5, 0.4, duration=0.2) # Scroll down slowly
-            time.sleep(0.5)
+            d.swipe(0.5, 0.8, 0.5, 0.4, duration=0.1)
+            time.sleep(0.2)
             continue
             
         try:
-            sx, sy = lang_elem[-1].center()
-            
-            # Check if it bounced back to the exact same spot (hit the ceiling)
-            if last_sy != -1 and abs(last_sy - sy) < 20:
-                stuck_count += 1
-            else:
-                stuck_count = 0
-                
+            sx, sy = lang_elem[0].center()
+            if last_sy != -1 and abs(last_sy - sy) < 20: stuck_count += 1
+            else: stuck_count = 0
             last_sy = sy
             
-            # If stuck in same spot twice or very high up, it is in Slot #1
             if stuck_count >= 2 or sy < 200:
                 print(f"Verified: '{target_ui_name}' is currently active at the top (Y={sy}).")
-                time.sleep(2.0) # Ensure OS fully updates locale globally
+                time.sleep(1.0) # SPEEDUP: Was 2.0
                 return True
                 
-            print(f"Dragging '{target_ui_name}' from Y={sy} upwards...")
-            d.drag(sx, sy, sx, 50, duration=1.0) # Drag it high up (slowed down duration to prevent dropped inputs)
-            time.sleep(1.0)
-            
-            d.swipe(0.5, 0.3, 0.5, 0.8, duration=0.2)
-            time.sleep(0.5)
-            
+            d.drag(sx, sy, sx, 50, duration=0.5) # SPEEDUP
+            time.sleep(0.5) # SPEEDUP
+            d.swipe(0.5, 0.3, 0.5, 0.8, duration=0.1)
+            time.sleep(0.2)
         except Exception as e:
-            print(f"Error during drag operation: {e}")
-            time.sleep(1)
+            time.sleep(0.5)
 
 def main():
     parser = argparse.ArgumentParser(description="Change Android device language via UI automation.")
@@ -220,14 +262,11 @@ def main():
 
     if args.list:
         devices = adb.device_list()
-        print("Connected devices:")
-        for d in devices:
-            print(f" - {d.serial}")
+        for d in devices: print(f" - {d.serial}")
         return
 
     d = get_device(args.serial)
-    if d:
-        change_language(d, args.language)
+    if d: change_language(d, args.language)
 
 if __name__ == "__main__":
     main()

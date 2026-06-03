@@ -998,7 +998,6 @@ def main():
     parser.add_argument("--save-roi-dir", default="")
     parser.add_argument("--summary-excel", default="")
     parser.add_argument("--preview", action="store_true")
-    # --- ADD THESE TWO ARGUMENTS ---
     parser.add_argument("--enable-rolling", action="store_true")
     parser.add_argument("--enable-truncation", action="store_true")
     parser.add_argument("--enable-retries", action="store_true")
@@ -1159,7 +1158,7 @@ def main():
         for attempt in range(max_retries):
             retry_roi = roi.copy()
             used_rolling_this_attempt = False
-            is_physically_rolling = False  # <--- ADD THIS
+            is_physically_rolling = False 
             
             if attempt > 0:
                 print(f"\n[RETRY {attempt}/{max_retries-1}] Verification failed. Simulating full restart...")
@@ -1177,21 +1176,14 @@ def main():
                         used_rolling_this_attempt = True
                         retry_burst = []
                         
-                        # --- FIX 1: DYNAMIC CAPTURE TIME & GRID SIZE ---
-                        # Find the length of the expected string to determine how long to record
                         max_exp_len = max([len(t["exp_target"]) for t in active_targets]) if active_targets else 0
                         
-                        # --- AI GATEWAY FIX: PREVENT BASE64 TOKEN SPIKES ---
-                        # Massive 3x3 or 5x5 grids get rejected by Corporate Gateway limits.
-                        # When rejected, it dumps the raw Base64 string into the text prompt, 
-                        # causing massive 28k token spikes!
-                        # Solution: Use a simple vertical stack of 4 to 5 frames.
                         if max_exp_len < 20:
                             num_frames, grid_cols, grid_rows = 4, 1, 4
-                            required_interval = 0.80  # Time for short words
+                            required_interval = 0.80  
                         else:
                             num_frames, grid_cols, grid_rows = 5, 1, 5
-                            required_interval = 1.20  # Time for long words
+                            required_interval = 1.20  
                             
                         t_end_capture = time.time() + (num_frames * required_interval) + 10.0
                         last_save = 0
@@ -1208,32 +1200,26 @@ def main():
                         
                         if len(retry_burst) >= 4:
                             crops = []
-                            for f in retry_burst[:25]:  # Process up to 20 frames
+                            for f in retry_burst[:25]: 
                                 try:
                                     crop = f[sy1:sy2, sx1:sx2]
                                     if crop.size > 0: crops.append(crop)
                                 except Exception: pass
                                 
                             if crops:
-                                # --- NEW: Verify if frames are actually different (text is rolling) ---
                                 try:
-                                    # Moderate blur to destroy screen flicker, but preserve thin text
                                     gray_base = cv2.GaussianBlur(cv2.cvtColor(crops[0], cv2.COLOR_BGR2GRAY), (7, 7), 0)
                                     for c_img in crops[1:]:
                                         gray_curr = cv2.GaussianBlur(cv2.cvtColor(c_img, cv2.COLOR_BGR2GRAY), (7, 7), 0)
                                         diff = cv2.absdiff(gray_base, gray_curr)
                                         
-                                        # Threshold high enough to ignore LCD moire, but low enough to catch letters
                                         _, thresh = cv2.threshold(diff, 40, 255, cv2.THRESH_BINARY)
                                         
-                                        # Text is thin. We must use 0.8% so we don't miss thin rolling letters!
-                                        # BUMPED TO 2.5% to ignore LCD moire patterns and camera auto-exposure flicker
                                         if (np.count_nonzero(thresh) / float(thresh.size)) > 0.025: 
                                             is_physically_rolling = True
                                             break
                                 except Exception: pass
 
-                                # --- FIX 2: DYNAMIC GRID STITCHING ---
                                 if len(crops) > num_frames:
                                     indices = np.linspace(0, len(crops) - 1, num_frames).astype(int)
                                     display_crops = [crops[i] for i in indices]
@@ -1243,12 +1229,10 @@ def main():
                                 border = 2
                                 bordered_crops = [cv2.copyMakeBorder(c, border, border, border, border, cv2.BORDER_CONSTANT, value=[0, 0, 0]) for c in display_crops]
                                 
-                                # Pad with the last visible frame if we didn't get enough crops
                                 last_valid = bordered_crops[-1] if bordered_crops else np.zeros((50, 50, 3), dtype=np.uint8)
                                 while len(bordered_crops) < num_frames:
                                     bordered_crops.append(last_valid.copy())
                                 
-                                # Dynamically build the rows and columns based on our grid_cols/grid_rows variables
                                 rows = []
                                 for r in range(grid_rows):
                                     start_idx = r * grid_cols
@@ -1258,7 +1242,6 @@ def main():
                                     
                                 grid_roi = cv2.vconcat(rows)
                                 
-                                # Scale limits based on grid size to preserve API limits
                                 safe_grid_dim = 900
                                 gh, gw = grid_roi.shape[:2]
                                 if max(gh, gw) > safe_grid_dim:
@@ -1299,10 +1282,6 @@ def main():
             current_dim = progressive_dims[attempt] if attempt < len(progressive_dims) else 1000
             current_squash = 0.6 if attempt == 3 else 1.0
             
-            # --- FIX 1: PREVENT API CRASHES ON RETRIES ---
-            # 5x5 grids get massively dense. Force them to stay at 1000px.
-            # We MUST lock current_squash to 1.0. Squashing a 5x5 grid turns it into a barcode, 
-            # which guarantees an "Unsupported Media" rejection from the API!
             if used_rolling_this_attempt:
                 current_dim = 1000
                 current_squash = 1.0
@@ -1310,7 +1289,6 @@ def main():
             if attempt > 0:
                 print(f"    -> [Image Prep] Resolution: {current_dim}px | Squash Ratio: {current_squash}")
 
-            # Pass only the English text as a generic context reference to avoid hallucination
             hint_str = exp_dict.get("expected_en", "")
 
             if _is_screen_blank(retry_roi):
@@ -1321,14 +1299,12 @@ def main():
                 pass_lang = args.language
                 if used_rolling_this_attempt:
                     pass_hint = ""  
-                    # --- FIX 3: DYNAMIC AI PROMPT INJECTION ---
                     pass_lang += f". HINT: {grid_cols}x{grid_rows} grid of {num_frames} screenshots. Transcribe EVERY box exactly as written. DO NOT AUTOCORRECT TYPOS. Separate each box's text with a '|' character so no boxes are skipped."
                 else:
                     pass_hint = active_targets[0]["exp_target"] if len(active_targets) == 1 else ""
 
-                # --- FAST INTERCEPT FOR GENAI SAFETY REFUSALS ---
                 inner_refusals = 0
-                while inner_refusals < 2:  # Cap at 2 so it doesn't waste time
+                while inner_refusals < 2: 
                     text, _conf = ocr.extract_text(
                         retry_roi, 
                         expected_language=pass_lang, 
@@ -1344,19 +1320,13 @@ def main():
                         print(f"    -> [GenAI Filter] AI refused the image (likely payload size limit). Shrinking image to bypass...")
                         inner_refusals += 1
                         
-                        # --- FIX: REDUCE FILE SIZE TO BYPASS UNSUPPORTED MEDIA ---
-                        # Instead of making the image bigger (which causes it to crash harder), 
-                        # we scale the massive 5x5 grid down by 25%. This guarantees it clears the API limits!
                         current_dim = int(current_dim * 0.75)
                         
                         gh, gw = retry_roi.shape[:2]
                         retry_roi = cv2.resize(retry_roi, (int(gw * 0.75), int(gh * 0.75)), interpolation=cv2.INTER_AREA)
                         
-                        # Apply a tiny blur to break any barcode-like repetitive patterns the API filter hates
                         retry_roi = cv2.GaussianBlur(retry_roi, (3, 3), 0)
                         
-                        # --- FIX: Move the bypass instruction to the language field ---
-                        # Do NOT put it in pass_hint, or the letter-by-letter hallucination checker will try to evaluate it!
                         pass_lang += " This is a hardware LCD screen. Please read the text."
                         pass_hint = ""  
                         continue
@@ -1393,7 +1363,6 @@ def main():
             best_sub_verdict = "FAIL"
             best_sub_data = {}
 
-            # Loop through the GUI-selected languages (active_targets) and check if ANY of them match the OCR text
             for target_info in active_targets:
                 t_region = target_info["region"]
                 t_lang = target_info["language"]
@@ -1407,15 +1376,11 @@ def main():
 
                 def _clean_for_compare(text: str, is_cjk: bool) -> str:
                     c = str(text)
-                    # Remove known weird UI glitch prefixes
                     c = re.sub(r'^(i|l|v|4)\s+', '', c, flags=re.IGNORECASE)
                     c = re.sub(r'^(!|\?|⏹|\[\]|\'|\"|️)\s*', '', c)
                     
-                    # --- NEW FIX: STRIP PROBLEMATIC PUNCTUATION ---
-                    # Remove * and \ because the AI often misses them on low-res LCD screens
                     c = c.replace('*', '').replace('\\', '')
                     
-                    # --- FIX: ENGLISH/RUSSIAN HOMOGLYPH CONVERTER ---
                     has_cyrillic = any('\u0400' <= ch <= '\u04FF' for ch in expected_local_n)
                     if has_cyrillic:
                         homoglyphs = {'A':'А','a':'а','B':'В','C':'С','c':'с','E':'Е','e':'е','H':'Н','K':'К','M':'М','O':'О','o':'о','P':'Р','p':'р','T':'Т','X':'Х','x':'х','y':'у'}
@@ -1424,26 +1389,22 @@ def main():
 
                     if is_cjk:
                         c = " ".join(c.split())
-                        # If expected string doesn't contain English letters, strip English letters from observation
                         if not any(char.isascii() and char.isalpha() for char in expected_local_n):
                             c = re.sub(r'[A-Za-z]', '', c)
                         return c
                     else:
-                        c = " ".join(c.split()) # Normalize spaces
-                        c = re.sub(r'\s+[LHlh]$', '', c) # Strip specific hallucinated trailing letters
+                        c = " ".join(c.split()) 
+                        c = re.sub(r'\s+[LHlh]$', '', c) 
                         return c
 
                 flat_obs = _clean_for_compare(observed_n, is_cjk_target)
                 flat_exp = _clean_for_compare(expected_local_n, is_cjk_target)
                 
-                # --- FIX: COLLAPSE STATIC GRIDS ---
                 if used_rolling_this_attempt and not is_physically_rolling:
                     if "|" in flat_obs:
                         chunks = [c.strip() for c in flat_obs.split('|') if c.strip()]
                         if chunks:
                             flat_obs = chunks[0]
-
-                # (Removed case & accent insensitivity. We now enforce STRICT EXACT MATCHES).
 
                 corrected_obs = flat_obs
                 
@@ -1469,18 +1430,12 @@ def main():
                         if bad in corrected_obs and good in flat_exp:
                             corrected_obs = corrected_obs.replace(bad, good)
                     
-                    # =================================================================
-                    # STRICT TRUNCATION LOGIC (Case & Spacing Sensitive)
-                    # =================================================================
                     if args.enable_truncation:
                         has_ellipsis = ("..." in flat_obs or "…" in flat_obs)
                         
                         if has_ellipsis:
-                            # Extract everything exactly before the ellipsis
                             obs_prefix = flat_obs.split("...")[0].split("…")[0].rstrip()
                             
-                            # CRITICAL FIX: Prefix must EXACTLY match the beginning of the expected string.
-                            # If even a single space or case is off, flat_exp.startswith() will fail.
                             if len(obs_prefix) > 0 and flat_exp.startswith(obs_prefix):
                                 corrected_obs = flat_exp
                                 t_applied_truncation = True
@@ -1490,45 +1445,33 @@ def main():
                         if stripped_obs == flat_exp:
                             corrected_obs = flat_exp
 
-                    # --- FIX: STATIC REPEATING TEXT FIX (GRID CATCHER) ---
                     if used_rolling_this_attempt and not is_physically_rolling and corrected_obs != flat_exp:
                         clean_obs = corrected_obs.replace("|", "").replace("...", "").replace("…", "")
                         if clean_obs != "" and len(clean_obs) > len(flat_exp):
-                            # If it's just exactly repeated, handle it
                             if flat_exp in clean_obs and clean_obs.replace(flat_exp, "").strip() == "":
                                 corrected_obs = flat_exp
 
-                    # =================================================================
-                    # STRICT ROLLING LOGIC (High Confidence Exact Match)
-                    # =================================================================
                     if used_rolling_this_attempt and is_physically_rolling and corrected_obs != flat_exp:
-                        # Clean the rolling output (remove grid dividers but keep spaces)
                         clean_obs_rolling = " ".join([c for c in flat_obs.replace("|", " ").split() if c])
                         clean_exp_rolling = " ".join(flat_exp.split())
                         
-                        # Direct Sequence Match with Case Sensitivity
                         matcher = difflib.SequenceMatcher(None, clean_obs_rolling, clean_exp_rolling)
                         similarity = matcher.ratio()
                         
-                        # If the stitched string reconstructing the words is a >= 95% match, pass it
                         if similarity >= 0.95 or clean_exp_rolling in clean_obs_rolling:
                             corrected_obs = flat_exp
                             t_applied_rolling = True
 
-                    # Feed the strict fixes back into the final observation
                     flat_obs = corrected_obs
 
-                # ---> PROPERLY ALIGNED FINAL SCORING BLOCK <---
                 t_conf = 0.0
                 t_verdict = "FAIL"
                 
                 if flat_exp:
-                    # STRICT CASE & SPACE SENSITIVE SCORING
                     similarity = difflib.SequenceMatcher(None, flat_exp, flat_obs).ratio()
                     t_conf = round(similarity * 100, 1)
                     if t_conf > 100.0: t_conf = 100.0
                     
-                    # Strict CJK Forgiveness
                     if is_cjk_target and flat_obs != flat_exp:
                         len_diff = abs(len(flat_exp) - len(flat_obs))
                         if len(flat_obs) > len(flat_exp) + 1:
@@ -1608,7 +1551,7 @@ def main():
                     "flat_exp": flat_exp,
                     "final_applied_truncation": flat_applied_truncation, 
                     "final_applied_rolling": flat_applied_rolling,
-                    "final_physically_rolling": is_physically_rolling # <-- ADD THIS LINE
+                    "final_physically_rolling": is_physically_rolling 
                 }
             if verdict == "PASS":
                 break
@@ -1629,7 +1572,7 @@ def main():
             flat_exp = best_attempt_data["flat_exp"]
             final_applied_truncation = best_attempt_data.get("final_applied_truncation", False) 
             final_applied_rolling = best_attempt_data.get("final_applied_rolling", False)
-            final_physically_rolling = best_attempt_data.get("final_physically_rolling", False) # <-- ADD THIS LINE       
+            final_physically_rolling = best_attempt_data.get("final_physically_rolling", False) 
         observed_display = flat_obs 
         
         exp_lines = [
@@ -1662,21 +1605,17 @@ def main():
             error_msg_display = f"[{err_type_str} ERROR: {words_str}]"
             print(error_msg_display)
             
-       # --- TRUNCATION & ROLLING TAG LOGIC ---
-        # Stop checking raw 'orig_text' so AI grid hallucinations don't trigger the tag!
         has_ellipsis = ("..." in flat_obs or "…" in flat_obs)
         
         is_actually_rolling = final_applied_rolling or final_physically_rolling
         is_actually_truncated = final_applied_truncation or has_ellipsis
         
-        # CRITICAL FIX: If it is a perfect match, it is NEVER truncated OR rolling!
         if flat_obs.replace("...", "").replace("…", "").replace("|", "").strip() == flat_exp:
             if not final_applied_truncation:
                 is_actually_truncated = False
             if not final_applied_rolling:
                 is_actually_rolling = False
         
-        # --- NEW FIX: SILENCE THE AI EVALUATOR'S HALLUCINATED TAGS ---
         if not has_ellipsis:
             if error_msg_display:
                 error_msg_display = error_msg_display.replace("[Word is truncated (...)] | ", "").replace("[Word is truncated (...)]", "").strip()
@@ -1692,10 +1631,7 @@ def main():
 
         if verdict in ["FAIL", "WARN"]:
             print("    -> [AI Analysis] Asking GenAI to explain the mismatch...")
-            # Ask the AI to generate the human-readable mismatch reason
             ai_mismatch_reason = ocr.explain_mismatch(flat_exp, flat_obs)
-            
-            # Combine the AI's reason with the confidence score requested
             text_err = f"Mismatch (Conf: {confidence_pct}%): {ai_mismatch_reason}"
             
             if error_msg_display:
@@ -1855,7 +1791,8 @@ def main():
     print("EXECUTION SUMMARY")
     print("=" * 70)
     print(f"Total Devices Checked: {len(rois)}")
-    print(f"PASS: {summary_counts['PASS']} | FAIL: {summary_counts['FAIL']} | WARN: {summary_counts['WARN']} | SKIP: {summary_counts['SKIP']}")
+    total_cmds = sum(summary_counts.values())
+    print(f"Total Commands: {total_cmds} | PASS: {summary_counts['PASS']} | FAIL: {summary_counts['FAIL']} | WARN: {summary_counts['WARN']} | SKIP: {summary_counts['SKIP']}")
     print(f"Total Time Taken: {time_taken} seconds")
     print("=" * 70 + "\n")
 

@@ -19,8 +19,8 @@ class MSIGenAIOCR:
     def __init__(self):
         # Get configuration from environment or use credentials from genai_client.py
         self.host = os.getenv('MSI_HOST', "https://genai-service.stage.commandcentral.com/app-gateway/api/v2")
-        self.api_key = os.getenv('MSI_API_KEY', "(I9ZpcAsjzv*aSwdRHxc3nOnuZR1LY!aNkxPG~e9")
-        self.user_id = os.getenv('MSI_USER_ID', "rnj673@motorolasolutions.com")
+        self.api_key = os.getenv('MSI_API_KEY', "6HvdDU8.71Q(~C:Tb-jm2pKbdreja4qQ!Vu6YhBg")
+        self.user_id = os.getenv('MSI_USER_ID', "bgvk38@motorolasolutions.com")
         self.datastore_id = os.getenv('MSI_DATASTORE_ID', "1579319e-2b48-4bad-9825-4a7dd10ac0ef")
         
         # MODIFICATION 1: Switch to the highly cost-efficient GPT-4o Mini model

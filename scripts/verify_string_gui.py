@@ -529,12 +529,11 @@ class VerifyStringGUI:
         self.lf_devices = tk.LabelFrame(frm, text="Devices", padx=10, pady=5)
         self.lf_devices.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
 
-        # --- FIX: FORCE COLUMN SIZES SO THEY DON'T DISAPPEAR ---
-        self.lf_devices.columnconfigure(0, weight=0, minsize=30)   # ID
-        self.lf_devices.columnconfigure(1, weight=1, minsize=100)  # Name
-        self.lf_devices.columnconfigure(2, weight=2, minsize=150)  # Language Textbox
-        self.lf_devices.columnconfigure(3, weight=0, minsize=70)   # Select Button
-        self.lf_devices.columnconfigure(4, weight=0)               # Right-Side Panel
+        self.lf_devices.columnconfigure(0, weight=0, minsize=30)
+        self.lf_devices.columnconfigure(1, weight=1, minsize=100)
+        self.lf_devices.columnconfigure(2, weight=2, minsize=150)
+        self.lf_devices.columnconfigure(3, weight=0, minsize=70)
+        self.lf_devices.columnconfigure(4, weight=0)
 
         self.device_rows = []
 
@@ -723,55 +722,32 @@ class VerifyStringGUI:
 
     def _robust_connection_check(self, ip, port, is_cmd=True):
         import time
-        has_waited_a_minute = False
         
-        while True:
-            connected = False
-            for attempt in range(3):
-                self.q.put(f"[Connection Check] Ping {ip} (Attempt {attempt+1}/3)...\n")
-                if self._commg_ping_ip(ip):
-                    if is_cmd:
-                        import socket
-                        try:
-                            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            s.settimeout(2.0)
-                            s.connect((ip, port))
-                            s.close()
-                            connected = True
-                            break
-                        except Exception as e:
-                            self.q.put(f"[Connection Check] Ping OK, but target port {port} is closed/unreachable: {e}\n")
-                    else:
+        connected = False
+        for attempt in range(3):
+            self.q.put(f"[Connection Check] Ping {ip} (Attempt {attempt+1}/3)...\n")
+            if self._commg_ping_ip(ip):
+                if is_cmd:
+                    import socket
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(2.0)
+                        s.connect((ip, port))
+                        s.close()
                         connected = True
                         break
-                time.sleep(2.0)
-                
-            if connected:
-                return "CONNECTED"
-                
-            if not has_waited_a_minute:
-                self.q.put(f"[Connection Check] Connection lost for {ip}. Waiting 60 seconds before next retry batch...\n")
-                for _ in range(60):
-                    if not getattr(self, "_commg_is_active_run", False): return "PAUSE"
-                    time.sleep(1)
-                has_waited_a_minute = True
-                continue 
-                
-            proceed = messagebox.askyesno(
-                "Connection Lost", 
-                f"Connection to IP {ip} failed after all retries.\n\n"
-                "Click 'Yes' to WAIT another minute and automatically retry again.\n"
-                "Click 'No' to STOP and PAUSE the batch (you can resume safely later)."
-            )
+                    except Exception as e:
+                        self.q.put(f"[Connection Check] Ping OK, but target port {port} is closed/unreachable: {e}\n")
+                else:
+                    connected = True
+                    break
+            time.sleep(2.0)
             
-            if proceed:
-                has_waited_a_minute = False
-                self.q.put(f"[Connection Check] User chose to wait. Waiting 60 seconds...\n")
-                for _ in range(60):
-                    if not getattr(self, "_commg_is_active_run", False): return "PAUSE"
-                    time.sleep(1)
-            else:
-                return "PAUSE"
+        if connected:
+            return "CONNECTED"
+            
+        self.q.put(f"[Connection Check] Connection lost for {ip}. Skipping device for this command...\n")
+        return "SKIP"
 
     def _commg_find_handles(self):
         if not HAS_PYWINAUTO: return []
@@ -865,12 +841,8 @@ class VerifyStringGUI:
                         self.q.put(f"[CommG] Sent {payload} to {ip}\n")
                 
                 except Exception as inner_e:
-                    self.q.put(f"[CommG] ERROR on {ip}: {inner_e}\n")
-                    proceed = messagebox.askyesno("Automation Error", f"An error occurred while controlling the UI for {ip}.\n\nDo you want to skip and proceed?")
-                    if not proceed:
-                        self.q.put("[CommG] Sequence aborted by user due to UI error.\n")
-                        self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
-                        return
+                    self.q.put(f"[CommG] ERROR on {ip}: {inner_e}. Skipping to next.\n")
+                    continue
                     
             self.q.put("[CommG] Waiting 5s for UI to update...\n")
             time.sleep(5.0) 
@@ -925,12 +897,8 @@ class VerifyStringGUI:
                 self.active_sockets.append(s)
             
             except Exception as inner_e:
-                self.q.put(f"[CMD] ERROR on {ip}: {inner_e}\n")
-                proceed = messagebox.askyesno("Automation Error", f"An error occurred while connecting to {ip}.\n\nDo you want to skip and proceed?")
-                if not proceed:
-                    self.q.put("[CMD] Sequence aborted by user.\n")
-                    self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
-                    return
+                self.q.put(f"[CMD] ERROR on {ip}: {inner_e}. Skipping to next.\n")
+                continue
 
         self.q.put("[CMD] Waiting 5s for devices to process...\n")
         time.sleep(5.0) 
@@ -997,13 +965,11 @@ class VerifyStringGUI:
                         config_win = app.window(title="PuTTY Configuration")
                         config_win.wait("ready", timeout=5)
                         
-                        # 1. Ensure we are in "Session" Category
                         try:
                             config_win.child_window(title="Session", control_type="TreeItem").click_input()
                             time.sleep(0.2)
                         except: pass
 
-                        # 2. Type IP Address
                         try:
                             host_edit = config_win.child_window(title_re="Host Name.*", control_type="Edit")
                             host_edit.click_input()
@@ -1012,7 +978,6 @@ class VerifyStringGUI:
                             config_win.set_focus()
                             config_win.type_keys("%n^a{BACKSPACE}" + ip)
                             
-                        # 3. Type Port
                         try:
                             port_edit = config_win.child_window(title="Port", control_type="Edit")
                             port_edit.click_input()
@@ -1021,7 +986,6 @@ class VerifyStringGUI:
                             config_win.set_focus()
                             config_win.type_keys("%p^a{BACKSPACE}" + port)
                             
-                        # 4. Connection Type -> Raw (User specific sequence: TAB 2 times, then 'rr')
                         try:
                             config_win.set_focus()
                             config_win.type_keys("{TAB}{TAB}rr")
@@ -1029,7 +993,6 @@ class VerifyStringGUI:
                         except Exception as e:
                             self.q.put(f"[PuTTY] Keyboard shortcut failed: {e}\n")
 
-                        # 5. Click Open Button
                         try:
                             open_btn = config_win.child_window(title="Open", control_type="Button")
                             open_btn.click_input()
@@ -1037,26 +1000,20 @@ class VerifyStringGUI:
                             config_win.set_focus()
                             config_win.type_keys("{ENTER}")
                         
-                        # Wait for the terminal window to open
                         time.sleep(1.5)
                         term_win = app.window(title_re=r".*PuTTY.*")
                         term_win.wait("ready", timeout=5)
                         
                         self.active_putty_apps[ip] = (app, term_win)
 
-                # Send command to the active terminal
                 app, term_win = self.active_putty_apps[ip]
                 term_win.set_focus()
                 term_win.type_keys(payload + "{ENTER}", set_foreground=True)
                 self.q.put(f"[PuTTY] Sent {payload} to {ip}\n")
 
             except Exception as inner_e:
-                self.q.put(f"[PuTTY] ERROR on {ip}: {inner_e}\n")
-                proceed = messagebox.askyesno("Automation Error", f"An error occurred while controlling PuTTY for {ip}.\n\nDo you want to skip and proceed?")
-                if not proceed:
-                    self.q.put("[PuTTY] Sequence aborted by user.\n")
-                    self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
-                    return
+                self.q.put(f"[PuTTY] ERROR on {ip}: {inner_e}. Skipping to next.\n")
+                continue
 
         self.q.put("[PuTTY] Waiting 3s for devices to process...\n")
         time.sleep(3.0) 
@@ -1097,12 +1054,31 @@ class VerifyStringGUI:
 
     def _start_language_iteration(self):
         if self._current_lang_idx >= self._max_lang_idx:
-            # Entire batch across all languages is done
             self._commg_is_active_run = False
             self.status_var.set("Automation Batch Complete (All Languages)")
             self.status_label.configure(fg="green")
             self._set_running(False)
             self._write_final_excel_summary()
+
+            elapsed = time.time() - getattr(self, "batch_start_time", time.time())
+            m, s = divmod(elapsed, 60)
+            h, m = divmod(m, 60)
+            time_str = f"{int(h):02d}:{int(m):02d}:{int(s):02d}"
+
+            p, f, w, skip = 0, 0, 0, 0
+            for d in self.all_results_data:
+                v = d.get("verdict", "")
+                if v == "PASS": p += 1
+                elif v == "FAIL": f += 1
+                elif v == "WARN": w += 1
+                elif v == "SKIP": skip += 1
+            total_cmds = p + f + w + skip
+
+            self.q.put(f"\n{'='*60}\n")
+            self.q.put(f"BATCH SEQUENCE COMPLETED (All Languages)\n")
+            self.q.put(f"Total Time Taken: {time_str}\n")
+            self.q.put(f"Total Executions: {total_cmds} (PASS: {p}, FAIL: {f}, WARN: {w}, SKIP: {skip})\n")
+            self.q.put(f"{'='*60}\n")
             return
 
         self.q.put(f"\n{'='*60}\n")
@@ -1169,111 +1145,151 @@ class VerifyStringGUI:
                     s.sendall(b"03011001\r\n")
                     s.close()
                     
-                    self.q.put(f"[Wait] 15 seconds for {ip} to reconnect in AP Mode...\n")
-                    time.sleep(15.0)
+                    self.q.put(f"[Wait] 20 seconds for {ip} to reconnect in AP Mode...\n")
+                    time.sleep(20.0)
                 except Exception as e:
                     self.q.put(f"[Error] Silent Telnet connection failed for {ip}: {e}. Skipping to next device.\n")
                     continue
 
-                # 2. INJECT STATIC ROUTE & CONNECT ADB
-                self.q.put(f"[Network] Clearing old routes and injecting static route to {ip}...\n")
-                subprocess.run(["route", "delete", "199.0.0.4"], creationflags=creationflags, capture_output=True)
-                subprocess.run(["route", "add", "199.0.0.4", "mask", "255.255.255.255", ip], creationflags=creationflags, capture_output=True)
+                # 2. CONNECT ADB (Cross-Talk Fix)
+                self.q.put(f"[ADB] Clearing old connections...\n")
+                try:
+                    subprocess.run(["adb", "disconnect"], creationflags=creationflags, capture_output=True, timeout=5)
+                except Exception:
+                    pass
                 
-                self.q.put(f"[ADB] Connecting TCP Bridge to 199.0.0.4:5500...\n")
-                subprocess.run(["adb", "connect", "199.0.0.4:5500"], creationflags=creationflags)
-                time.sleep(2.0)
+                self.q.put(f"[ADB] Connecting directly to {ip}:5500...\n")
+                try:
+                    res = subprocess.run(["adb", "connect", f"{ip}:5500"], creationflags=creationflags, capture_output=True, text=True, timeout=5)
+                    out_text = res.stdout.lower()
+                except Exception:
+                    out_text = "failed"
+                
+                target_serial = f"{ip}:5500"
+                
+                if "cannot connect" in out_text or "failed" in out_text:
+                    self.q.put(f"[Network] Direct connect failed. Using 199.0.0.4 static route fallback...\n")
+                    subprocess.run(["route", "delete", "199.0.0.4"], creationflags=creationflags, capture_output=True)
+                    subprocess.run(["route", "add", "199.0.0.4", "mask", "255.255.255.255", ip], creationflags=creationflags, capture_output=True)
+                    try:
+                        subprocess.run(["adb", "connect", "199.0.0.4:5500"], creationflags=creationflags, timeout=5)
+                    except Exception:
+                        pass
+                    target_serial = "199.0.0.4:5500"
+
+                # --- NEW: Wait for device to actually authorize on ADB ---
+                self.q.put(f"[ADB] Waiting for device {target_serial} to authorize...\n")
+                device_ready = False
+                for _ in range(15):  # Try for up to 15 seconds
+                    try:
+                        out = subprocess.check_output(["adb", "devices"], text=True, creationflags=creationflags, timeout=3)
+                        if f"{target_serial}\tdevice" in out:
+                            device_ready = True
+                            break
+                        # If it says offline or missing, try reconnecting
+                        if f"{target_serial}\toffline" in out or target_serial not in out:
+                            subprocess.run(["adb", "connect", target_serial], creationflags=creationflags, capture_output=True, timeout=3)
+                    except subprocess.TimeoutExpired:
+                        # Prevent ADB from hanging forever
+                        subprocess.run(["adb", "kill-server"], creationflags=creationflags, capture_output=True)
+                    except Exception:
+                        pass
+                    time.sleep(1.0)
+                
+                if not device_ready:
+                    self.q.put(f"[ADB Warning] Device {target_serial} is still offline. UI Automation may fail.\n")
+                else:
+                    time.sleep(1.0) # Brief pause after it comes online
 
                 # 3. CHANGE LANGUAGE (VIA UI AUTOMATOR)
+                success = False
                 if android_lang_changer:
                     try:
-                        device = android_lang_changer.get_device("199.0.0.4:5500")
+                        device = android_lang_changer.get_device(target_serial)
                         if device:
-                            # STEP A: RESET TO ENGLISH FIRST (5 Retries Max)
-                            if target_lang.lower() not in ["english", "en"]:
-                                self.q.put(f"[UI Auto] Resetting to English first before switching to {target_lang}...\n")
-                                for auto_try in range(5):
-                                    if android_lang_changer.change_language(device, "English"):
-                                        break
-                                    self.q.put(f"[UI Auto] Retry {auto_try+1}/5 for English reset...\n")
-                                    time.sleep(2.0)
-                                time.sleep(2.0)
-                            
-                            # STEP B: SHIFT TO TARGET LANGUAGE WITH CLOSED-LOOP VALIDATION (5 Retries Max)
                             self.q.put(f"[UI Auto] Executing language change on {ip} to '{target_lang}'...\n")
-                            success = False
                             
                             def check_system_locale(target_lang_name):
                                 try:
-                                    # Fetch current system locale via ADB
                                     res = subprocess.run(
-                                        ["adb", "-s", "199.0.0.4:5500", "shell", "getprop", "persist.sys.locale"], 
-                                        capture_output=True, text=True, creationflags=creationflags
+                                        ["adb", "-s", target_serial, "shell", "getprop", "persist.sys.locale"], 
+                                        capture_output=True, text=True, creationflags=creationflags, timeout=5
                                     )
                                     current_locale = res.stdout.strip().lower()
                                     
-                                    # Fallback for newer Android versions
                                     if not current_locale:
                                         res = subprocess.run(
-                                            ["adb", "-s", "199.0.0.4:5500", "shell", "settings", "get", "system", "system_locales"], 
-                                            capture_output=True, text=True, creationflags=creationflags
+                                            ["adb", "-s", target_serial, "shell", "settings", "get", "system", "system_locales"], 
+                                            capture_output=True, text=True, creationflags=creationflags, timeout=5
                                         )
                                         current_locale = res.stdout.strip().lower()
 
-                                    # Map Requested Language to Android Locale Code Prefix
                                     prefix_map = {
                                         "Czech": "cs", "Simplified Chinese": "zh", "Portuguese": "pt",
                                         "Spanish": "es", "Polish": "pl", "Italian": "it", "Turkish": "tr",
                                         "Hungarian": "hu", "English": "en", "Japanese": "ja",
                                         "Russian": "ru", "French": "fr", "German": "de", "Korean": "ko",
-                                        "Traditional Chinese": "zh"
+                                        "Traditional Chinese": "zh", "Arabic": "ar", "Hebrew": "iw"
                                     }
                                     prefix = prefix_map.get(target_lang_name, target_lang_name[:2].lower())
                                     
-                                    if prefix not in current_locale:
-                                        return False
-                                        
-                                    # Distinguish between Traditional and Simplified Chinese
-                                    if target_lang_name == "Traditional Chinese" and not any(x in current_locale for x in ["tw", "hk", "hant"]):
-                                        return False
-                                    if target_lang_name == "Simplified Chinese" and not any(x in current_locale for x in ["cn", "hans"]):
-                                        return False
-                                        
+                                    if prefix not in current_locale: return False
+                                    if target_lang_name == "Traditional Chinese" and not any(x in current_locale for x in ["tw", "hk", "hant"]): return False
+                                    if target_lang_name == "Simplified Chinese" and not any(x in current_locale for x in ["cn", "hans"]): return False
                                     return True
                                 except Exception:
                                     return False
 
-                            for auto_try in range(5):
-                                # Attempt the UI automation
-                                android_lang_changer.change_language(device, target_lang)
-                                
-                                # Wait a moment for Android OS to fully apply the locale change
-                                time.sleep(3.0)
-                                
-                                # Validate the change via ADB
-                                if check_system_locale(target_lang):
-                                    success = True
-                                    self.q.put(f"[UI Auto] Success: Verified system locale changed to {target_lang}!\n")
-                                    break
-                                    
-                                self.q.put(f"[UI Auto] Retry {auto_try+1}/5: Drag finished, but system locale did not update. Retrying...\n")
-                                time.sleep(2.0)
-                            
-                            if not success:
-                                self.q.put(f"[UI Auto Warning] Language change to {target_lang} FAILED on {ip}. Verification might read the wrong language.\n")
+                            # --- DOUBLE CHECK BEFORE ---
+                            if check_system_locale(target_lang):
+                                self.q.put(f"[UI Auto] Device {ip} is already in '{target_lang}'. Skipping UI automation!\n")
+                                success = True
+                            else:
+                                for auto_try in range(5):
+                                    android_lang_changer.change_language(device, target_lang)
+                                    time.sleep(3.0)
+                                    if check_system_locale(target_lang):
+                                        success = True
+                                        self.q.put(f"[UI Auto] Success: Verified system locale changed to {target_lang}!\n")
+                                        break
+                                        
+                                    self.q.put(f"[UI Auto] Retry {auto_try+1}/5: Drag finished, but system locale did not update. Retrying...\n")
+                                    time.sleep(2.0)
                         else:
-                            self.q.put(f"[ADB Error] UI Automator could not find device at 199.0.0.4:5500.\n")
+                            self.q.put(f"[ADB Error] UI Automator could not find device at {target_serial}.\n")
                     except Exception as e:
                         self.q.put(f"[UI Auto Error] Exception occurred: {e}\n")
 
+                if not success:
+                    self.q.put(f"[UI Auto Warning] Language change to '{target_lang}' FAILED on {ip}.\n")
+                    self.q.put("[UI Auto] Paused. Waiting for manual language confirmation...\n")
+                    retry = messagebox.askretrycancel(
+                        "Language Verification Failed",
+                        f"Device {ip} could not automatically switch to '{target_lang}'.\n\n"
+                        f"Please manually change the language on the physical device to '{target_lang}'.\n\n"
+                        f"Click 'Retry' once you have manually changed it, or 'Cancel' to abort."
+                    )
+                    if not retry:
+                        self.q.put((_EVT_COMMG_DONE, "ABORT", []))
+                        return
+                    else:
+                        self.q.put(f"[UI Auto] User manually verified language is '{target_lang}'.\n")
+
                 # 4. SWITCH AP -> MUX (VIA TCP ADB INTENT)
-                self.q.put(f"[ADB] Sending MUX return intent to 199.0.0.4:5500...\n")
-                subprocess.run(["adb", "-s", "199.0.0.4:5500", "shell", "am", "broadcast", "-a", "msi.factorymuxrouter.intent.action.BP_ROUTE_MUX", "-n", "com.motorolasolutions.factorymuxrouter/.MuxRouterBroadcastReceiver"], creationflags=creationflags)
+                self.q.put(f"[ADB] Sending MUX return intent to {target_serial}...\n")
+                try:
+                    subprocess.run(["adb", "-s", target_serial, "shell", "am", "broadcast", "-a", "msi.factorymuxrouter.intent.action.BP_ROUTE_MUX", "-n", "com.motorolasolutions.factorymuxrouter/.MuxRouterBroadcastReceiver"], creationflags=creationflags, timeout=5)
+                except Exception:
+                    pass
                 
                 # 5. CLEANUP ROUTE & ADB
-                self.q.put(f"[Network] Disconnecting TCP Bridge and deleting route...\n")
-                subprocess.run(["adb", "disconnect", "199.0.0.4:5500"], creationflags=creationflags)
-                subprocess.run(["route", "delete", "199.0.0.4"], creationflags=creationflags, capture_output=True)
+                self.q.put(f"[Network] Disconnecting ADB and deleting route...\n")
+                try:
+                    subprocess.run(["adb", "disconnect", target_serial], creationflags=creationflags, timeout=5)
+                except Exception:
+                    pass
+                if target_serial == "199.0.0.4:5500":
+                    subprocess.run(["route", "delete", "199.0.0.4"], creationflags=creationflags, capture_output=True)
 
                 self.q.put(f"[Wait] 15 seconds for {ip} to completely boot back to MUX Mode...\n")
                 time.sleep(15.0)
@@ -1324,17 +1340,22 @@ class VerifyStringGUI:
         mode = self.commg_mode_var.get()
         
         batch_items = []
-        if mode == "Batch" and num_ips > 1:
-            for _ in range(num_ips):
-                if getattr(self, "_commg_pending_queue", []):
-                    batch_items.append(self._commg_pending_queue.pop(0))
+        
+        if mode == "Batch":
+            if getattr(self, "_commg_pending_queue", []):
+                cmd_item = self._commg_pending_queue.pop(0)
+                for _ in range(num_ips):
+                    batch_items.append(cmd_item)
         else:
-            batch_items.append(self._commg_pending_queue.pop(0))
+            if getattr(self, "_commg_pending_queue", []):
+                cmd_item = self._commg_pending_queue.pop(0)
+                for _ in range(num_ips):
+                    batch_items.append(cmd_item)
 
         if not batch_items:
             return
 
-        self._current_batch_items = batch_items # <-- SAVE THIS SO WE CAN RESTORE IT ON PAUSE
+        self._current_batch_items = [cmd_item] 
 
         cmds = []
         tags = []
@@ -1383,7 +1404,7 @@ class VerifyStringGUI:
         self.index_var.set(",".join(indices))
         self._current_batch_cmds = cmds
         tool = self.integration_type_var.get()
-        self.q.put(f"\n[{tool}] Dispatched Commands: {cmds}\n", ("commg",))
+        self.q.put(f"\n[{tool}] Dispatched Command: {cmds[0]} to {num_ips} device(s).\n", ("commg",))
 
         self.status_var.set(f"Automation Running: {cmds[0]}...")
         self.status_label.configure(fg="purple")
@@ -1409,7 +1430,6 @@ class VerifyStringGUI:
         lbl_id = tk.Label(self.lf_devices, text=f"D{int(did)}")
         ent_name = tk.Entry(self.lf_devices, textvariable=var_name, width=20)
         
-        # Make the Entry read-only so users MUST use the select button
         ent_lang = tk.Entry(self.lf_devices, textvariable=var_lang, width=25, state="readonly")
 
         row_dict = {
@@ -1418,7 +1438,6 @@ class VerifyStringGUI:
             "var_lang": var_lang,
         }
         
-        # Add the Select Button
         btn_lang = ttk.Button(self.lf_devices, text="Select...", command=lambda r=row_dict: self._open_lang_selector(r))
 
         row_dict["widgets"] = (lbl_id, ent_name, ent_lang, btn_lang)
@@ -1760,28 +1779,24 @@ class VerifyStringGUI:
         top.transient(self.root)
         top.grab_set()
         
-        # Center the window
         x = self.root.winfo_x() + 100
         y = self.root.winfo_y() + 100
         top.geometry(f"280x350+{x}+{y}")
         
         tk.Label(top, text="Select languages\n(Disabled items are in use by other devices)", pady=10, font=("Arial", 9, "bold")).pack()
         
-        # 1. Figure out what OTHER devices have currently selected
         other_selected = set()
         for r in self.device_rows:
             if r is not row_dict:
                 langs = [l.strip() for l in r["var_lang"].get().split(",") if l.strip()]
                 other_selected.update(langs)
                 
-        # 2. Figure out what THIS device currently has selected
         current_selected = set([l.strip() for l in row_dict["var_lang"].get().split(",") if l.strip()])
         
         check_vars = {}
         frame_checks = tk.Frame(top, padx=10, pady=5)
         frame_checks.pack(fill=tk.BOTH, expand=True)
         
-        # Create scrollable area for languages
         canvas = tk.Canvas(frame_checks, borderwidth=0, highlightthickness=0)
         scrollbar = ttk.Scrollbar(frame_checks, orient="vertical", command=canvas.yview)
         scrollable_frame = tk.Frame(canvas)
@@ -1798,7 +1813,6 @@ class VerifyStringGUI:
             check_vars[lang] = var
             cb = tk.Checkbutton(scrollable_frame, text=lang, variable=var, font=("Arial", 10))
             
-            # Disable this option if another device claimed it
             if lang in other_selected:
                 cb.configure(state=tk.DISABLED)
                 
@@ -2022,7 +2036,6 @@ class VerifyStringGUI:
                 json.dump({"devices": devices}, f, indent=2, ensure_ascii=False)
         except Exception: pass
 
-        # Ensure realtime terminal output when using subprocess
         env["PYTHONUNBUFFERED"] = "1"
 
         def _stream_process():
@@ -2135,8 +2148,8 @@ class VerifyStringGUI:
 
         self.batch_start_time = time.time()
         self._summary_written = False
-        self._full_batch_commands = [] # <--- FIX: ALWAYS initialize this to prevent crashes!
-        # --- NEW: ALWAYS INITIALIZE LANGUAGE COUNTERS HERE ---
+        self._full_batch_commands = [] 
+        
         max_l = 1
         for r in self.device_rows:
             try:
@@ -2147,7 +2160,6 @@ class VerifyStringGUI:
         
         if not getattr(self, "_is_paused", False) or not hasattr(self, "_current_lang_idx"):
             self._current_lang_idx = 0
-        # -----------------------------------------------------
         
         if self.integration_enable_var.get() and HAS_PYWINAUTO:
             
@@ -2163,8 +2175,6 @@ class VerifyStringGUI:
                     self.btn_run.configure(state=tk.NORMAL) 
                     return
                 self._commg_pending_queue = [c]
-                
-                # Save pristine list for Single mode
                 self._full_batch_commands = list(self._commg_pending_queue) 
             else:
                 bf = self.commg_batch_file_var.get().strip()
@@ -2183,7 +2193,6 @@ class VerifyStringGUI:
                         tags = df.iloc[:, 1].fillna("").astype(str).tolist()
                         self._commg_pending_queue = list(zip(self._commg_pending_queue, tags))
                     
-                    # --- FIX: ALWAYS SAVE THE BACKUP REGARDLESS OF COLUMNS ---
                     self._full_batch_commands = list(self._commg_pending_queue)
 
                     if not self._full_batch_commands:
@@ -2191,9 +2200,6 @@ class VerifyStringGUI:
                         self.btn_run.configure(state=tk.NORMAL) 
                         return
                         
-                    # ==============================================================
-                    # NEW: PRE-VALIDATE BATCH FILE COMMANDS AGAINST THE EXCEL SPREADSHEET
-                    # ==============================================================
                     try:
                         excel_path = self.excel_var.get().strip()
                         if excel_path and os.path.exists(excel_path):
@@ -2221,7 +2227,6 @@ class VerifyStringGUI:
                                         return
                     except Exception as e:
                         print(f"[GUI WARNING] Batch pre-validation failed: {e}")
-                    # ==============================================================
 
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to load Batch File: {e}")
@@ -2256,12 +2261,10 @@ class VerifyStringGUI:
                 self._commg_is_active_run = False
                 self._batch_log_dir = None
 
-        # --- NEW: Pre-Fetch Serials before starting AI ---
         self.status_var.set("Fetching Serials (MUX Mode)...")
         self.status_label.configure(fg="blue")
         self.btn_run.configure(state=tk.DISABLED)
         
-        # READ UI DATA IN THE MAIN THREAD FIRST TO AVOID FREEZES
         safe_ips = list(self.ip_listbox.get(0, tk.END))
         try:
             safe_port = int(self.telnet_port_var.get().strip())
@@ -2291,11 +2294,9 @@ class VerifyStringGUI:
                             needs_recovery = True
                             all_cached = False
                             
-                # If we successfully got all serials, break out of the loop immediately!
                 if all_cached:
                     break 
                     
-                # --- AUTO RECOVERY: Attempt to auto-switch to MUX via ADB Intent ---
                 if needs_recovery:
                     self.q.put("[Pre-Check] Attempting to auto-recover devices to MUX mode via ADB Intent...\n")
                     try:
@@ -2405,7 +2406,6 @@ class VerifyStringGUI:
             self.status_label.configure(fg="#E65100")
             self.q.put("\n[GUI] Sequence stopped manually. State saved. Click 'Start' to resume.\n", ("warn",))
             
-            # Restore the currently executing items so they aren't skipped on resume!
             if hasattr(self, "_current_batch_items") and self._current_batch_items:
                 self._commg_pending_queue = self._current_batch_items + getattr(self, "_commg_pending_queue", [])
                 self._current_batch_items = []
@@ -2413,11 +2413,8 @@ class VerifyStringGUI:
             self._commg_pending_queue = []
             
         self._commg_is_active_run = False
-        
-        # CRITICAL FIX: Explicitly re-enable the Start button since we are ignoring the background process exit event!
         self._set_running(False)
         
-        # Cleanup CMD Telnet Sessions
         if getattr(self, "active_sockets", []):
             for s in self.active_sockets:
                 try:
@@ -2428,7 +2425,6 @@ class VerifyStringGUI:
                     pass
             self.active_sockets = []
 
-        # Cleanup PuTTY Sessions
         if getattr(self, "active_putty_apps", {}):
             for ip, (app, term_win) in list(self.active_putty_apps.items()):
                 try:
@@ -2439,11 +2435,10 @@ class VerifyStringGUI:
                     pass
             self.active_putty_apps = {}
 
-        # ---> INSTANTLY KILL THE HUNG PROCESS <---
         if hasattr(self, "current_process") and self.current_process:
             try:
                 self.current_process.kill()
-                self._ignore_next_finish = True # <--- ADD THIS
+                self._ignore_next_finish = True 
                 self._append("\n[GUI] Background AI process force-stopped.\n", ("warn",))
             except Exception:
                 pass
@@ -2528,7 +2523,6 @@ class VerifyStringGUI:
             while True:
                 s = self.q.get_nowait()
                 
-                # --- Catch Pre-Fetch Completion and Proceed ---
                 if isinstance(s, tuple) and len(s) == 2 and s[0] == "__PREFETCH_DONE__":
                     self.q.put("[Pre-Check] Setup complete. Starting GenAI and Verification...\n")
                     self.status_var.set("Init GenAI...")
@@ -2536,7 +2530,6 @@ class VerifyStringGUI:
                     self.init_genai()
                     continue
 
-                # --- Catch Language Swap Completion Event ---
                 if isinstance(s, tuple) and len(s) == 2 and s[0] == "__LANG_CHANGE_DONE__":
                     self.q.put("[Batch] Languages changed. Starting String Verification...\n")
                     self._commg_pending_queue = list(self._full_batch_commands)
@@ -2544,7 +2537,6 @@ class VerifyStringGUI:
                     self._run_next_commg_step()
                     continue
 
-                # --- Catch CommG Execution Event ---
                 if isinstance(s, tuple) and len(s) >= 2 and s[0] == _EVT_COMMG_DONE:
                     status = s[1]
                     batch_items = s[2] if len(s) > 2 else []
@@ -2565,7 +2557,6 @@ class VerifyStringGUI:
                         self._set_running(False)
                         self._write_final_excel_summary() 
                     else:
-                        # CRITICAL FIX: If we clicked stop while it was waiting, ignore this event!
                         if not getattr(self, "_commg_is_active_run", False):
                             continue
                         
@@ -2685,7 +2676,6 @@ class VerifyStringGUI:
                             self.run()
                     continue
 
-                # --- Catch Background Process Completion ---
                 if isinstance(s, tuple) and len(s) == 2 and s[0] == _EVT_FINISHED:
                     rc = s[1]
                     
