@@ -1130,169 +1130,173 @@ class VerifyStringGUI:
                 else:
                     target_lang = "English"
 
-                self.q.put(f"\n{'-'*60}\n")
-                self.q.put(f"[Sequence] Processing Device: {ip} | Target Language: {target_lang}\n")
-                self.q.put(f"{'-'*60}\n")
+                # --- NEW: Loop to allow restarting the automation sequence ---
+                while True:
+                    self.q.put(f"\n{'-'*60}\n")
+                    self.q.put(f"[Sequence] Processing Device: {ip} | Target Language: {target_lang}\n")
+                    self.q.put(f"{'-'*60}\n")
 
-                # 1. SWITCH MUX -> AP VIA TELNET
-                self.q.put(f"[Telnet] Switching {ip} to AP Mode...\n")
-                try:
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.settimeout(5.0)
-                    s.connect((ip, safe_port))
-                    s.sendall(b"0121FF\r\n")
-                    time.sleep(1.0)
-                    s.sendall(b"03011001\r\n")
-                    s.close()
+                    # 1. SWITCH MUX -> AP VIA TELNET
+                    self.q.put(f"[Telnet] Switching {ip} to AP Mode...\n")
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(5.0)
+                        s.connect((ip, safe_port))
+                        s.sendall(b"0121FF\r\n")
+                        time.sleep(1.0)
+                        s.sendall(b"03011001\r\n")
+                        s.close()
+                        
+                        self.q.put(f"[Wait] 20 seconds for {ip} to reconnect in AP Mode...\n")
+                        time.sleep(20.0)
+                    except Exception as e:
+                        self.q.put(f"[Error] Silent Telnet connection failed for {ip}: {e}. Skipping to next device.\n")
+                        break # Exits the while loop, moves to the next IP
+
+                    # 2. CONNECT ADB (Cross-Talk Fix)
+                    self.q.put(f"[ADB] Clearing old connections...\n")
+                    try:
+                        subprocess.run(["adb", "disconnect"], creationflags=creationflags, capture_output=True, timeout=5)
+                    except Exception:
+                        pass
                     
-                    self.q.put(f"[Wait] 20 seconds for {ip} to reconnect in AP Mode...\n")
-                    time.sleep(20.0)
-                except Exception as e:
-                    self.q.put(f"[Error] Silent Telnet connection failed for {ip}: {e}. Skipping to next device.\n")
-                    continue
-
-                # 2. CONNECT ADB (Cross-Talk Fix)
-                self.q.put(f"[ADB] Clearing old connections...\n")
-                try:
-                    subprocess.run(["adb", "disconnect"], creationflags=creationflags, capture_output=True, timeout=5)
-                except Exception:
-                    pass
-                
-                self.q.put(f"[ADB] Connecting directly to {ip}:5500...\n")
-                try:
-                    res = subprocess.run(["adb", "connect", f"{ip}:5500"], creationflags=creationflags, capture_output=True, text=True, timeout=5)
-                    out_text = res.stdout.lower()
-                except Exception:
-                    out_text = "failed"
-                
-                target_serial = f"{ip}:5500"
-                
-                if "cannot connect" in out_text or "failed" in out_text:
-                    self.q.put(f"[Network] Direct connect failed. Using 199.0.0.4 static route fallback...\n")
-                    subprocess.run(["route", "delete", "199.0.0.4"], creationflags=creationflags, capture_output=True)
-                    subprocess.run(["route", "add", "199.0.0.4", "mask", "255.255.255.255", ip], creationflags=creationflags, capture_output=True)
+                    self.q.put(f"[ADB] Connecting directly to {ip}:5500...\n")
                     try:
-                        subprocess.run(["adb", "connect", "199.0.0.4:5500"], creationflags=creationflags, timeout=5)
+                        res = subprocess.run(["adb", "connect", f"{ip}:5500"], creationflags=creationflags, capture_output=True, text=True, timeout=5)
+                        out_text = res.stdout.lower()
                     except Exception:
-                        pass
-                    target_serial = "199.0.0.4:5500"
+                        out_text = "failed"
+                    
+                    target_serial = f"{ip}:5500"
+                    
+                    if "cannot connect" in out_text or "failed" in out_text:
+                        self.q.put(f"[Network] Direct connect failed. Using 199.0.0.4 static route fallback...\n")
+                        subprocess.run(["route", "delete", "199.0.0.4"], creationflags=creationflags, capture_output=True)
+                        subprocess.run(["route", "add", "199.0.0.4", "mask", "255.255.255.255", ip], creationflags=creationflags, capture_output=True)
+                        try:
+                            subprocess.run(["adb", "connect", "199.0.0.4:5500"], creationflags=creationflags, timeout=5)
+                        except Exception:
+                            pass
+                        target_serial = "199.0.0.4:5500"
 
-                # --- NEW: Wait for device to actually authorize on ADB ---
-                self.q.put(f"[ADB] Waiting for device {target_serial} to authorize...\n")
-                device_ready = False
-                for _ in range(15):  # Try for up to 15 seconds
-                    try:
-                        out = subprocess.check_output(["adb", "devices"], text=True, creationflags=creationflags, timeout=3)
-                        if f"{target_serial}\tdevice" in out:
-                            device_ready = True
-                            break
-                        # If it says offline or missing, try reconnecting
-                        if f"{target_serial}\toffline" in out or target_serial not in out:
-                            subprocess.run(["adb", "connect", target_serial], creationflags=creationflags, capture_output=True, timeout=3)
-                    except subprocess.TimeoutExpired:
-                        # Prevent ADB from hanging forever
-                        subprocess.run(["adb", "kill-server"], creationflags=creationflags, capture_output=True)
-                    except Exception:
-                        pass
-                    time.sleep(1.0)
-                
-                if not device_ready:
-                    self.q.put(f"[ADB Warning] Device {target_serial} is still offline. UI Automation may fail.\n")
-                else:
-                    time.sleep(1.0) # Brief pause after it comes online
+                    # Wait for device to actually authorize on ADB
+                    self.q.put(f"[ADB] Waiting for device {target_serial} to authorize...\n")
+                    device_ready = False
+                    for _ in range(15):
+                        try:
+                            out = subprocess.check_output(["adb", "devices"], text=True, creationflags=creationflags, timeout=3)
+                            if f"{target_serial}\tdevice" in out:
+                                device_ready = True
+                                break
+                            if f"{target_serial}\toffline" in out or target_serial not in out:
+                                subprocess.run(["adb", "connect", target_serial], creationflags=creationflags, capture_output=True, timeout=3)
+                        except subprocess.TimeoutExpired:
+                            subprocess.run(["adb", "kill-server"], creationflags=creationflags, capture_output=True)
+                        except Exception:
+                            pass
+                        time.sleep(1.0)
+                    
+                    if not device_ready:
+                        self.q.put(f"[ADB Warning] Device {target_serial} is still offline. UI Automation may fail.\n")
+                    else:
+                        time.sleep(1.0)
 
-                # 3. CHANGE LANGUAGE (VIA UI AUTOMATOR)
-                success = False
-                if android_lang_changer:
-                    try:
-                        device = android_lang_changer.get_device(target_serial)
-                        if device:
-                            self.q.put(f"[UI Auto] Executing language change on {ip} to '{target_lang}'...\n")
-                            
-                            def check_system_locale(target_lang_name):
-                                try:
-                                    res = subprocess.run(
-                                        ["adb", "-s", target_serial, "shell", "getprop", "persist.sys.locale"], 
-                                        capture_output=True, text=True, creationflags=creationflags, timeout=5
-                                    )
-                                    current_locale = res.stdout.strip().lower()
-                                    
-                                    if not current_locale:
+                    # 3. CHANGE LANGUAGE (VIA UI AUTOMATOR)
+                    success = False
+                    if android_lang_changer:
+                        try:
+                            device = android_lang_changer.get_device(target_serial)
+                            if device:
+                                self.q.put(f"[UI Auto] Executing language change on {ip} to '{target_lang}'...\n")
+                                
+                                def check_system_locale(target_lang_name):
+                                    try:
                                         res = subprocess.run(
-                                            ["adb", "-s", target_serial, "shell", "settings", "get", "system", "system_locales"], 
+                                            ["adb", "-s", target_serial, "shell", "getprop", "persist.sys.locale"], 
                                             capture_output=True, text=True, creationflags=creationflags, timeout=5
                                         )
                                         current_locale = res.stdout.strip().lower()
-
-                                    prefix_map = {
-                                        "Czech": "cs", "Simplified Chinese": "zh", "Portuguese": "pt",
-                                        "Spanish": "es", "Polish": "pl", "Italian": "it", "Turkish": "tr",
-                                        "Hungarian": "hu", "English": "en", "Japanese": "ja",
-                                        "Russian": "ru", "French": "fr", "German": "de", "Korean": "ko",
-                                        "Traditional Chinese": "zh", "Arabic": "ar", "Hebrew": "iw"
-                                    }
-                                    prefix = prefix_map.get(target_lang_name, target_lang_name[:2].lower())
-                                    
-                                    if prefix not in current_locale: return False
-                                    if target_lang_name == "Traditional Chinese" and not any(x in current_locale for x in ["tw", "hk", "hant"]): return False
-                                    if target_lang_name == "Simplified Chinese" and not any(x in current_locale for x in ["cn", "hans"]): return False
-                                    return True
-                                except Exception:
-                                    return False
-
-                            # --- DOUBLE CHECK BEFORE ---
-                            if check_system_locale(target_lang):
-                                self.q.put(f"[UI Auto] Device {ip} is already in '{target_lang}'. Skipping UI automation!\n")
-                                success = True
-                            else:
-                                for auto_try in range(5):
-                                    android_lang_changer.change_language(device, target_lang)
-                                    time.sleep(3.0)
-                                    if check_system_locale(target_lang):
-                                        success = True
-                                        self.q.put(f"[UI Auto] Success: Verified system locale changed to {target_lang}!\n")
-                                        break
                                         
-                                    self.q.put(f"[UI Auto] Retry {auto_try+1}/5: Drag finished, but system locale did not update. Retrying...\n")
-                                    time.sleep(2.0)
+                                        if not current_locale:
+                                            res = subprocess.run(
+                                                ["adb", "-s", target_serial, "shell", "settings", "get", "system", "system_locales"], 
+                                                capture_output=True, text=True, creationflags=creationflags, timeout=5
+                                            )
+                                            current_locale = res.stdout.strip().lower()
+
+                                        prefix_map = {
+                                            "Czech": "cs", "Simplified Chinese": "zh", "Portuguese": "pt",
+                                            "Spanish": "es", "Polish": "pl", "Italian": "it", "Turkish": "tr",
+                                            "Hungarian": "hu", "English": "en", "Japanese": "ja",
+                                            "Russian": "ru", "French": "fr", "German": "de", "Korean": "ko",
+                                            "Traditional Chinese": "zh", "Arabic": "ar", "Hebrew": "iw"
+                                        }
+                                        prefix = prefix_map.get(target_lang_name, target_lang_name[:2].lower())
+                                        
+                                        if prefix not in current_locale: return False
+                                        if target_lang_name == "Traditional Chinese" and not any(x in current_locale for x in ["tw", "hk", "hant"]): return False
+                                        if target_lang_name == "Simplified Chinese" and not any(x in current_locale for x in ["cn", "hans"]): return False
+                                        return True
+                                    except Exception:
+                                        return False
+
+                                if check_system_locale(target_lang):
+                                    self.q.put(f"[UI Auto] Device {ip} is already in '{target_lang}'. Skipping UI automation!\n")
+                                    success = True
+                                else:
+                                    for auto_try in range(5):
+                                        android_lang_changer.change_language(device, target_lang)
+                                        time.sleep(3.0)
+                                        if check_system_locale(target_lang):
+                                            success = True
+                                            self.q.put(f"[UI Auto] Success: Verified system locale changed to {target_lang}!\n")
+                                            break
+                                            
+                                        self.q.put(f"[UI Auto] Retry {auto_try+1}/5: Drag finished, but system locale did not update. Retrying...\n")
+                                        time.sleep(2.0)
+                            else:
+                                self.q.put(f"[ADB Error] UI Automator could not find device at {target_serial}.\n")
+                        except Exception as e:
+                            self.q.put(f"[UI Auto Error] Exception occurred: {e}\n")
+
+                    if not success:
+                        self.q.put(f"[UI Auto Warning] Language change to '{target_lang}' FAILED on {ip}.\n")
+                        self.q.put("[UI Auto] Paused. Waiting for manual language confirmation...\n")
+                        
+                        # --- UPDATED RETRY LOGIC ---
+                        retry = messagebox.askretrycancel(
+                            "Language Change Failed",
+                            f"Device {ip} could not automatically switch to '{target_lang}'.\n\n"
+                            f"Click 'Retry' to restart the automation sequence (AP Mode -> ADB -> UI Auto) for this device.\n\n"
+                            f"Click 'Cancel' to abort the entire batch."
+                        )
+                        if not retry:
+                            self.q.put((_EVT_COMMG_DONE, "ABORT", []))
+                            return
                         else:
-                            self.q.put(f"[ADB Error] UI Automator could not find device at {target_serial}.\n")
-                    except Exception as e:
-                        self.q.put(f"[UI Auto Error] Exception occurred: {e}\n")
+                            self.q.put(f"[UI Auto] Retrying language sequence for {ip} from the start...\n")
+                            continue # Loops back to the start of the `while True` for this IP
 
-                if not success:
-                    self.q.put(f"[UI Auto Warning] Language change to '{target_lang}' FAILED on {ip}.\n")
-                    self.q.put("[UI Auto] Paused. Waiting for manual language confirmation...\n")
-                    retry = messagebox.askretrycancel(
-                        "Language Verification Failed",
-                        f"Device {ip} could not automatically switch to '{target_lang}'.\n\n"
-                        f"Please manually change the language on the physical device to '{target_lang}'.\n\n"
-                        f"Click 'Retry' once you have manually changed it, or 'Cancel' to abort."
-                    )
-                    if not retry:
-                        self.q.put((_EVT_COMMG_DONE, "ABORT", []))
-                        return
-                    else:
-                        self.q.put(f"[UI Auto] User manually verified language is '{target_lang}'.\n")
+                    # 4. SWITCH AP -> MUX (VIA TCP ADB INTENT)
+                    self.q.put(f"[ADB] Sending MUX return intent to {target_serial}...\n")
+                    try:
+                        subprocess.run(["adb", "-s", target_serial, "shell", "am", "broadcast", "-a", "msi.factorymuxrouter.intent.action.BP_ROUTE_MUX", "-n", "com.motorolasolutions.factorymuxrouter/.MuxRouterBroadcastReceiver"], creationflags=creationflags, timeout=5)
+                    except Exception:
+                        pass
+                    
+                    # 5. CLEANUP ROUTE & ADB
+                    self.q.put(f"[Network] Disconnecting ADB and deleting route...\n")
+                    try:
+                        subprocess.run(["adb", "disconnect", target_serial], creationflags=creationflags, timeout=5)
+                    except Exception:
+                        pass
+                    if target_serial == "199.0.0.4:5500":
+                        subprocess.run(["route", "delete", "199.0.0.4"], creationflags=creationflags, capture_output=True)
 
-                # 4. SWITCH AP -> MUX (VIA TCP ADB INTENT)
-                self.q.put(f"[ADB] Sending MUX return intent to {target_serial}...\n")
-                try:
-                    subprocess.run(["adb", "-s", target_serial, "shell", "am", "broadcast", "-a", "msi.factorymuxrouter.intent.action.BP_ROUTE_MUX", "-n", "com.motorolasolutions.factorymuxrouter/.MuxRouterBroadcastReceiver"], creationflags=creationflags, timeout=5)
-                except Exception:
-                    pass
-                
-                # 5. CLEANUP ROUTE & ADB
-                self.q.put(f"[Network] Disconnecting ADB and deleting route...\n")
-                try:
-                    subprocess.run(["adb", "disconnect", target_serial], creationflags=creationflags, timeout=5)
-                except Exception:
-                    pass
-                if target_serial == "199.0.0.4:5500":
-                    subprocess.run(["route", "delete", "199.0.0.4"], creationflags=creationflags, capture_output=True)
-
-                self.q.put(f"[Wait] 15 seconds for {ip} to completely boot back to MUX Mode...\n")
-                time.sleep(15.0)
+                    self.q.put(f"[Wait] 15 seconds for {ip} to completely boot back to MUX Mode...\n")
+                    time.sleep(15.0)
+                    
+                    break # Exits the while loop on success, moves to the next IP
 
             # --- 6. GLOBAL MUX VERIFICATION SAFETY NET ---
             self.q.put("\n[Pre-Check] Verifying MUX connection on all devices before string verification...\n")

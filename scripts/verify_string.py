@@ -1148,7 +1148,7 @@ def main():
         # CRITICAL FIX: Save the exact image used
         best_roi_for_saving = roi.copy()
         
-        progressive_dims = [1000, 1100, 1100]  # REDUCED: Caps resolution scaling
+        progressive_dims = [600, 800, 800]  # REDUCED: Caps resolution scaling
         
         try:
             if ocr is not None: del ocr

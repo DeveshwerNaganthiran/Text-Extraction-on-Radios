@@ -651,7 +651,7 @@ class MSIGenAIOCR:
                 parsed = _parse_structured(raw_text)
                 
                 # --- NEW: CHARACTER-LEVEL VERIFICATION & RETRY LOOP ---
-                if expected_text:
+                if False:
                     current_original = (parsed.get("original") or "").strip()
                     correction_prompt = _generate_correction_prompt(expected_text, current_original)
                     
