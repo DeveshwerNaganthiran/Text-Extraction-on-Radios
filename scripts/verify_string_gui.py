@@ -1113,6 +1113,15 @@ class VerifyStringGUI:
             ips = list(self.ip_listbox.get(0, tk.END))
             creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0
 
+            # --- AGGRESSIVE CLEANUP AFTER HUGE BATCHES ---
+            self.q.put("\n[System] Performing deep ADB cleanup before changing languages...\n")
+            try:
+                subprocess.run(["adb", "kill-server"], creationflags=creationflags, timeout=5)
+                time.sleep(2.0)
+                subprocess.run(["adb", "start-server"], creationflags=creationflags, timeout=5)
+            except Exception:
+                pass
+
             try:
                 import sys
                 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -1130,7 +1139,6 @@ class VerifyStringGUI:
                 else:
                     target_lang = "English"
 
-                # --- NEW: Loop to allow restarting the automation sequence ---
                 while True:
                     self.q.put(f"\n{'-'*60}\n")
                     self.q.put(f"[Sequence] Processing Device: {ip} | Target Language: {target_lang}\n")
@@ -1147,11 +1155,24 @@ class VerifyStringGUI:
                         s.sendall(b"03011001\r\n")
                         s.close()
                         
-                        self.q.put(f"[Wait] 20 seconds for {ip} to reconnect in AP Mode...\n")
-                        time.sleep(20.0)
+                        self.q.put(f"[Wait] 30 seconds for Windows and {ip} to re-establish network...\n")
+                        time.sleep(30.0)
                     except Exception as e:
-                        self.q.put(f"[Error] Silent Telnet connection failed for {ip}: {e}. Skipping to next device.\n")
-                        break # Exits the while loop, moves to the next IP
+                        # Removed the break statement here so it gracefully proceeds even if it timed out!
+                        self.q.put(f"[Warning] Telnet failed for {ip}: {e}. Device might already be in AP mode. Proceeding...\n")
+
+                    # --- NEW: PING VERIFICATION ---
+                    self.q.put(f"[Network] Verifying if {ip} is reachable on the network...\n")
+                    is_pingable = False
+                    for ping_try in range(10):
+                        if self._commg_ping_ip(ip):
+                            self.q.put(f"[Network] {ip} is online!\n")
+                            is_pingable = True
+                            break
+                        time.sleep(2.0)
+                    
+                    if not is_pingable:
+                        self.q.put(f"[Network Warning] {ip} is not responding to pings. ADB might fail.\n")
 
                     # 2. CONNECT ADB (Cross-Talk Fix)
                     self.q.put(f"[ADB] Clearing old connections...\n")
@@ -1169,7 +1190,8 @@ class VerifyStringGUI:
                     
                     target_serial = f"{ip}:5500"
                     
-                    if "cannot connect" in out_text or "failed" in out_text:
+                    # Also fallback if marked offline
+                    if "cannot connect" in out_text or "failed" in out_text or "offline" in out_text:
                         self.q.put(f"[Network] Direct connect failed. Using 199.0.0.4 static route fallback...\n")
                         subprocess.run(["route", "delete", "199.0.0.4"], creationflags=creationflags, capture_output=True)
                         subprocess.run(["route", "add", "199.0.0.4", "mask", "255.255.255.255", ip], creationflags=creationflags, capture_output=True)
@@ -1179,7 +1201,7 @@ class VerifyStringGUI:
                             pass
                         target_serial = "199.0.0.4:5500"
 
-                    # Wait for device to actually authorize on ADB
+                    # Wait for device to actually authorize on ADB safely
                     self.q.put(f"[ADB] Waiting for device {target_serial} to authorize...\n")
                     device_ready = False
                     for _ in range(15):
@@ -1189,17 +1211,28 @@ class VerifyStringGUI:
                                 device_ready = True
                                 break
                             if f"{target_serial}\toffline" in out or target_serial not in out:
+                                # Force disconnect ghost connections before reconnecting
+                                subprocess.run(["adb", "disconnect", target_serial], creationflags=creationflags, capture_output=True, timeout=3)
+                                time.sleep(1.0)
                                 subprocess.run(["adb", "connect", target_serial], creationflags=creationflags, capture_output=True, timeout=3)
                         except subprocess.TimeoutExpired:
                             subprocess.run(["adb", "kill-server"], creationflags=creationflags, capture_output=True)
+                            time.sleep(1.0)
+                            subprocess.run(["adb", "start-server"], creationflags=creationflags, capture_output=True)
                         except Exception:
                             pass
-                        time.sleep(1.0)
+                        time.sleep(2.0)
                     
                     if not device_ready:
                         self.q.put(f"[ADB Warning] Device {target_serial} is still offline. UI Automation may fail.\n")
                     else:
                         time.sleep(1.0)
+                        # --- WAKE SCREEN COMMAND ---
+                        try:
+                            self.q.put("[ADB] Ensuring device screen is awake...\n")
+                            subprocess.run(["adb", "-s", target_serial, "shell", "input", "keyevent", "224"], creationflags=creationflags, timeout=3)
+                            time.sleep(1.0)
+                        except: pass
 
                     # 3. CHANGE LANGUAGE (VIA UI AUTOMATOR)
                     success = False
@@ -1263,7 +1296,6 @@ class VerifyStringGUI:
                         self.q.put(f"[UI Auto Warning] Language change to '{target_lang}' FAILED on {ip}.\n")
                         self.q.put("[UI Auto] Paused. Waiting for manual language confirmation...\n")
                         
-                        # --- UPDATED RETRY LOGIC ---
                         retry = messagebox.askretrycancel(
                             "Language Change Failed",
                             f"Device {ip} could not automatically switch to '{target_lang}'.\n\n"
@@ -1275,7 +1307,7 @@ class VerifyStringGUI:
                             return
                         else:
                             self.q.put(f"[UI Auto] Retrying language sequence for {ip} from the start...\n")
-                            continue # Loops back to the start of the `while True` for this IP
+                            continue
 
                     # 4. SWITCH AP -> MUX (VIA TCP ADB INTENT)
                     self.q.put(f"[ADB] Sending MUX return intent to {target_serial}...\n")
@@ -1296,7 +1328,7 @@ class VerifyStringGUI:
                     self.q.put(f"[Wait] 15 seconds for {ip} to completely boot back to MUX Mode...\n")
                     time.sleep(15.0)
                     
-                    break # Exits the while loop on success, moves to the next IP
+                    break
 
             # --- 6. GLOBAL MUX VERIFICATION SAFETY NET ---
             self.q.put("\n[Pre-Check] Verifying MUX connection on all devices before string verification...\n")
@@ -1960,6 +1992,10 @@ class VerifyStringGUI:
         self.last_error_msg = ""  
         self._is_recording_log = False 
         
+        # --- NEW: Process Generation Tracking ---
+        self._process_gen = getattr(self, "_process_gen", 0) + 1
+        current_gen = self._process_gen
+        
         self.status_var.set("Running Verify...")
         try: self.status_label.configure(fg="black")
         except Exception: pass
@@ -2069,7 +2105,8 @@ class VerifyStringGUI:
                 else:
                     rc = -1
                     
-                self.q.put((_EVT_FINISHED, rc))
+                # Bind the generation tracker to the finish event
+                self.q.put((_EVT_FINISHED, rc, current_gen))
 
         self.proc_thread = threading.Thread(target=_stream_process, daemon=True)
         self.proc_thread.start()
@@ -2142,6 +2179,7 @@ class VerifyStringGUI:
                 self._is_paused = False
                 self._commg_is_active_run = True
                 self._auto_start_verify = True
+                self._is_resuming_batch = True  # Tells the queue to resume seamlessly
                 self._summary_written = False
                 self.init_genai()
                 return
@@ -2187,6 +2225,7 @@ class VerifyStringGUI:
                     self.btn_run.configure(state=tk.NORMAL) 
                     return
                 try:
+                    import pandas as pd
                     if bf.lower().endswith('.csv'): df = pd.read_csv(bf, header=None)
                     else: df = pd.read_excel(bf, header=None)
                     
@@ -2204,34 +2243,6 @@ class VerifyStringGUI:
                         self.btn_run.configure(state=tk.NORMAL) 
                         return
                         
-                    try:
-                        excel_path = self.excel_var.get().strip()
-                        if excel_path and os.path.exists(excel_path):
-                            self.status_var.set("Cross-checking batch items against Excel...")
-                            self.root.update()
-                            
-                            mapping = _build_index_to_tag_map(excel_path)
-                            if mapping:
-                                missing_items = []
-                                for item in self._full_batch_commands:
-                                    cmd = item[0] if isinstance(item, tuple) else item
-                                    idx = cmd.split(":")[-1].strip() if ":" in cmd else cmd.strip()
-                                    clean_idx = str(int(idx)) if idx.isdigit() else idx
-                                    
-                                    if clean_idx not in mapping:
-                                        missing_items.append(cmd)
-                                        
-                                if missing_items:
-                                    msg = f"Validation Warning: {len(missing_items)} commands in your batch file DO NOT exist in the loaded Excel sheet.\n\nExamples:\n"
-                                    msg += "\n".join(missing_items[:5])
-                                    msg += "\n\nDo you want to proceed anyway (missing items will be skipped)?"
-                                    if not messagebox.askyesno("Batch Validation Failed", msg):
-                                        self.btn_run.configure(state=tk.NORMAL)
-                                        self.status_var.set("Idle")
-                                        return
-                    except Exception as e:
-                        print(f"[GUI WARNING] Batch pre-validation failed: {e}")
-
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to load Batch File: {e}")
                     self.btn_run.configure(state=tk.NORMAL) 
@@ -2372,11 +2383,11 @@ class VerifyStringGUI:
             dialog.grab_set()            
             
             try:
-                x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 150
-                y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 60
-                dialog.geometry(f"300x120+{x}+{y}")
+                x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 175
+                y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 70
+                dialog.geometry(f"350x140+{x}+{y}")
             except Exception:
-                dialog.geometry("300x120")
+                dialog.geometry("350x140")
                 
             tk.Label(dialog, text="Process is currently running.\nWhat would you like to do?", font=('Arial', 10)).pack(pady=15)
             
@@ -2391,19 +2402,131 @@ class VerifyStringGUI:
                     action["result"] = "stop"
                     dialog.destroy()
                     
+            def on_retry():
+                from tkinter import simpledialog
+                import time
+                import queue
+                from pathlib import Path
+                
+                target_idx = simpledialog.askstring("Retry", "Enter the index number to retry from\n(Searches from BOTTOM first):", parent=dialog)
+                if not target_idx:
+                    return
+                target_idx = target_idx.strip()
+
+                found_pos = -1
+                full_batch = getattr(self, "_full_batch_commands", [])
+                
+                # Search BACKWARDS (from the bottom first) to find the correct index
+                for i in range(len(full_batch) - 1, -1, -1):
+                    item = full_batch[i]
+                    cmd = item[0] if isinstance(item, tuple) else item
+                    idx_val = cmd.split(":")[-1].strip() if ":" in cmd else cmd.strip()
+                    
+                    try: clean_idx = str(int(idx_val)) if idx_val.isdigit() else idx_val
+                    except Exception: clean_idx = idx_val
+                    
+                    try: clean_target = str(int(target_idx)) if target_idx.isdigit() else target_idx
+                    except Exception: clean_target = target_idx
+                    
+                    if clean_idx == clean_target:
+                        found_pos = i
+                        break
+                
+                if found_pos != -1:
+                    # 1. Kill active process and invalidate its events FIRST
+                    if hasattr(self, "current_process") and self.current_process:
+                        try:
+                            self._process_gen = getattr(self, "_process_gen", 0) + 1 
+                            self.current_process.kill()
+                            self._append("\n[GUI] Process interrupted for retry. Cleaning up trailing logs...\n", ("warn",))
+                        except Exception:
+                            pass
+                    
+                    # 2. Forcefully flush the queue to completely destroy any lingering ghost [GUI_RESULT] logs
+                    while not self.q.empty():
+                        try:
+                            self.q.get_nowait()
+                        except queue.Empty:
+                            break
+
+                    # 3. Set the queue for the next run
+                    self._commg_pending_queue = full_batch[found_pos:]
+                    self._current_batch_items = []
+                    
+                    # 4. Exact Math for truncation
+                    ips = list(self.ip_listbox.get(0, tk.END))
+                    num_ips = len(ips) if ips else 1
+                    current_lang_idx = getattr(self, "_current_lang_idx", 0)
+                    expected_valid_size = int((current_lang_idx * len(full_batch) * num_ips) + (found_pos * num_ips))
+                    
+                    # 5. STRICT Truncation: Wipe out everything from this index onwards in the GUI memory
+                    self.all_results_data = self.all_results_data[:expected_valid_size]
+                    self._update_summary_ui(self.current_filter)
+                    
+                    # 6. Aggressive Live Excel Cleaning
+                    if getattr(self, "_log_session_dir", None):
+                        filename = self.excel_filename_var.get().strip() or "Batch_Summary_Report.xlsx"
+                        if not filename.lower().endswith(".xlsx"): filename += ".xlsx"
+                        xl_p = Path(self._log_session_dir) / filename
+                        
+                        if xl_p.exists():
+                            try:
+                                from openpyxl import load_workbook
+                                wb = load_workbook(xl_p)
+                                ws = wb.active
+                                max_allowed_row = expected_valid_size + 1
+                                
+                                if ws.max_row > max_allowed_row:
+                                    rows_to_delete = ws.max_row - max_allowed_row
+                                    # Add +50 to forcefully bulldoze trailing formatted blank cells
+                                    ws.delete_rows(max_allowed_row + 1, rows_to_delete + 50)
+                                    wb.save(xl_p)
+                                    self._append(f"\n[GUI] Live Excel strictly cleaned: Wiped data from index '{target_idx}' onwards.\n", ("warn",))
+                            except Exception as e:
+                                self._append(f"\n[GUI ERROR] Could not clean Excel during retry (Close the Excel file if it is open!): {e}\n", ("error",))
+                    
+                    action["result"] = "retry"
+                    dialog.destroy()
+                else:
+                    messagebox.showerror("Not Found", f"Index '{target_idx}' not found in the original batch.", parent=dialog)
+
             btn_frame = tk.Frame(dialog)
             btn_frame.pack(fill=tk.BOTH, expand=True)
             
-            tk.Button(btn_frame, text="Continue", command=on_continue, width=10, bg="#90EE90", font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=30)
-            tk.Button(btn_frame, text="Stop", command=on_stop, width=10, bg="#FFCCCB", font=('Arial', 9, 'bold')).pack(side=tk.RIGHT, padx=30)
+            tk.Button(btn_frame, text="Continue", command=on_continue, width=8, bg="#90EE90", font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=15)
+            tk.Button(btn_frame, text="Retry", command=on_retry, width=8, bg="#FFF3E0", font=('Arial', 9, 'bold')).pack(side=tk.LEFT, padx=15)
+            tk.Button(btn_frame, text="Stop", command=on_stop, width=8, bg="#FFCCCB", font=('Arial', 9, 'bold')).pack(side=tk.RIGHT, padx=15)
             
             dialog.protocol("WM_DELETE_WINDOW", on_continue)
             
             self.root.wait_window(dialog)
             
-            if action["result"] != "stop":
+            if action["result"] == "continue":
+                return
+            elif action["result"] == "retry":
+                if getattr(self, "active_sockets", []):
+                    for s in self.active_sockets:
+                        try:
+                            s.sendall(b"STR_TEST:CLOSE\r\n")
+                            time.sleep(0.2)
+                            s.close()
+                        except Exception: pass
+                    self.active_sockets = []
+
+                if getattr(self, "active_putty_apps", {}):
+                    for ip, (app, term_win) in list(self.active_putty_apps.items()):
+                        try:
+                            term_win.type_keys("STR_TEST:CLOSE{ENTER}")
+                            time.sleep(0.5)
+                            app.kill()
+                        except Exception: pass
+                    self.active_putty_apps = {}
+
+                # Start the sequence again seamlessly
+                self.root.after(1500, self._run_next_commg_step)
                 return
                 
+        # Existing Stop Logic
         if getattr(self, "_commg_is_active_run", False):
             self._is_paused = True
             self.status_var.set("Automation Paused")
@@ -2425,8 +2548,7 @@ class VerifyStringGUI:
                     s.sendall(b"STR_TEST:CLOSE\r\n")
                     time.sleep(0.2)
                     s.close()
-                except Exception:
-                    pass
+                except Exception: pass
             self.active_sockets = []
 
         if getattr(self, "active_putty_apps", {}):
@@ -2435,14 +2557,13 @@ class VerifyStringGUI:
                     term_win.type_keys("STR_TEST:CLOSE{ENTER}")
                     time.sleep(0.5)
                     app.kill()
-                except Exception:
-                    pass
+                except Exception: pass
             self.active_putty_apps = {}
 
         if hasattr(self, "current_process") and self.current_process:
             try:
+                self._process_gen = getattr(self, "_process_gen", 0) + 1 
                 self.current_process.kill()
-                self._ignore_next_finish = True 
                 self._append("\n[GUI] Background AI process force-stopped.\n", ("warn",))
             except Exception:
                 pass
@@ -2680,12 +2801,16 @@ class VerifyStringGUI:
                             self.run()
                     continue
 
-                if isinstance(s, tuple) and len(s) == 2 and s[0] == _EVT_FINISHED:
+                if isinstance(s, tuple) and len(s) >= 2 and s[0] == _EVT_FINISHED:
                     rc = s[1]
+                    proc_gen = s[2] if len(s) > 2 else -1
                     
-                    if getattr(self, "_ignore_next_finish", False):
-                        self._ignore_next_finish = False
+                    # Ignore finishes from old/killed background processes
+                    if hasattr(self, "_process_gen") and proc_gen != -1 and proc_gen != self._process_gen:
                         continue 
+                        
+                    # Fixes the repetition bug
+                    self._current_batch_items = [] 
                         
                     is_verify = bool(self._last_run_is_verification)
                     
@@ -2752,7 +2877,14 @@ class VerifyStringGUI:
                         continue
                     elif will_autostart:
                         self._auto_start_verify = False 
-                        self._start_language_iteration()
+                        
+                        # --- Checks if we are resuming from a pause to prevent language resets ---
+                        if getattr(self, "_is_resuming_batch", False):
+                            self._is_resuming_batch = False
+                            self.q.put("\n[GUI] Resuming saved queue items...\n", ("pass",))
+                            self._run_next_commg_step()
+                        else:
+                            self._start_language_iteration()
                         continue
 
                     if will_autostart:

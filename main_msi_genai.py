@@ -14,6 +14,7 @@ import atexit
 import tempfile
 import shutil
 
+
 try:
     from PIL import Image, ImageDraw, ImageFont
 except Exception:  # pragma: no cover

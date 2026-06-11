@@ -2,11 +2,13 @@
   "devices": [
     {
       "id": 1,
-      "name": "ION1"
+      "name": "ION1",
+      "language": "Polish, Simplified Chinese, Spanish, Turkish"
     },
     {
       "id": 2,
-      "name": "ION30"
+      "name": "ION30",
+      "language": "Portuguese, Russian, Traditional Chinese"
     }
   ]
 }
