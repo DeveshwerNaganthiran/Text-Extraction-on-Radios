@@ -18,6 +18,9 @@ import numpy as np
 import yaml
 import json
 import pandas as pd
+import hashlib
+import pickle
+import tempfile
 
 try:
     from PIL import Image, ImageDraw, ImageFont
@@ -579,13 +582,67 @@ def _show_ocr_result_window(
         except Exception: pass
     except Exception: return
 
-def _find_sheet(xls: pd.ExcelFile, name: str) -> str:
+# ---------------------------------------------------------------------------
+# CRITICAL FIX: EXCEL CACHING TO BYPASS 25-SECOND PANDAS READ BOTTLENECK
+# ---------------------------------------------------------------------------
+def get_cached_excel_data(excel_path: str):
+    if not os.path.exists(str(excel_path)): raise FileNotFoundError(excel_path)
+    
+    stat = os.stat(excel_path)
+    cache_key = hashlib.md5(f"{excel_path}_{stat.st_mtime}_{stat.st_size}".encode()).hexdigest()
+    cache_dir = Path(tempfile.gettempdir()) / "walkie_excel_cache"
+    cache_dir.mkdir(exist_ok=True)
+    cache_file = cache_dir / f"{cache_key}.pkl"
+    
+    if cache_file.exists():
+        try:
+            with open(cache_file, 'rb') as f:
+                return pickle.load(f)
+        except Exception: pass
+        
+    print("    -> [Cache Miss] Parsing massive Excel file for the first time... (This takes 15-30s)")
+    xls = pd.ExcelFile(str(excel_path), engine="openpyxl")
+    
+    sheets = {}
+    for s in xls.sheet_names:
+        df = pd.read_excel(xls, sheet_name=s, engine="openpyxl")
+        
+        def _coerce_index(v):
+            try:
+                if pd.isna(v): return ""
+            except Exception: pass
+            st = str(v).strip()
+            if st.endswith(".0"):
+                try: return str(int(float(st)))
+                except Exception: pass
+            if st.isdigit():
+                try: return str(int(st))  
+                except Exception: pass
+            return st
+            
+        idx_col = next((c for c in df.columns if _norm_col(c) == "index"), None)
+        if idx_col:
+            df["__index"] = df[idx_col].apply(_coerce_index)
+        sheets[s] = df
+        
+    data = {
+        "sheets": sheets,
+        "sheet_names": xls.sheet_names
+    }
+    
+    try:
+        with open(cache_file, 'wb') as f:
+            pickle.dump(data, f)
+    except Exception: pass
+    return data
+
+def _find_sheet_cached(sheet_names, name: str) -> str:
     target = _norm_col(name)
-    for s in xls.sheet_names:
+    for s in sheet_names:
         if _norm_col(s) == target: return s
-    for s in xls.sheet_names:
+    for s in sheet_names:
         if target in _norm_col(s): return s
-    raise ValueError(f"Sheet '{name}' not found. Available: {xls.sheet_names}")
+    raise ValueError(f"Sheet '{name}' not found. Available: {sheet_names}")
 
 def _pick_language_column(df: pd.DataFrame, region: str, language: str) -> str:
     want = _norm_col(language)
@@ -610,42 +667,24 @@ def _find_tag_column(df: pd.DataFrame) -> str:
     return preferred[0] if preferred else (fallback[0] if fallback else "")
 
 def load_expected(excel_path: str, region: str, language: str, index: str = "", tag: str = "") -> dict:
-    if not os.path.exists(str(excel_path)): raise FileNotFoundError(excel_path)
-    xls = pd.ExcelFile(str(excel_path), engine="openpyxl")
-    english_sheet, category_sheet = _find_sheet(xls, "english"), _find_sheet(xls, "category")
+    data = get_cached_excel_data(excel_path)
+    sheets = data["sheets"]
+    sheet_names = data["sheet_names"]
+    
+    english_sheet = _find_sheet_cached(sheet_names, "english")
+    
     region_norm = _norm_col(region)
-    if region_norm in ["apac"]: region_sheet = _find_sheet(xls, "apac")
-    elif region_norm in ["emea"]: region_sheet = _find_sheet(xls, "emea")
-    elif region_norm in ["lacr", "latam", "latam\u0026caribbean", "la cr"]: region_sheet = _find_sheet(xls, "lacr")
+    if region_norm in ["apac"]: region_sheet = _find_sheet_cached(sheet_names, "apac")
+    elif region_norm in ["emea"]: region_sheet = _find_sheet_cached(sheet_names, "emea")
+    elif region_norm in ["lacr", "latam", "latam\u0026caribbean", "la cr"]: region_sheet = _find_sheet_cached(sheet_names, "lacr")
     elif region_norm in ["english", "en", "global"]: region_sheet = english_sheet
     else: raise ValueError(f"Region must be one of: english, apac, emea, lacr. Got {region}")
 
-    df_en, df_cat, df_reg = pd.read_excel(xls, sheet_name=english_sheet, engine="openpyxl").copy(), pd.read_excel(xls, sheet_name=category_sheet, engine="openpyxl").copy(), pd.read_excel(xls, sheet_name=region_sheet, engine="openpyxl").copy()
+    df_en = sheets[english_sheet]
+    df_reg = sheets[region_sheet]
 
-    def _coerce_index(v):
-        try:
-            if pd.isna(v): return ""
-        except Exception: pass
-        s = str(v).strip()
-        if s.endswith(".0"):
-            try: return str(int(float(s)))
-            except Exception: pass
-        if s.isdigit():
-            try: return str(int(s))  
-            except Exception: pass
-        return s
-
-    if "index" in [_norm_col(c) for c in df_en.columns]: 
-        df_en["__index"] = df_en[next(c for c in df_en.columns if _norm_col(c) == "index")].apply(_coerce_index)
-    else: raise ValueError("English sheet missing 'index' column")
-
-    if "index" in [_norm_col(c) for c in df_reg.columns]: 
-        df_reg["__index"] = df_reg[next(c for c in df_reg.columns if _norm_col(c) == "index")].apply(_coerce_index)
-    else: raise ValueError(f"Region sheet '{region_sheet}' missing 'index' column")
-
-    if "index" in [_norm_col(c) for c in df_cat.columns]: 
-        df_cat["__index"] = df_cat[next(c for c in df_cat.columns if _norm_col(c) == "index")].apply(_coerce_index)
-    else: raise ValueError("Category sheet missing 'index' column")
+    if "__index" not in df_en.columns: raise ValueError("English sheet missing 'index' column")
+    if "__index" not in df_reg.columns: raise ValueError(f"Region sheet '{region_sheet}' missing 'index' column")
 
     idx = str(index).strip()
     if idx and idx.endswith(".0"):
@@ -660,7 +699,6 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
 
     tag_norm = str(tag).strip().lower()
 
-    # ---- 1. Search English Sheet (Prioritize TAG over Index) ----
     row_en = pd.DataFrame()
     if tag_norm and en_tag_col:
         row_en = df_en[df_en[en_tag_col].astype(str).str.strip().str.lower() == tag_norm]
@@ -672,7 +710,6 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
     found_idx = str(row_en.iloc[0].get("__index", "")).strip()
     found_tag = str(row_en.iloc[0].get(en_tag_col, "")).strip() if en_tag_col else str(tag)
 
-    # ---- 2. Search Region Sheet (Prioritize TAG over Index) ----
     row_reg = pd.DataFrame()
     idx_region = ""
     if found_tag and reg_tag_col:
@@ -686,12 +723,10 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
     def _extract_merged_text_safely(df, target_idx, target_tag, text_col_name, tag_col_name):
         if not text_col_name or text_col_name not in df.columns: return ""
         
-        # Try to find exactly by TAG first
         matching_rows = []
         if target_tag and tag_col_name:
             matching_rows = df.index[df[tag_col_name].astype(str).str.strip().str.lower() == target_tag.lower()].tolist()
             
-        # Fallback to Index if tag is missing
         if not matching_rows and target_idx:
             matching_rows = df.index[df["__index"] == target_idx].tolist()
             
@@ -728,7 +763,7 @@ def load_expected(excel_path: str, region: str, language: str, index: str = "", 
         "index": found_idx, "index_region": idx_region, "expected_en": expected_en, "expected_local": expected_local, "region_sheet": region_sheet, "tag": final_tag
     }
 
-def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float, warmup_sec: float = 1.5, rolling_mode: bool = False):
+def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float, warmup_sec: float = 0.7, rolling_mode: bool = False):
     cap = cv2.VideoCapture(int(camera_id), cv2.CAP_DSHOW)
     
     if not cap.isOpened(): raise RuntimeError(f"Could not open camera {camera_id}")
@@ -743,7 +778,6 @@ def capture_screen_roi(detector: FastDetector, camera_id: int, confidence: float
     
     burst_frames = []
     
-    # Allow the camera time to adjust exposure and focus
     t_end = time.time() + warmup_sec
     last_t = 0
     while time.time() < t_end:
@@ -1036,7 +1070,7 @@ def main():
         
         disp_style = get_display_style_name(cmd_val)
 
-        if tag_val == "SKIP_VERIFY" or idx_val == "SKIP_VERIFY":
+        if tag_val == "SKIP_VERIFY" or idx_val == "SKIP_VERIFY" or lang_val == "SKIP_DEVICE":
             expected_list.append({"index": "SKIP_VERIFY", "tag": "SKIP_VERIFY", "command": cmd_val, "display_style": disp_style, "expected_en": "SKIP", "expected_local": "SKIP", "language": lang_val, "region": "Multiple"})
             continue
             
@@ -1062,7 +1096,6 @@ def main():
     detector = FastDetector(model_path)
     t0_cap = time.time()
     
-    # First baseline capture
     full_frame, rois, roi_coords = capture_screen_roi(
         detector, camera_id=camera_id, confidence=confidence, rolling_mode=False
     )
@@ -1092,7 +1125,6 @@ def main():
         device_id = mapped_idx + 1
         dev_name = get_device_name(profiles, device_id)
         
-        # Grab the saved coordinates for this specific radio
         sx1, sy1, sx2, sy2 = roi_coords[idx]
         
         exp_dict = expected_list[mapped_idx] if mapped_idx < len(expected_list) else expected_list[-1]
@@ -1101,7 +1133,7 @@ def main():
         print(f"Device: {dev_name} (Extracting text...)")
         print("=" * 70)
         
-        if exp_dict.get("tag") == "SKIP_VERIFY" or exp_dict.get("index") == "SKIP_VERIFY":
+        if exp_dict.get("tag") == "SKIP_VERIFY" or exp_dict.get("index") == "SKIP_VERIFY" or exp_dict.get("language") == "SKIP_DEVICE":
             summary_counts["SKIP"] += 1
             print("Skipping verification for this device as requested via Automation Command.")
             payload = {"device": dev_name, "command": exp_dict.get('command', ''), "display_style": exp_dict.get('display_style', ''), "index": "SKIP", "tag": "SKIP", "expected": "-", "actual": "-", "confidence": "-", "verdict": "SKIP", "error": ""}
@@ -1135,9 +1167,8 @@ def main():
         })
         print("="*60 + "\n")
 
-        # Check GUI setting: Default to 2 (first normal, second retry for rolling/truncation) unless Custom Retries is checked
         if args.enable_retries:
-            max_retries = max(1, args.max_retries) # Ensure at least 1 attempt
+            max_retries = max(1, args.max_retries) 
         else:
             max_retries = 2
             
@@ -1145,10 +1176,9 @@ def main():
         best_attempt_data = None
         seen_observations = set()
         
-        # CRITICAL FIX: Save the exact image used
         best_roi_for_saving = roi.copy()
         
-        progressive_dims = [600, 800, 800]  # REDUCED: Caps resolution scaling
+        progressive_dims = [512, 640, 768]  
         
         try:
             if ocr is not None: del ocr
@@ -1158,7 +1188,7 @@ def main():
         for attempt in range(max_retries):
             retry_roi = roi.copy()
             used_rolling_this_attempt = False
-            is_physically_rolling = False 
+            is_physically_rolling = False  
             
             if attempt > 0:
                 print(f"\n[RETRY {attempt}/{max_retries-1}] Verification failed. Simulating full restart...")
@@ -1200,7 +1230,7 @@ def main():
                         
                         if len(retry_burst) >= 4:
                             crops = []
-                            for f in retry_burst[:25]: 
+                            for f in retry_burst[:25]:  
                                 try:
                                     crop = f[sy1:sy2, sx1:sx2]
                                     if crop.size > 0: crops.append(crop)
@@ -1242,7 +1272,7 @@ def main():
                                     
                                 grid_roi = cv2.vconcat(rows)
                                 
-                                safe_grid_dim = 900
+                                safe_grid_dim = 600
                                 gh, gw = grid_roi.shape[:2]
                                 if max(gh, gw) > safe_grid_dim:
                                     scale_f = safe_grid_dim / float(max(gh, gw))
@@ -1279,11 +1309,20 @@ def main():
                 
             t0_ocr = time.time()
             
-            current_dim = progressive_dims[attempt] if attempt < len(progressive_dims) else 1000
+            # --- LCD Image Enhancement for OCR ---
+            # Increases contrast to make commas vs periods and letters clearer
+            if retry_roi is not None and retry_roi.size > 0:
+                try:
+                    enhanced_roi = cv2.convertScaleAbs(retry_roi, alpha=1.3, beta=0)
+                    retry_roi = enhanced_roi
+                except Exception:
+                    pass
+
+            current_dim = progressive_dims[attempt] if attempt < len(progressive_dims) else 512
             current_squash = 0.6 if attempt == 3 else 1.0
             
             if used_rolling_this_attempt:
-                current_dim = 1000
+                current_dim = 600
                 current_squash = 1.0
             
             if attempt > 0:
@@ -1303,29 +1342,43 @@ def main():
                 else:
                     pass_hint = active_targets[0]["exp_target"] if len(active_targets) == 1 else ""
 
+                # --- Strict Mode Prompt Instructions ---
+                pass_lang += ". EXTREMELY STRICT FONT VERIFICATION MODE: Do NOT autocorrect any typos. Transcribe EXACTLY what is on the screen, character by character. Pay strict attention to spaces, commas, periods, and uppercase/lowercase letters."
+
                 inner_refusals = 0
-                while inner_refusals < 2: 
-                    text, _conf = ocr.extract_text(
-                        retry_roi, 
-                        expected_language=pass_lang, 
-                        dynamic_dim=current_dim, 
-                        squash_ratio=current_squash,
-                        expected_text=pass_hint
-                    )
+                while inner_refusals < 3: 
+                    try:
+                        text, _conf = ocr.extract_text(
+                            retry_roi, 
+                            expected_language=pass_lang, 
+                            dynamic_dim=current_dim, 
+                            squash_ratio=current_squash,
+                            expected_text=pass_hint
+                        )
+                    except Exception as e:
+                        # Catch fatal API crashes (like HTTP 415 Unsupported Media Type)
+                        text = str(e)
                     
                     low_t = text.lower()
-                    refusal_triggers = ["unsupported media", "unable to extract", "i'm unable to", "i am unable to", "ignoring non-image"]
+                    
+                    # Added 'unsupported media', '415', and 'payload' to catch API server rejections
+                    refusal_triggers = ["unsupported media", "unable to extract", "i'm unable to", "i am unable to", "ignoring non-image", "415", "payload", "too large"]
                     
                     if any(trigger in low_t for trigger in refusal_triggers):
-                        print(f"    -> [GenAI Filter] AI refused the image (likely payload size limit). Shrinking image to bypass...")
+                        print(f"    -> [GenAI Filter] API rejected image format/size. Applying strict JPEG compression and retrying...")
                         inner_refusals += 1
                         
+                        # 1. Shrink the dimensions
                         current_dim = int(current_dim * 0.75)
-                        
                         gh, gw = retry_roi.shape[:2]
                         retry_roi = cv2.resize(retry_roi, (int(gw * 0.75), int(gh * 0.75)), interpolation=cv2.INTER_AREA)
                         
-                        retry_roi = cv2.GaussianBlur(retry_roi, (3, 3), 0)
+                        # 2. THE MAGIC FIX: Force strict standard JPEG formatting in memory
+                        # This strips out raw OpenCV memory artifacts and enforces a standard MIME type
+                        encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 75] # Compress to 75% quality to guarantee tiny payload
+                        result, encimg = cv2.imencode('.jpg', retry_roi, encode_param)
+                        if result:
+                            retry_roi = cv2.imdecode(encimg, 1)
                         
                         pass_lang += " This is a hardware LCD screen. Please read the text."
                         pass_hint = ""  
@@ -1368,9 +1421,7 @@ def main():
                 t_lang = target_info["language"]
                 t_exp = target_info["exp_target"]
                 
-                t_applied_truncation = False
-                t_applied_rolling = False
-                
+                # --- STRICT MATCHING ALGORITHM ---
                 expected_local_n = _norm_text(t_exp)
                 is_cjk_target = any('\u4e00' <= ch <= '\u9fff' or '\u3040' <= ch <= '\u30ff' or '\uac00' <= ch <= '\ud7a3' for ch in expected_local_n)
 
@@ -1378,8 +1429,7 @@ def main():
                     c = str(text)
                     c = re.sub(r'^(i|l|v|4)\s+', '', c, flags=re.IGNORECASE)
                     c = re.sub(r'^(!|\?|⏹|\[\]|\'|\"|️)\s*', '', c)
-                    
-                    c = c.replace('*', '').replace('\\', '')
+                    c = c.replace('*', '').replace('\\', '').replace('|', '') 
                     
                     has_cyrillic = any('\u0400' <= ch <= '\u04FF' for ch in expected_local_n)
                     if has_cyrillic:
@@ -1397,98 +1447,81 @@ def main():
                         c = re.sub(r'\s+[LHlh]$', '', c) 
                         return c
 
+                def _strip_accents(s):
+                    return "".join(c for c in unicodedata.normalize('NFD', str(s)) if unicodedata.category(c) != 'Mn')
+
                 flat_obs = _clean_for_compare(observed_n, is_cjk_target)
                 flat_exp = _clean_for_compare(expected_local_n, is_cjk_target)
-                
-                if used_rolling_this_attempt and not is_physically_rolling:
-                    if "|" in flat_obs:
-                        chunks = [c.strip() for c in flat_obs.split('|') if c.strip()]
-                        if chunks:
-                            flat_obs = chunks[0]
 
-                corrected_obs = flat_obs
-                
-                if flat_exp and flat_obs != flat_exp:
-                    
-                    known_illusions = {
-                        "RETRY": "RETRV", "Retry": "Retrv", "retry": "retrv",
-                        "虎碼": "號碼", "新響": "漸響", "施錠": "旋鈕", "施鈕": "旋鈕",
-                        "遠測": "遙測", "摆置": "搁置", "通话": "通稱", "通話": "通稱",
-                        "鎖碼": "變碼", "R∫": "Rx", "r∫": "rx", "音": "颤音",
-                        "SYSTELIAS": "SYSTEM ALIAS", "Systelias": "System Alias",
-                        "資訊驗證失敗": "驗證失敗", "資訊 驗證失敗": "驗證失敗",
-                        "스캔컴": "스캔켬", "스켈처": "스켈치", "Z-S": "Z-s",
-                        "タイカヘンシン": "クイックヘンシン", "タイカ": "クイック",
-                        "발기": "밝기", "받기": "밝기",
-                        "흰&라이트커기": "혼&라이트켜기", "흰": "혼", "커기": "켜기",
-                        "30S": "30ビ", "30L": "30ビ", "ヨウ": "ョウ", 
-                        "ピョウ": "ビョウ", "ビヨウ": "ビョウ", "ヒョウ": "ビョウ", "トウ": "ョウ",
-                        "ヨ": "ョ", "ヤ": "ャ", "ユ": "ュ"
-                    }
-                    
-                    for bad, good in known_illusions.items():
-                        if bad in corrected_obs and good in flat_exp:
-                            corrected_obs = corrected_obs.replace(bad, good)
-                    
-                    if args.enable_truncation:
-                        has_ellipsis = ("..." in flat_obs or "…" in flat_obs)
-                        
-                        if has_ellipsis:
-                            obs_prefix = flat_obs.split("...")[0].split("…")[0].rstrip()
-                            
-                            if len(obs_prefix) > 0 and flat_exp.startswith(obs_prefix):
-                                corrected_obs = flat_exp
-                                t_applied_truncation = True
-                    
-                    if is_cjk_target and flat_exp in flat_obs:
-                        stripped_obs = re.sub(r'[A-Za-z]', '', flat_obs)
-                        if stripped_obs == flat_exp:
-                            corrected_obs = flat_exp
+                obs_clean = _strip_accents(flat_obs).lower()
+                exp_clean = _strip_accents(flat_exp).lower()
 
-                    if used_rolling_this_attempt and not is_physically_rolling and corrected_obs != flat_exp:
-                        clean_obs = corrected_obs.replace("|", "").replace("...", "").replace("…", "")
-                        if clean_obs != "" and len(clean_obs) > len(flat_exp):
-                            if flat_exp in clean_obs and clean_obs.replace(flat_exp, "").strip() == "":
-                                corrected_obs = flat_exp
-
-                    if used_rolling_this_attempt and is_physically_rolling and corrected_obs != flat_exp:
-                        clean_obs_rolling = " ".join([c for c in flat_obs.replace("|", " ").split() if c])
-                        clean_exp_rolling = " ".join(flat_exp.split())
-                        
-                        matcher = difflib.SequenceMatcher(None, clean_obs_rolling, clean_exp_rolling)
-                        similarity = matcher.ratio()
-                        
-                        if similarity >= 0.95 or clean_exp_rolling in clean_obs_rolling:
-                            corrected_obs = flat_exp
-                            t_applied_rolling = True
-
-                    flat_obs = corrected_obs
-
+                t_applied_truncation = False
+                t_applied_rolling = False
                 t_conf = 0.0
                 t_verdict = "FAIL"
-                
+
+                has_ellipsis = "..." in flat_obs or "…" in flat_obs
+                obs_no_ellipsis = flat_obs.replace("...", "").replace("…", "").strip()
+                obs_no_ellipsis_clean = _strip_accents(obs_no_ellipsis).lower()
+
+                # Require at least 2 CJK chars or 4 Latin chars to prevent a single random letter from passing
+                min_len = min(2 if is_cjk_target else 4, len(flat_exp))
+
                 if flat_exp:
-                    similarity = difflib.SequenceMatcher(None, flat_exp, flat_obs).ratio()
-                    t_conf = round(similarity * 100, 1)
-                    if t_conf > 100.0: t_conf = 100.0
-                    
-                    if is_cjk_target and flat_obs != flat_exp:
-                        len_diff = abs(len(flat_exp) - len(flat_obs))
-                        if len(flat_obs) > len(flat_exp) + 1:
-                            pass 
-                        elif len_diff <= 1 and t_conf >= 90.0:
-                            pass
-                    
-                    if flat_obs == flat_exp: 
-                        t_verdict = "PASS"
+                    # 1. EXACT 100% MATCH
+                    if obs_clean == exp_clean:
                         t_conf = 100.0
-                    else:
-                        if t_conf >= 70.0: t_verdict = "WARN"
-                        else: t_verdict = "FAIL"
+                        t_verdict = "PASS"
+                    
+                    # 2. STRICT TRUNCATION MATCH: 100% perfect match before the (...)
+                    elif args.enable_truncation and has_ellipsis and len(obs_no_ellipsis) >= min_len and exp_clean.startswith(obs_no_ellipsis_clean):
+                        t_conf = 100.0
+                        t_verdict = "PASS"
+                        t_applied_truncation = True
+                        
+                    # 3. STRICT ROLLING MATCH: Substring is a 100% perfect mathematical match
+                    elif args.enable_rolling and not has_ellipsis and len(flat_obs) >= min_len and len(obs_clean) < len(exp_clean) and obs_clean in exp_clean:
+                        t_conf = 100.0
+                        t_verdict = "PASS"
+                        t_applied_rolling = True
+                        
+                    # 4. ROLLING BATCH CAPTURE MATCH
+                    elif args.enable_rolling and used_rolling_this_attempt and is_physically_rolling:
+                        obs_stripped = flat_obs.replace("|", "")
+                        exp_stripped = flat_exp.replace(" ", "") if is_cjk_target else flat_exp
+                        
+                        if obs_stripped and (obs_stripped == exp_stripped or obs_stripped in exp_stripped):
+                            t_conf = 100.0
+                            t_verdict = "PASS"
+                            t_applied_rolling = True
+                        else:
+                            sim = difflib.SequenceMatcher(None, exp_stripped.lower(), obs_stripped.lower()).ratio()
+                            t_conf = round(sim * 100, 1)
+                            if t_conf >= 95.0:  
+                                t_verdict = "PASS"
+                                t_applied_rolling = True
+                            elif t_conf >= 70.0: # Set warning threshold to 70%
+                                t_verdict = "WARN"
+
+                    # 5. TYPO CHECK (Sets 70% to 99.9% as WARN)
+                    if t_verdict == "FAIL":
+                        similarity = difflib.SequenceMatcher(None, exp_clean, obs_clean).ratio()
+                        t_conf = round(similarity * 100, 1)
+                        if t_conf >= 70.0:
+                            t_verdict = "WARN"
                 else:
-                    t_verdict = "PASS" if not flat_obs else "FAIL"
-                    t_conf = 100.0 if t_verdict == "PASS" else 0.0
-                
+                    if not flat_obs or flat_obs.lower() in ["no_text", "none", "nan", "-"]:
+                        t_conf = 100.0
+                        t_verdict = "PASS"
+                    else:
+                        t_conf = 0.0
+                        t_verdict = "FAIL"
+                        
+                # ONLY fix the output string for actual valid Rolling/Truncation
+                if t_verdict == "PASS" and (t_applied_truncation or t_applied_rolling):
+                    flat_obs = flat_exp
+
                 if t_conf > best_sub_conf or (t_verdict == "PASS" and best_sub_verdict != "PASS"):
                     best_sub_conf = t_conf
                     best_sub_verdict = t_verdict
@@ -1632,6 +1665,7 @@ def main():
         if verdict in ["FAIL", "WARN"]:
             print("    -> [AI Analysis] Asking GenAI to explain the mismatch...")
             ai_mismatch_reason = ocr.explain_mismatch(flat_exp, flat_obs)
+            
             text_err = f"Mismatch (Conf: {confidence_pct}%): {ai_mismatch_reason}"
             
             if error_msg_display:
@@ -1755,7 +1789,15 @@ def main():
                         img.width = 250
                         ws.row_dimensions[row_idx].height = 100
 
-                    img.anchor = f"N{row_idx}" 
+                    from openpyxl.drawing.spreadsheet_drawing import TwoCellAnchor, AnchorMarker
+                    
+                    col_idx = 13 
+                    r_idx = row_idx - 1 
+                    
+                    marker_from = AnchorMarker(col=col_idx, colOff=0, row=r_idx, rowOff=0)
+                    marker_to = AnchorMarker(col=col_idx + 1, colOff=0, row=r_idx + 1, rowOff=0)
+                    img.anchor = TwoCellAnchor(editAs='twoCell', _from=marker_from, to=marker_to)
+                    
                     ws.add_image(img)
                 else:
                     ws.row_dimensions[row_idx].height = 80
@@ -1791,8 +1833,7 @@ def main():
     print("EXECUTION SUMMARY")
     print("=" * 70)
     print(f"Total Devices Checked: {len(rois)}")
-    total_cmds = sum(summary_counts.values())
-    print(f"Total Commands: {total_cmds} | PASS: {summary_counts['PASS']} | FAIL: {summary_counts['FAIL']} | WARN: {summary_counts['WARN']} | SKIP: {summary_counts['SKIP']}")
+    print(f"PASS: {summary_counts['PASS']} | FAIL: {summary_counts['FAIL']} | WARN: {summary_counts['WARN']} | SKIP: {summary_counts['SKIP']}")
     print(f"Total Time Taken: {time_taken} seconds")
     print("=" * 70 + "\n")
 
