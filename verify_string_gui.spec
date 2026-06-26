@@ -1,16 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 datas = []
 datas += collect_data_files('ultralytics')
 
+# Force PyInstaller to grab EVERY file inside the 'src' folder
+all_hidden_imports = ['src'] + collect_submodules('src')
 
 a = Analysis(
     ['scripts\\verify_string_gui.py'],
     pathex=['.'],
     binaries=[],
     datas=datas,
-    hiddenimports=['src'],
+    hiddenimports=all_hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -1251,10 +1251,27 @@ class VerifyStringGUI:
                     else:
                         time.sleep(1.0)
                         try:
-                            self.q.put("[ADB] Ensuring device screen is awake...\n")
+                            self.q.put("[ADB] Ensuring device screen is awake and unlocked...\n")
+                            
+                            # 1. Wake the screen
                             subprocess.run(["adb", "-s", target_serial, "shell", "input", "keyevent", "224"], creationflags=creationflags, timeout=3)
                             time.sleep(1.0)
-                        except: pass
+                            
+                            # 2. Swipe up to unlock (simulates swipe from bottom to top)
+                            subprocess.run(["adb", "-s", target_serial, "shell", "input", "swipe", "500", "1000", "500", "100", "300"], creationflags=creationflags, timeout=3)
+                            time.sleep(1.0)
+                            
+                            # 3. Press 'Back' twice to clear any popups (like USB debugging or battery warnings)
+                            subprocess.run(["adb", "-s", target_serial, "shell", "input", "keyevent", "4"], creationflags=creationflags, timeout=3)
+                            subprocess.run(["adb", "-s", target_serial, "shell", "input", "keyevent", "4"], creationflags=creationflags, timeout=3)
+                            time.sleep(0.5)
+                            
+                            # 4. Press 'Home' to ensure UI Automator starts from the home screen
+                            subprocess.run(["adb", "-s", target_serial, "shell", "input", "keyevent", "3"], creationflags=creationflags, timeout=3)
+                            time.sleep(1.0)
+                            
+                        except Exception as e:
+                            self.q.put(f"[ADB Warning] Failed to send wake/unlock commands: {e}\n")
 
                     success = False
                     if android_lang_changer:
@@ -1670,7 +1687,7 @@ class VerifyStringGUI:
                 data = json.loads(json_str)
                 self.all_results_data.append(data)
                 self._update_summary_ui(self.current_filter)
-            except Exception:
+            except Exception: 
                 pass
             return
 
@@ -2234,6 +2251,10 @@ class VerifyStringGUI:
                 self._summary_written = False
                 is_resume_mode = True
                 
+                # --- NEW: Explicitly lock the vault door on the queue! ---
+                self._protect_resume_queue = True 
+                # ---------------------------------------------------------
+                
                 self._setup_logs_and_prefetch(is_resume_mode)
                 return
             else:
@@ -2369,6 +2390,11 @@ class VerifyStringGUI:
                     return
                 self._resume_target_idx = None
                 
+            # --- FIX: Lock the queue when using Custom Index Resume! ---
+            self._is_resuming_batch = True
+            self._protect_resume_queue = True
+            # -----------------------------------------------------------
+            
             self._commg_is_active_run = True
             self._auto_start_verify = True
             
@@ -2392,12 +2418,17 @@ class VerifyStringGUI:
             if not d:
                 d = str(Path.cwd())
                 self.log_path_var.set(d)
-            sess = time.strftime("%Y%m%d_%H%M%S")
-            self._batch_log_dir = str(Path(d) / f"batch_run_{sess}")
-            try:
-                Path(self._batch_log_dir).mkdir(parents=True, exist_ok=True)
-            except Exception:
-                self._batch_log_dir = d
+            
+            # --- FIX 1: Don't create a new folder if we are just unpausing! ---
+            if is_resume_mode and getattr(self, "_batch_log_dir", None) and Path(self._batch_log_dir).exists():
+                pass # Keep using the exact same local folder
+            else:
+                sess = time.strftime("%Y%m%d_%H%M%S")
+                self._batch_log_dir = str(Path(d) / f"batch_run_{sess}")
+                try:
+                    Path(self._batch_log_dir).mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    self._batch_log_dir = d
 
             if is_resume_mode:
                 import shutil
@@ -2405,22 +2436,36 @@ class VerifyStringGUI:
                 filename = self.excel_filename_var.get().strip() or "Batch_Summary_Report.xlsx"
                 if not filename.lower().endswith(".xlsx"): filename += ".xlsx"
                 
-                target_dir = Path("G:/My Drive") / drive_folder_name
-                base_name = self.excel_filename_var.get().strip() or "Batch_Summary_Report.xlsx"
-                if base_name.lower().endswith(".xlsx"): base_name = base_name[:-5]
+                base_name = filename[:-5]
                 
-                if target_dir.exists():
+                target_dir = Path("G:/My Drive") / drive_folder_name / base_name
+                if not target_dir.exists():
+                    target_dir = Path("G:/Shared drives") / drive_folder_name / base_name
+                
+                # --- FIX 2: Protect against data wipes ---
+                local_resume_path = Path(self._batch_log_dir) / filename
+                if local_resume_path.exists():
+                    self.q.put(f"[GUI] Resuming using existing local cache. No need to download from Drive.\n", ("pass",))
+                elif target_dir.exists():
                     synced = 0
-                    for drive_file in target_dir.glob(f"{base_name}*.xlsx"):
-                        local_path = Path(self._batch_log_dir) / drive_file.name
+                    for drive_file in target_dir.glob("*.xlsx"):
+                        correct_name = drive_file.name.replace("_LIVE_UPDATE", "")
+                        local_path = Path(self._batch_log_dir) / correct_name
                         try:
                             shutil.copy2(drive_file, local_path)
                             synced += 1
-                        except Exception: pass
+                        except Exception as e:
+                            self.q.put(f"[GUI ERROR] Download blocked by Windows/Drive: {e}\n", ("error",))
+                            
                     if synced > 0:
                         self.q.put(f"[GUI] Fetched {synced} existing Excel file(s) from Drive to resume.\n", ("pass",))
                     else:
-                        self.q.put(f"[GUI WARNING] No matching Excel files found in Drive. Starting fresh.\n", ("warn",))
+                        self.q.put(f"[GUI FATAL ERROR] Could not fetch old files! Stopping sequence to prevent wiping your Google Drive data.\n", ("error",))
+                        self._set_running(False)
+                        return
+                else:
+                     self.q.put(f"[GUI WARNING] No previous Drive folder found. Starting fresh.\n", ("warn",))
+
             else:
                 base_name = self.excel_filename_var.get().strip() or "Batch_Summary_Report"
                 if base_name.lower().endswith(".xlsx"):
@@ -2434,6 +2479,7 @@ class VerifyStringGUI:
         self.status_var.set("Fetching Serials (MUX Mode)...")
         self.status_label.configure(fg="blue")
         self.btn_run.configure(state=tk.DISABLED)
+        # ... (the rest of the function remains the same starting from safe_ips)
         
         safe_ips = list(self.ip_listbox.get(0, tk.END))
         try:
@@ -3172,11 +3218,18 @@ class VerifyStringGUI:
                     self.q.put("[Batch] Languages changed. Starting String Verification...\n")
                     self._update_accumulated_time()
                     
-                    if getattr(self, "_needs_queue_reset", False):
-                        self._commg_pending_queue = list(self._full_batch_commands)
+                    if getattr(self, "_protect_resume_queue", False):
+                        self.q.put("[GUI] Protected sliced resume queue from being overwritten!\n", ("pass",))
+                        self._protect_resume_queue = False 
                     else:
-                        self._needs_queue_reset = True 
-                        
+                        if getattr(self, "_full_batch_commands", []):
+                            self._commg_pending_queue = list(self._full_batch_commands)
+                            self.q.put(f"[GUI] Master queue loaded ({len(self._commg_pending_queue)} items).\n", ("pass",))
+                        else:
+                            self.q.put("[GUI FATAL ERROR] Master command memory is missing. Cannot proceed.\n", ("error",))
+                            self._set_running(False)
+                            return
+                    
                     self._current_lang_idx += 1
                     self._run_next_commg_step()
                     continue
@@ -3338,6 +3391,36 @@ class VerifyStringGUI:
                     
                     if is_verify:
                         self._update_accumulated_time()
+                        
+                        # --- FIX: LIVE GOOGLE DRIVE SYNC (LOUD VERSION) ---
+                        try:
+                            if self.save_log_var.get() and getattr(self, "_log_session_dir", None):
+                                import shutil
+                                filename = self.excel_filename_var.get().strip() or "Batch_Summary_Report.xlsx"
+                                if not filename.lower().endswith(".xlsx"): filename += ".xlsx"
+                                raw_xl_p = Path(self._log_session_dir) / filename
+                                
+                                drive_folder_name = self.drive_folder_var.get().strip() or "Walkie_Logs"
+                                base_name = filename[:-5]
+                                
+                                drive_base = Path("G:/My Drive") 
+                                if not (drive_base / drive_folder_name).exists():
+                                    drive_base = Path("G:/Shared drives")
+                                    
+                                target_dir = drive_base / drive_folder_name / base_name
+                                target_dir.mkdir(parents=True, exist_ok=True)
+                                
+                                if raw_xl_p.exists():
+                                    target_file = target_dir / f"{base_name}_LIVE_UPDATE.xlsx"
+                                    shutil.copy2(raw_xl_p, target_file)
+                                    self.q.put(f"[Live Sync] Successfully updated Drive: {target_file.name}\n", ("pass",))
+                                else:
+                                    self.q.put(f"[Live Sync Error] Local Excel file not found at {raw_xl_p}!\n", ("error",))
+                            else:
+                                self.q.put("[Live Sync Info] Skipped Drive Sync. Either 'Save log' is unchecked in the GUI, or no session directory exists.\n", ("warn",))
+                        except Exception as e:
+                            self.q.put(f"[GUI ERROR] Live Sync to Google Drive Failed: {e}\n", ("error",))
+                        # --------------------------------------------------
 
                     if is_verify and getattr(self, "active_sockets", []):
                         self.q.put("[CMD] Verification complete. Sending close command and terminating sessions...\n")
@@ -3376,13 +3459,11 @@ class VerifyStringGUI:
                             continue
                         elif will_autostart:
                             self._auto_start_verify = False 
+                            self._is_resuming_batch = False 
                             
-                            if getattr(self, "_is_resuming_batch", False):
-                                self._is_resuming_batch = False
-                                self.q.put("\n[GUI] Resuming saved queue items...\n", ("pass",))
-                                self._run_next_commg_step()
-                            else:
-                                self._start_language_iteration()
+                            # --- FIX: ALWAYS trigger language check, even on resume ---
+                            self._start_language_iteration()
+                            # ----------------------------------------------------------
                             continue
 
                     if will_autostart:
