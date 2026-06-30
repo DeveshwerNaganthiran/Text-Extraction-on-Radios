@@ -1114,6 +1114,42 @@ def main():
                 box_mapping = json.load(f)
     except Exception: pass
 
+    # ===================================================================
+    # FIX 1: CAMERA GLITCH BLIND-MAPPING PREVENTION
+    # ===================================================================
+    active_expected_devices = [exp for exp in expected_list if exp.get("tag") != "SKIP_VERIFY" and exp.get("index") != "SKIP_VERIFY" and exp.get("language") != "SKIP_DEVICE"]
+    expected_count = len(active_expected_devices)
+
+    if len(rois) != expected_count:
+        print(f"\n[FATAL ERROR] Camera Glitch/Mapping Error!")
+        print(f"Expected to see {expected_count} active devices, but YOLO only detected {len(rois)} bounding boxes.")
+        print("Aborting to prevent cross-mapping languages. Logging as SKIP for all active devices.\n")
+        
+        for idx, exp_dict in enumerate(expected_list):
+            if exp_dict.get("tag") == "SKIP_VERIFY" or exp_dict.get("index") == "SKIP_VERIFY" or exp_dict.get("language") == "SKIP_DEVICE":
+                continue 
+                
+            mapped_idx = int(box_mapping.get(str(idx), idx))
+            device_id = mapped_idx + 1
+            dev_name = get_device_name(profiles, device_id)
+            
+            payload = {
+                "device": dev_name,
+                "command": exp_dict.get("command", "-"),
+                "display_style": exp_dict.get("display_style", "-"),
+                "index": exp_dict.get("index", "-"),
+                "tag": exp_dict.get("tag", "-"),
+                "expected": exp_dict.get("expected_local", "-"),
+                "actual": "-",
+                "confidence": "-",
+                "verdict": "SKIP",
+                "error": f"Camera Glitch: AI saw {len(rois)} radios instead of {expected_count}"
+            }
+            print(f"[GUI_RESULT]{json.dumps(payload)}")
+            
+        sys.exit(0) # Exit cleanly so the GUI automatically moves on to the next string!
+    # ===================================================================
+
     total_ocr_time = 0.0
     all_results = []
     summary_counts = {"PASS": 0, "FAIL": 0, "WARN": 0, "SKIP": 0} 
@@ -1178,7 +1214,7 @@ def main():
         
         best_roi_for_saving = roi.copy()
         
-        progressive_dims = [512, 640, 768]  
+        progressive_dims = [480, 512, 512]
         
         try:
             if ocr is not None: del ocr

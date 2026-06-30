@@ -526,24 +526,17 @@ class VerifyStringGUI:
                 except Exception: pass
         row += 1
 
-        self.lf_devices = tk.LabelFrame(frm, text="Devices", padx=10, pady=5)
+        self.lf_devices = tk.LabelFrame(frm, text=" Devices / Language Iterations ", padx=10, pady=5, fg="#00008B", font=('Arial', 10, 'bold'))
         self.lf_devices.grid(row=row, column=0, columnspan=3, sticky="we", pady=(10, 0))
-
-        self.lf_devices.columnconfigure(0, weight=0, minsize=30)
-        self.lf_devices.columnconfigure(1, weight=1, minsize=100)
-        self.lf_devices.columnconfigure(2, weight=2, minsize=150)
-        self.lf_devices.columnconfigure(3, weight=0, minsize=70)
-        self.lf_devices.columnconfigure(4, weight=0)
+        
+        self.devices_grid_frame = tk.Frame(self.lf_devices)
+        self.devices_grid_frame.pack(fill=tk.BOTH, expand=True)
 
         self.device_rows = []
-
-        tk.Label(self.lf_devices, text="ID").grid(row=0, column=0, sticky="w", padx=(0, 10))
-        tk.Label(self.lf_devices, text="Name").grid(row=0, column=1, sticky="w", padx=(0, 10))
-        tk.Label(self.lf_devices, text="Language").grid(row=0, column=2, sticky="w")
-
-        dev_btns = tk.Frame(self.lf_devices)
-        dev_btns.grid(row=0, column=4, rowspan=5, sticky="ne", padx=(12, 0))
-        tk.Label(dev_btns, text="Devices auto-sync\nwith IP addresses", fg="gray", font=("Arial", 8)).pack(fill="x", pady=(8, 2))
+        
+        # --- FIX: Define the default column count before triggering the grid refresh ---
+        self.num_lang_columns = 1
+        # -------------------------------------------------------------------------------
 
         self.refresh_languages()
         self._sync_devices_to_ips(initial_load=True)
@@ -656,12 +649,16 @@ class VerifyStringGUI:
         self.root.after(50, self._drain_queue)
 
     def _update_accumulated_time(self):
-        if hasattr(self, 'batch_start_time') and getattr(self, "_commg_is_active_run", False):
+        # Only add time if we are active AND ADB is not running
+        if hasattr(self, 'batch_start_time') and getattr(self, "_commg_is_active_run", False) and not getattr(self, "_is_adb_running", False):
             now = time.time()
             elapsed = now - self.batch_start_time
             self._settings["accumulated_time"] = self._settings.get("accumulated_time", 0.0) + elapsed
             self.batch_start_time = now
             self._persist_settings()
+        elif getattr(self, "_is_adb_running", False) and hasattr(self, 'batch_start_time'):
+            # Fast-forward the origin time so we don't count the ADB minutes
+            self.batch_start_time = time.time()
 
     def _on_index_changed(self, *args):
         if getattr(self, "_commg_is_active_run", False): return
@@ -1112,6 +1109,11 @@ class VerifyStringGUI:
 
         self.status_var.set(f"Changing Languages (Iter {self._current_lang_idx + 1}/{self._max_lang_idx})...")
         self.status_label.configure(fg="blue")
+        
+        # --- FIX: Pause the stopwatch while ADB runs! ---
+        self._update_accumulated_time()
+        self._is_adb_running = True
+        # ------------------------------------------------
 
         def worker():
             import ctypes
@@ -1157,7 +1159,7 @@ class VerifyStringGUI:
             for i, ip in enumerate(ips):
                 r = self.device_rows[i] if i < len(self.device_rows) else None
                 if r:
-                    langs = [l.strip() for l in r["var_lang"].get().split(",") if l.strip()]
+                    langs = self._get_device_langs(r)
                     
                     if self._current_lang_idx >= len(langs):
                         r["current_active_lang"] = "SKIP_DEVICE"
@@ -1166,6 +1168,12 @@ class VerifyStringGUI:
                         
                     target_lang = langs[self._current_lang_idx]
                     r["current_active_lang"] = target_lang
+
+                    # --- FIX: BYPASS ADB IF USER SELECTED 'SKIP' ---
+                    if target_lang == "SKIP_DEVICE":
+                        self.q.put(f"\n[Sequence] Device {ip} is set to SKIP Iteration {self._current_lang_idx + 1}. Skipping ADB Setup.\n")
+                        continue
+                    # -----------------------------------------------
                 else:
                     target_lang = "English"
 
@@ -1249,29 +1257,28 @@ class VerifyStringGUI:
                     if not device_ready:
                         self.q.put(f"[ADB Warning] Device {target_serial} is still offline. UI Automation may fail.\n")
                     else:
-                        time.sleep(1.0)
-                        try:
-                            self.q.put("[ADB] Ensuring device screen is awake and unlocked...\n")
-                            
-                            # 1. Wake the screen
-                            subprocess.run(["adb", "-s", target_serial, "shell", "input", "keyevent", "224"], creationflags=creationflags, timeout=3)
                             time.sleep(1.0)
-                            
-                            # 2. Swipe up to unlock (simulates swipe from bottom to top)
-                            subprocess.run(["adb", "-s", target_serial, "shell", "input", "swipe", "500", "1000", "500", "100", "300"], creationflags=creationflags, timeout=3)
-                            time.sleep(1.0)
-                            
-                            # 3. Press 'Back' twice to clear any popups (like USB debugging or battery warnings)
-                            subprocess.run(["adb", "-s", target_serial, "shell", "input", "keyevent", "4"], creationflags=creationflags, timeout=3)
-                            subprocess.run(["adb", "-s", target_serial, "shell", "input", "keyevent", "4"], creationflags=creationflags, timeout=3)
-                            time.sleep(0.5)
-                            
-                            # 4. Press 'Home' to ensure UI Automator starts from the home screen
-                            subprocess.run(["adb", "-s", target_serial, "shell", "input", "keyevent", "3"], creationflags=creationflags, timeout=3)
-                            time.sleep(1.0)
-                            
-                        except Exception as e:
-                            self.q.put(f"[ADB Warning] Failed to send wake/unlock commands: {e}\n")
+                            try:
+                                self.q.put("[ADB] Ensuring device screen is awake...\n")
+                                
+                                # 1. Force the screen to NEVER sleep while plugged into USB
+                                subprocess.run(["adb", "-s", target_serial, "shell", "svc", "power", "stayon", "true"], creationflags=creationflags, timeout=3)
+                                
+                                # 2. Wake the screen (if it happened to be off)
+                                subprocess.run(["adb", "-s", target_serial, "shell", "input", "keyevent", "224"], creationflags=creationflags, timeout=3)
+                                time.sleep(1.0)
+                                
+                                # 3. Press 'Back' twice to clear any random popups (battery warnings, etc.)
+                                subprocess.run(["adb", "-s", target_serial, "shell", "input", "keyevent", "4"], creationflags=creationflags, timeout=3)
+                                subprocess.run(["adb", "-s", target_serial, "shell", "input", "keyevent", "4"], creationflags=creationflags, timeout=3)
+                                time.sleep(0.5)
+                                
+                                # 4. Press 'Home' to ensure UI Automator starts cleanly from the home screen
+                                subprocess.run(["adb", "-s", target_serial, "shell", "input", "keyevent", "3"], creationflags=creationflags, timeout=3)
+                                time.sleep(1.0)
+                                
+                            except Exception as e:
+                                self.q.put(f"[ADB Warning] Failed to send wake commands: {e}\n")
 
                     success = False
                     if android_lang_changer:
@@ -1490,35 +1497,106 @@ class VerifyStringGUI:
 
         threading.Thread(target=self._integration_send_command_thread, args=(cmds, batch_items), daemon=True).start()
 
+    def _get_device_langs(self, row_dict):
+        # Read exactly what is in the columns so Iterations align perfectly!
+        out = []
+        for v in row_dict.get("lang_vars", []):
+            val = v.get().strip()
+            if not val or val.upper() == "SKIP":
+                out.append("SKIP_DEVICE")
+            else:
+                out.append(val)
+        return out
+
+    def _add_lang_column(self):
+        self.num_lang_columns += 1
+        for row in self.device_rows:
+            row["lang_vars"].append(tk.StringVar(value="English"))
+        self._regrid_device_rows()
+
+    def _remove_lang_column(self):
+        if self.num_lang_columns > 1:
+            self.num_lang_columns -= 1
+            for row in self.device_rows:
+                if len(row["lang_vars"]) > self.num_lang_columns:
+                    row["lang_vars"].pop()
+            self._regrid_device_rows()
+            
+    def _update_dropdown_options(self, cb, current_var):
+        """Dynamically filters the dropdown list so you can't pick taken languages (except SKIP)."""
+        used_langs = set()
+        
+        # 1. Find all languages currently selected anywhere on the grid
+        for r in self.device_rows:
+            for v in r.get("lang_vars", []):
+                val = v.get().strip()
+                if val and val.upper() != "SKIP":
+                    used_langs.add(val)
+                    
+        my_val = current_var.get().strip()
+        valid_options = []
+        
+        # 2. Build a new list of allowed languages
+        for lang in self.available_languages:
+            # Allow it if it's "SKIP", if it's our currently selected value, or if nobody else is using it
+            if lang.upper() == "SKIP" or lang == my_val or lang not in used_langs:
+                valid_options.append(lang)
+                
+        cb["values"] = valid_options
+
     def _regrid_device_rows(self):
+        for widget in self.devices_grid_frame.winfo_children():
+            widget.destroy()
+
+        # Headers
+        tk.Label(self.devices_grid_frame, text="ID", font=("Arial", 9, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 10))
+        tk.Label(self.devices_grid_frame, text="Name", font=("Arial", 9, "bold")).grid(row=0, column=1, sticky="w", padx=(0, 10))
+        
+        for c in range(self.num_lang_columns):
+            tk.Label(self.devices_grid_frame, text=f"Iter {c+1}", font=("Arial", 9, "bold", "underline")).grid(row=0, column=2+c, sticky="w", padx=2)
+            
+        btn_frame = tk.Frame(self.devices_grid_frame)
+        btn_frame.grid(row=0, column=2+self.num_lang_columns, sticky="w", padx=(10, 0))
+        tk.Button(btn_frame, text="+ Add Lang", command=self._add_lang_column, padx=4, pady=0, bg="#ADD8E6").pack(side=tk.LEFT, padx=2)
+        if self.num_lang_columns > 1:
+            tk.Button(btn_frame, text="- Remove", command=self._remove_lang_column, padx=4, pady=0, bg="#FFCCCB").pack(side=tk.LEFT, padx=2)
+
+        # Rows
         for idx, row in enumerate(self.device_rows):
             row_idx = idx + 1
-            widgets = row.get("widgets") or ()
-            if len(widgets) >= 4:
-                lbl_id, ent_name, cb_lang, btn_lang = widgets[:4]
-                lbl_id.grid(row=row_idx, column=0, sticky="w", padx=(0, 10), pady=2)
-                ent_name.grid(row=row_idx, column=1, sticky="ew", pady=2, padx=(0, 10))
-                cb_lang.grid(row=row_idx, column=2, sticky="ew", pady=2)
-                btn_lang.grid(row=row_idx, column=3, sticky="w", padx=(5, 0), pady=2)
-
-    def _add_device_row(self, did: int, name: str = "", lang: str = "English"):
-        var_name = tk.StringVar(value=str(name or ""))
-        var_lang = tk.StringVar(value=str(lang or "English"))
-
-        lbl_id = tk.Label(self.lf_devices, text=f"D{int(did)}")
-        ent_name = tk.Entry(self.lf_devices, textvariable=var_name, width=20)
+            
+            lbl_id = tk.Label(self.devices_grid_frame, text=f"D{row['id']}")
+            lbl_id.grid(row=row_idx, column=0, sticky="w", padx=(0, 10), pady=2)
+            
+            ent_name = tk.Entry(self.devices_grid_frame, textvariable=row["var_name"], width=15)
+            ent_name.grid(row=row_idx, column=1, sticky="ew", pady=2, padx=(0, 10))
+            
+            for c, l_var in enumerate(row["lang_vars"]):
+                cb = ttk.Combobox(self.devices_grid_frame, textvariable=l_var, state="readonly", width=16)
+                cb.grid(row=row_idx, column=2+c, sticky="w", padx=2, pady=2)
+                
+                # --- FIX: Hook up the dynamic dropdown filter! ---
+                cb.configure(postcommand=lambda current_cb=cb, current_var=l_var: self._update_dropdown_options(current_cb, current_var))
+                self._update_dropdown_options(cb, l_var) # Set initial values
+                # -------------------------------------------------
+                
+        # Helper text
+        tk.Label(self.devices_grid_frame, text="Devices auto-sync with IP addresses.", fg="gray", font=("Arial", 8)).grid(row=len(self.device_rows)+1, column=0, columnspan=4, sticky="w", pady=(8, 2))
         
-        ent_lang = tk.Entry(self.lf_devices, textvariable=var_lang, width=25, state="readonly")
+    def _add_device_row(self, did: int, name: str = "", lang_str: str = "English"):
+        var_name = tk.StringVar(value=str(name or ""))
+        langs = [l.strip() for l in lang_str.split(",") if l.strip()]
+        
+        lang_vars = []
+        for c in range(self.num_lang_columns):
+            val = langs[c] if c < len(langs) else "English"
+            lang_vars.append(tk.StringVar(value=val))
 
         row_dict = {
             "id": int(did),
             "var_name": var_name,
-            "var_lang": var_lang,
+            "lang_vars": lang_vars,
         }
-        
-        btn_lang = ttk.Button(self.lf_devices, text="Select...", command=lambda r=row_dict: self._open_lang_selector(r))
-
-        row_dict["widgets"] = (lbl_id, ent_name, ent_lang, btn_lang)
         self.device_rows.append(row_dict)
 
     def _renumber_device_rows(self):
@@ -1535,9 +1613,18 @@ class VerifyStringGUI:
 
     def _sync_devices_to_ips(self, initial_load=False):
         ips = list(self.ip_listbox.get(0, tk.END))
-        
         saved_langs = self._settings.get("saved_device_languages", [])
         
+        if initial_load:
+            max_langs = 1
+            for s_lang in saved_langs:
+                parts = [p.strip() for p in s_lang.split(",") if p.strip()]
+                if len(parts) > max_langs:
+                    max_langs = len(parts)
+            self.num_lang_columns = max_langs
+        elif not hasattr(self, "num_lang_columns"):
+            self.num_lang_columns = 1
+            
         names_dict = {}
         langs_dict = {}
         if initial_load:
@@ -1552,10 +1639,7 @@ class VerifyStringGUI:
             except Exception: pass
 
         while len(self.device_rows) > len(ips):
-            row = self.device_rows.pop()
-            for w in row.get("widgets", []):
-                try: w.destroy()
-                except: pass
+            self.device_rows.pop()
 
         while len(self.device_rows) < len(ips):
             next_id = len(self.device_rows) + 1
@@ -1633,7 +1717,8 @@ class VerifyStringGUI:
         tot = len(self.all_results_data)
         
         total_elapsed = self._settings.get("accumulated_time", 0.0)
-        if hasattr(self, 'batch_start_time') and getattr(self, "_commg_is_active_run", False):
+        # --- FIX: Don't tick the clock if ADB is running ---
+        if hasattr(self, 'batch_start_time') and getattr(self, "_commg_is_active_run", False) and not getattr(self, "_is_adb_running", False):
             total_elapsed += (time.time() - self.batch_start_time)
 
         if total_elapsed > 60:
@@ -1644,7 +1729,6 @@ class VerifyStringGUI:
             time_taken_str = f"{total_elapsed:.1f}s"
                 
         self.lbl_stats.config(text=f"Total: {tot} | PASS: {p} | FAIL: {f} | WARN: {w} | SKIP: {s} | Time: {time_taken_str}")
-
     def clear_summary_data(self):
         self.all_results_data.clear()
         self._update_summary_ui("ALL")
@@ -1677,6 +1761,93 @@ class VerifyStringGUI:
 
         txt.insert(tk.END, content)
         txt.config(state=tk.DISABLED)
+        
+    def _load_previous_results(self, excel_path):
+        """Restores the UI summary table and calculates EXACT time from timestamps."""
+        if not os.path.exists(excel_path): return
+        try:
+            from openpyxl import load_workbook
+            from datetime import datetime
+            import time
+            
+            wb = load_workbook(excel_path, read_only=True, data_only=True)
+            ws = wb.active
+            
+            headers = []
+            for r in ws.iter_rows(min_row=1, max_row=1, values_only=True):
+                headers = [str(c).strip().lower() if c else "" for c in r]
+                break
+                
+            if not headers: return
+            
+            def get_idx(name, fallback):
+                return headers.index(name) if name in headers else fallback
+                
+            col_map = {
+                "timestamp": get_idx("timestamp", 0),
+                "device": get_idx("device", 1),
+                "region": get_idx("region", 2),
+                "language": get_idx("language", 3),
+                "command": get_idx("command", 4),
+                "display_style": get_idx("display style", 5),
+                "index": get_idx("index", 6),
+                "tag": get_idx("tag", 7),
+                "expected": get_idx("expected (local)", 8),
+                "actual": get_idx("actual detected", 9),
+                "verdict": get_idx("verdict", 11),
+                "error": get_idx("error message", 12),
+            }
+            
+            self.all_results_data = []
+            timestamps = []
+            
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if len(row) <= col_map["verdict"]: continue
+                v = str(row[col_map["verdict"]] or "").strip().upper()
+                if v not in ["PASS", "FAIL", "WARN", "SKIP"]: continue 
+                
+                ts_val = str(row[col_map["timestamp"]] or "").strip()
+                if ts_val and "SUMMARY" not in ts_val.upper():
+                    timestamps.append(ts_val)
+                
+                # --- Perfectly restores both the UI visuals and the hidden backend data ---
+                self.all_results_data.append({
+                    "device": str(row[col_map["device"]] or ""),
+                    "region": str(row[col_map["region"]] or ""),
+                    "language": str(row[col_map["language"]] or ""),
+                    "command": str(row[col_map["command"]] or ""),
+                    "display_style": str(row[col_map["display_style"]] or ""),
+                    "index": str(row[col_map["index"]] or ""),
+                    "tag": str(row[col_map["tag"]] or ""),
+                    "expected": str(row[col_map["expected"]] or ""),
+                    "actual": str(row[col_map["actual"]] or ""),
+                    "verdict": v,
+                    "error": str(row[col_map["error"]] or "")
+                })
+            wb.close()
+            
+            parsed_dates = []
+            for ts in timestamps:
+                try: parsed_dates.append(datetime.strptime(ts, "%Y-%m-%d %H:%M:%S"))
+                except Exception: pass
+            
+            parsed_dates.sort()
+            true_avg_sec = 36.75 
+            if len(parsed_dates) > 1:
+                diffs = [(parsed_dates[i] - parsed_dates[i-1]).total_seconds() for i in range(1, len(parsed_dates))]
+                normal_diffs = [d for d in diffs if d <= 90.0] 
+                if normal_diffs: true_avg_sec = sum(normal_diffs) / len(normal_diffs)
+
+            exact_elapsed = true_avg_sec * len(self.all_results_data)
+            self._settings["accumulated_time"] = exact_elapsed
+            self.batch_start_time = time.time() 
+            
+            # --- This single line takes all the restored data and visually draws it in the GUI table! ---
+            self._update_summary_ui(self.current_filter)
+            
+            self.q.put(f"[GUI] Successfully restored {len(self.all_results_data)} past results into the UI!\n", ("pass",))
+        except Exception as e:
+            self.q.put(f"[GUI ERROR] Failed to load previous results into UI: {e}\n", ("error",))
 
     def _append_line_with_result_color(self, line: str):
         stripped = (line or "").strip()
@@ -1753,7 +1924,7 @@ class VerifyStringGUI:
         camera_name = (self.camera_id_var.get() or "").strip()
         camera_id = getattr(self, "_camera_map", {}).get(camera_name, camera_name)
         
-        saved_langs = [r.get("var_lang").get().strip() for r in self.device_rows if "var_lang" in r]
+        saved_langs = [",".join(self._get_device_langs(r)) for r in self.device_rows]
         
         return {
             "excel": (self.excel_var.get() or "").strip(),
@@ -1860,10 +2031,15 @@ class VerifyStringGUI:
         if not opts:
             opts = ["Japanese", "Korean", "Simplified Chinese", "Traditional Chinese", "French", "Spanish", "German", "Italian", "Polish", "Russian", "Turkish", "Arabic", "Hungarian", "Hebrew", "Czech", "Portuguese", "English"]
 
-        self.available_languages = sorted(opts)
+        # --- FIX: ADD "SKIP" TO THE TOP OF THE LIST ---
+        self.available_languages = ["SKIP"] + sorted(opts)
+        
         for r in self.device_rows:
-            if not r["var_lang"].get() and self.available_languages:
-                r["var_lang"].set(self.available_languages[0])
+            for v in r.get("lang_vars", []):
+                if not v.get() and len(self.available_languages) > 1:
+                    v.set(self.available_languages[1]) # Default to the first real language, not SKIP
+        if hasattr(self, "devices_grid_frame"):
+            self._regrid_device_rows()
                 
     def _open_lang_selector(self, row_dict):
         top = tk.Toplevel(self.root)
@@ -1880,7 +2056,7 @@ class VerifyStringGUI:
         other_selected = set()
         for r in self.device_rows:
             if r is not row_dict:
-                langs = [l.strip() for l in r["var_lang"].get().split(",") if l.strip()]
+                langs = self._get_device_langs(r)
                 other_selected.update(langs)
                 
         current_selected = set([l.strip() for l in row_dict["var_lang"].get().split(",") if l.strip()])
@@ -1998,7 +2174,7 @@ class VerifyStringGUI:
             if "current_active_lang" in r and r["current_active_lang"]:
                 langs.append(r["current_active_lang"])
             else:
-                langs.append(r.get("var_lang").get().strip() or "English")
+                langs.append(",".join(self._get_device_langs(r)) or "English")
         language = ",".join(langs) if langs else "English"
 
         script_path = Path(__file__).resolve().parent / "verify_string.py"
@@ -2118,11 +2294,43 @@ class VerifyStringGUI:
         env = os.environ.copy()
         try:
             devices = []
-            for r in self.device_rows:
+            skipped_indices = getattr(self, "_current_skipped_indices", [])
+            
+            for i, r in enumerate(self.device_rows):
                 did = int(r.get("id"))
                 nm = str(r.get("var_name").get() if r.get("var_name") else "").strip()
-                lang = str(r.get("var_lang").get() if "var_lang" in r else "English").strip()
-                devices.append({"id": did, "name": nm, "language": lang})
+                
+                # --- FIX: Fetch the exact language currently active in the column ---
+                if "current_active_lang" in r:
+                    lang = r["current_active_lang"]
+                else:
+                    lang = ",".join(self._get_device_langs(r)) or "English"
+                
+                if i in skipped_indices:
+                    cmd_str = self._current_batch_cmds[0] if hasattr(self, "_current_batch_cmds") and self._current_batch_cmds else "-"
+                    idx_str = self.index_var.get().split(",")[0] if self.index_var.get() else ""
+                    tag_str = self.tag_var.get().split(",")[0] if self.tag_var.get() else ""
+                    
+                    payload = {
+                        "device": nm, 
+                        "command": cmd_str, 
+                        "display_style": "-", 
+                        "index": idx_str, 
+                        "tag": tag_str, 
+                        "expected": "-", 
+                        "actual": "-", 
+                        "verdict": "SKIP", 
+                        "error": "Device Offline / Ping Failed",
+                        "language": lang
+                    }
+                    self.all_results_data.append(payload)
+                    self._append(f"\n[GUI] {nm} was skipped (Device Offline / Ping Failed).\n", ("warn",))
+                else:
+                    # If language is SKIP_DEVICE, YOLO tracks it but doesn't waste tokens verifying it!
+                    devices.append({"id": did, "name": nm, "language": lang})
+            
+            self._current_skipped_indices = []
+            self._update_summary_ui(self.current_filter)
             
             env["WALKIE_DEVICE_PROFILES_JSON"] = json.dumps({"devices": devices}, ensure_ascii=False)
             cfgp = Path(__file__).resolve().parents[1] / "configs" / "device_profiles.json"
@@ -2180,7 +2388,7 @@ class VerifyStringGUI:
             for r in self.device_rows:
                 did = int(r.get("id"))
                 nm = str(r.get("var_name").get() if r.get("var_name") else "").strip()
-                lang = str(r.get("var_lang").get() if "var_lang" in r else "English").strip()
+                lang = ",".join(self._get_device_langs(r)) or "English"
                 devices.append({"id": did, "name": nm, "language": lang})
             env["WALKIE_DEVICE_PROFILES_JSON"] = json.dumps({"devices": devices}, ensure_ascii=False)
             cfgp = Path(__file__).resolve().parents[1] / "configs" / "device_profiles.json"
@@ -2294,7 +2502,7 @@ class VerifyStringGUI:
         max_l = 1
         for r in self.device_rows:
             try:
-                langs = [l.strip() for l in r["var_lang"].get().split(",") if l.strip()]
+                langs = self._get_device_langs(r)
                 if len(langs) > max_l: max_l = len(langs)
             except Exception: pass
         self._max_lang_idx = max_l
@@ -2442,10 +2650,11 @@ class VerifyStringGUI:
                 if not target_dir.exists():
                     target_dir = Path("G:/Shared drives") / drive_folder_name / base_name
                 
-                # --- FIX 2: Protect against data wipes ---
+                # --- FIX: Protect against data wipes AND load previous data ---
                 local_resume_path = Path(self._batch_log_dir) / filename
                 if local_resume_path.exists():
                     self.q.put(f"[GUI] Resuming using existing local cache. No need to download from Drive.\n", ("pass",))
+                    self._load_previous_results(local_resume_path) # <-- RESTORES UI DATA
                 elif target_dir.exists():
                     synced = 0
                     for drive_file in target_dir.glob("*.xlsx"):
@@ -2459,13 +2668,14 @@ class VerifyStringGUI:
                             
                     if synced > 0:
                         self.q.put(f"[GUI] Fetched {synced} existing Excel file(s) from Drive to resume.\n", ("pass",))
+                        self._load_previous_results(local_resume_path) # <-- RESTORES UI DATA
                     else:
                         self.q.put(f"[GUI FATAL ERROR] Could not fetch old files! Stopping sequence to prevent wiping your Google Drive data.\n", ("error",))
                         self._set_running(False)
                         return
                 else:
                      self.q.put(f"[GUI WARNING] No previous Drive folder found. Starting fresh.\n", ("warn",))
-
+                     
             else:
                 base_name = self.excel_filename_var.get().strip() or "Batch_Summary_Report"
                 if base_name.lower().endswith(".xlsx"):
@@ -3216,6 +3426,12 @@ class VerifyStringGUI:
 
                 if isinstance(s, tuple) and len(s) == 2 and s[0] == "__LANG_CHANGE_DONE__":
                     self.q.put("[Batch] Languages changed. Starting String Verification...\n")
+                    
+                    # --- FIX: Resume the stopwatch! ---
+                    self._is_adb_running = False
+                    self.batch_start_time = time.time()
+                    # ----------------------------------
+                    
                     self._update_accumulated_time()
                     
                     if getattr(self, "_protect_resume_queue", False):
@@ -3273,7 +3489,7 @@ class VerifyStringGUI:
                             for i, (t, idx) in enumerate(zip(self.tag_var.get().split(","), self.index_var.get().split(","))):
                                 dev_nm = ips[i] if i < len(ips) else f"Device {i+1}"
                                 cmd_str = cmds_for_skip[i] if i < len(cmds_for_skip) else "-"
-                                dev_lang = self.device_rows[i].get("var_lang").get() if i < len(self.device_rows) else "English"
+                                dev_lang = ",".join(self._get_device_langs(self.device_rows[i])) if i < len(self.device_rows) else "English"
                                 
                                 style_str = "-"
                                 try:
@@ -3392,10 +3608,14 @@ class VerifyStringGUI:
                     if is_verify:
                         self._update_accumulated_time()
                         
-                        # --- FIX: LIVE GOOGLE DRIVE SYNC (LOUD VERSION) ---
+                       # --- FIX: ATOMIC GOOGLE DRIVE TRANSFER ---
                         try:
                             if self.save_log_var.get() and getattr(self, "_log_session_dir", None):
                                 import shutil
+                                import zipfile
+                                import time
+                                import os
+                                
                                 filename = self.excel_filename_var.get().strip() or "Batch_Summary_Report.xlsx"
                                 if not filename.lower().endswith(".xlsx"): filename += ".xlsx"
                                 raw_xl_p = Path(self._log_session_dir) / filename
@@ -3410,17 +3630,34 @@ class VerifyStringGUI:
                                 target_dir = drive_base / drive_folder_name / base_name
                                 target_dir.mkdir(parents=True, exist_ok=True)
                                 
+                                current_sync_time = time.time()
+                                last_sync_time = getattr(self, "_last_drive_sync_time", 0)
+                                
                                 if raw_xl_p.exists():
-                                    target_file = target_dir / f"{base_name}_LIVE_UPDATE.xlsx"
-                                    shutil.copy2(raw_xl_p, target_file)
-                                    self.q.put(f"[Live Sync] Successfully updated Drive: {target_file.name}\n", ("pass",))
+                                    if zipfile.is_zipfile(str(raw_xl_p)):
+                                        
+                                        # ONLY sync every 3 minutes so Google Drive Web has time to render
+                                        if current_sync_time - last_sync_time >= 180.0:
+                                            target_file = target_dir / f"{base_name}_LIVE_UPDATE.xlsx"
+                                            
+                                            # 1. Copy as a hidden .tmp file so Google Drive Desktop ignores it
+                                            temp_target = target_dir / f"{base_name}_UPLOADING.tmp"
+                                            shutil.copy2(raw_xl_p, temp_target)
+                                            
+                                            # 2. Instantly rename it to .xlsx. This forces Drive to upload the file WHOLE!
+                                            os.replace(temp_target, target_file)
+                                            
+                                            self._last_drive_sync_time = current_sync_time
+                                            self.q.put(f"[Live Sync] Safely uploaded to Drive (3-min throttle): {target_file.name}\n", ("pass",))
+                                    else:
+                                        self.q.put(f"[Live Sync Blocked] Local Excel is corrupted! Blocked upload to protect Google Drive.\n", ("error",))
                                 else:
                                     self.q.put(f"[Live Sync Error] Local Excel file not found at {raw_xl_p}!\n", ("error",))
                             else:
-                                self.q.put("[Live Sync Info] Skipped Drive Sync. Either 'Save log' is unchecked in the GUI, or no session directory exists.\n", ("warn",))
+                                self.q.put("[Live Sync Info] Skipped Drive Sync. Either 'Save log' is unchecked, or no session exists.\n", ("warn",))
                         except Exception as e:
                             self.q.put(f"[GUI ERROR] Live Sync to Google Drive Failed: {e}\n", ("error",))
-                        # --------------------------------------------------
+                        # ----------------------------------------------------------------------------------
 
                     if is_verify and getattr(self, "active_sockets", []):
                         self.q.put("[CMD] Verification complete. Sending close command and terminating sessions...\n")

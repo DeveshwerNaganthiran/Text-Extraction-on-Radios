@@ -3,12 +3,12 @@
     {
       "id": 1,
       "name": "ION1",
-      "language": "English, German, Italian, Japanese, Portuguese, Simplified Chinese, Spanish, Traditional Chinese"
+      "language": "Japanese"
     },
     {
       "id": 2,
       "name": "ION30",
-      "language": "Czech, French, Hungarian, Korean, Polish, Russian, Turkish"
+      "language": "Korean"
     }
   ]
 }
