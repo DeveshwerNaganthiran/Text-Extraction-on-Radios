@@ -208,26 +208,56 @@ def _tag_options_from_excel(excel_path: str) -> list[str]:
             pass
 
 def _build_index_to_tag_map(excel_path: str) -> dict:
-    if not excel_path:
-        return {}
+    if not excel_path: return {}
     try:
-        xls = pd.ExcelFile(excel_path, engine="openpyxl")
+        import hashlib
+        import tempfile
+        import pickle
+        import os
+        import pandas as pd
         
-        target = "english"
-        sheet_name = None
-        for s in xls.sheet_names:
-            if _norm_col(s) in ["english", "en", "global"]:
-                sheet_name = s
-                break
-            if target in _norm_col(s):
-                sheet_name = s
-                break
-                
-        if not sheet_name: 
-            return {}
+        if not os.path.exists(str(excel_path)): return {}
+        
+        # 1. Generate cache key based on the exact Excel file state
+        stat = os.stat(excel_path)
+        cache_key = hashlib.md5(f"{excel_path}_{stat.st_mtime}_{stat.st_size}".encode()).hexdigest()
+        cache_dir = Path(tempfile.gettempdir()) / "walkie_excel_cache"
+        cache_dir.mkdir(exist_ok=True)
+        cache_file = cache_dir / f"{cache_key}.pkl"
+        
+        df = None
+        # 2. Instantly load from cache if available (eliminates the 30-second freeze!)
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'rb') as f:
+                    data = pickle.load(f)
+                    sheet_names = data.get("sheet_names", [])
+                    sheets = data.get("sheets", {})
+                    
+                    target = "english"
+                    sheet_name = None
+                    for s in sheet_names:
+                        if _norm_col(s) in ["english", "en", "global"]:
+                            sheet_name = s; break
+                        if target in _norm_col(s):
+                            sheet_name = s; break
+                    if sheet_name and sheet_name in sheets:
+                        df = sheets[sheet_name]
+            except Exception: pass
             
-        df = pd.read_excel(xls, sheet_name=sheet_name, engine="openpyxl")
-        
+        # 3. Fallback to raw Pandas read if cache is missing
+        if df is None:
+            xls = pd.ExcelFile(excel_path, engine="openpyxl")
+            target = "english"
+            sheet_name = None
+            for s in xls.sheet_names:
+                if _norm_col(s) in ["english", "en", "global"]:
+                    sheet_name = s; break
+                if target in _norm_col(s):
+                    sheet_name = s; break
+            if not sheet_name: return {}
+            df = pd.read_excel(xls, sheet_name=sheet_name, engine="openpyxl")
+            
         idx_col = next((c for c in df.columns if _norm_col(c) == "index"), None)
         
         preferred, fallback = [], []
@@ -237,33 +267,22 @@ def _build_index_to_tag_map(excel_path: str) -> dict:
             elif n == "tag" or "tag" in low: fallback.append(c)
         tag_col = preferred[0] if preferred else (fallback[0] if fallback else "")
         
-        if not idx_col or not tag_col: 
-            return {}
-            
+        if not idx_col or not tag_col: return {}
+        
         mapping = {}
         for _, row in df.iterrows():
             idx_val = row[idx_col]
             tag_val = row[tag_col]
-            
-            if pd.isna(idx_val) or pd.isna(tag_val): 
-                continue
-                
-            iv = str(idx_val).strip()
-            tv = str(tag_val).strip()
-            
-            if tv.lower() == 'nan' or not tv: 
-                continue
-                
+            if pd.isna(idx_val) or pd.isna(tag_val): continue
+            iv, tv = str(idx_val).strip(), str(tag_val).strip()
+            if tv.lower() == 'nan' or not tv: continue
             if iv.endswith(".0"): 
                 try: iv = str(int(float(iv)))
                 except Exception: pass
             if iv.isdigit(): 
                 try: iv = str(int(iv))
                 except Exception: pass
-                
-            if iv not in mapping:
-                mapping[iv] = tv
-            
+            if iv not in mapping: mapping[iv] = tv
         return mapping
     except Exception:
         return {}
@@ -595,7 +614,10 @@ class VerifyStringGUI:
         tk.Button(self.summary_top, text="Show All", command=lambda: self.filter_tree("ALL")).pack(side=tk.RIGHT, padx=2)
         tk.Button(self.summary_top, text="Show Fails", bg="#FFCCCB", command=lambda: self.filter_tree("FAIL")).pack(side=tk.RIGHT, padx=2)
         tk.Button(self.summary_top, text="Show Warns", bg="#FFF3E0", command=lambda: self.filter_tree("WARN")).pack(side=tk.RIGHT, padx=2)
+        
+        # --- HERE ARE BOTH YOUR BUTTONS SAFELY RESTORED ---
         tk.Button(self.summary_top, text="Show Passes", bg="#90EE90", command=lambda: self.filter_tree("PASS")).pack(side=tk.RIGHT, padx=2)
+        tk.Button(self.summary_top, text="Show Skips", bg="#EEEEEE", command=lambda: self.filter_tree("SKIP")).pack(side=tk.RIGHT, padx=2)
 
         tree_columns = ("device", "index", "tag", "expected", "actual", "verdict", "error")
         self.tree = ttk.Treeview(self.tab_summary, columns=tree_columns, show="headings", height=15)
@@ -847,7 +869,9 @@ class VerifyStringGUI:
                         time.sleep(1.5)
                         
                         input_field.set_focus()
-                        input_field.type_keys("^a{BACKSPACE}" + payload + "{ENTER}", set_foreground=True)
+                        # Escape special pywinauto modifier keys so they are typed literally
+                        safe_payload = "".join(["{" + c + "}" if c in "+^%~{}()" else c for c in payload])
+                        input_field.type_keys("^a{BACKSPACE}" + safe_payload + "{ENTER}", set_foreground=True)
                         self.q.put(f"[CommG] Sent {payload} to {ip}\n")
                 
                 except Exception as inner_e:
@@ -931,9 +955,6 @@ class VerifyStringGUI:
         except ValueError:
             port = "23"
 
-        if not hasattr(self, "active_putty_apps"):
-            self.active_putty_apps = {}
-
         putty_exe = None
         saved_putty = self._settings.get("putty_path", "")
         
@@ -960,6 +981,12 @@ class VerifyStringGUI:
                     self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
                     return
 
+        plink_exe = os.path.join(os.path.dirname(putty_exe), "plink.exe")
+        if not os.path.exists(plink_exe):
+            self.q.put("[PuTTY] ERROR: plink.exe not found! Please ensure it is in the PuTTY folder.\n")
+            self.q.put((_EVT_COMMG_DONE, "PAUSE", batch_items))
+            return
+
         for i, ip in enumerate(ips):
             if i < len(self.device_rows) and self.device_rows[i].get("current_active_lang") == "SKIP_DEVICE":
                 continue
@@ -975,65 +1002,34 @@ class VerifyStringGUI:
                 continue
 
             try:
-                with self.type_lock:
-                    if ip not in self.active_putty_apps:
-                        self.q.put(f"[PuTTY] Launching Configuration GUI for {ip}...\n")
-                        
-                        app = Application(backend="uia").start(putty_exe)
-                        config_win = app.window(title="PuTTY Configuration")
-                        config_win.wait("ready", timeout=5)
-                        
-                        try:
-                            config_win.child_window(title="Session", control_type="TreeItem").click_input()
-                            time.sleep(0.2)
-                        except: pass
-
-                        try:
-                            host_edit = config_win.child_window(title_re="Host Name.*", control_type="Edit")
-                            host_edit.click_input()
-                            host_edit.type_keys("^a{BACKSPACE}" + ip, with_spaces=True)
-                        except:
-                            config_win.set_focus()
-                            config_win.type_keys("%n^a{BACKSPACE}" + ip)
-                            
-                        try:
-                            port_edit = config_win.child_window(title="Port", control_type="Edit")
-                            port_edit.click_input()
-                            port_edit.type_keys("^a{BACKSPACE}" + port)
-                        except:
-                            config_win.set_focus()
-                            config_win.type_keys("%p^a{BACKSPACE}" + port)
-                            
-                        try:
-                            config_win.set_focus()
-                            config_win.type_keys("{TAB}{TAB}rr")
-                            time.sleep(0.3)
-                        except Exception as e:
-                            self.q.put(f"[PuTTY] Keyboard shortcut failed: {e}\n")
-
-                        try:
-                            open_btn = config_win.child_window(title="Open", control_type="Button")
-                            open_btn.click_input()
-                        except:
-                            config_win.set_focus()
-                            config_win.type_keys("{ENTER}")
-                        
-                        time.sleep(1.5)
-                        term_win = app.window(title_re=r".*PuTTY.*")
-                        term_win.wait("ready", timeout=5)
-                        
-                        self.active_putty_apps[ip] = (app, term_win)
-
-                app, term_win = self.active_putty_apps[ip]
-                term_win.set_focus()
-                term_win.type_keys(payload + "{ENTER}", set_foreground=True)
-                self.q.put(f"[PuTTY] Sent {payload} to {ip}\n")
+                self.q.put(f"[PuTTY] Opening invisible background session to {ip}...\n")
+                
+                # 1. Start a "One-Shot" Plink connection
+                # -batch disables interactive prompts, -raw bypasses telnet negotiations
+                creationflags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+                proc = subprocess.Popen(
+                    [plink_exe, "-batch", "-raw", ip, "-P", port],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=creationflags
+                )
+                
+                # 2. Combine the CLOSE command and the PAYLOAD into one string
+                full_command = f"STR_TEST:CLOSE\r\n{payload}\r\n"
+                
+                # 3. .communicate() sends the data and INSTANTLY closes the pipe, guaranteeing a network flush
+                proc.communicate(input=full_command.encode('utf-8'), timeout=5)
+                
+                self.q.put(f"[PuTTY] Sent {payload} to {ip} (Invisible Mode)\n")
 
             except Exception as inner_e:
                 self.q.put(f"[PuTTY] ERROR on {ip}: {inner_e}. Skipping to next.\n")
+                try:
+                    proc.kill()
+                except Exception: pass
                 continue
 
-        # --- FASTER WAIT TIME ---
         self.q.put("[PuTTY] Waiting 2s for devices to process...\n")
         time.sleep(2.0) 
         self.q.put((_EVT_COMMG_DONE, None, None))
@@ -1324,12 +1320,37 @@ class VerifyStringGUI:
                                 else:
                                     for auto_try in range(5):
                                         android_lang_changer.change_language(device, target_lang)
-                                        time.sleep(3.0)
+                                        time.sleep(1.5)
+                                        
+                                        # --- FIX: HANDLE LANGUAGE CHANGE POPUPS ---
+                                        self.q.put(f"[UI Auto] Checking for confirmation popups...\n")
+                                        try:
+                                            # Attempt 1: Click the standard Android "OK" button (Language agnostic!)
+                                            if device(resourceId="android:id/button1").exists(timeout=1.5):
+                                                device(resourceId="android:id/button1").click()
+                                                self.q.put(f"[UI Auto] Clicked 'OK' on confirmation popup!\n")
+                                                time.sleep(1.0)
+                                            # Attempt 2: Fallback to text matching just in case
+                                            elif device(textMatches="(?i)^(ok|yes|accept|confirm|aceptar|oui)$").exists(timeout=1):
+                                                device(textMatches="(?i)^(ok|yes|accept|confirm|aceptar|oui)$").click()
+                                                self.q.put(f"[UI Auto] Clicked text-based confirmation popup!\n")
+                                                time.sleep(1.0)
+                                        except Exception: 
+                                            pass
+                                        
+                                        # Attempt 3: Blindly send the 'ENTER' key via ADB in case the button is auto-focused
+                                        try:
+                                            subprocess.run(["adb", "-s", target_serial, "shell", "input", "keyevent", "66"], creationflags=creationflags, timeout=2)
+                                        except Exception: 
+                                            pass
+                                        # ------------------------------------------
+                                        
+                                        time.sleep(2.0)
                                         if check_system_locale(target_lang):
                                             success = True
                                             self.q.put(f"[UI Auto] Success: Verified system locale changed to {target_lang}!\n")
                                             break
-                                            
+                                        
                                         self.q.put(f"[UI Auto] Retry {auto_try+1}/5: Drag finished, but system locale did not update. Retrying...\n")
                                         time.sleep(2.0)
                             else:
@@ -1458,14 +1479,24 @@ class VerifyStringGUI:
                 tags.append(tag)
                 indices.append("")
             else:
-                if ":" in cmd:
+                # If it's a standard Radio Command, split exactly 3 times so the text stays fully intact
+                if cmd.startswith("STR_TEST:"):
+                    parts = cmd.split(":", 3)
+                    if len(parts) == 4:
+                        extracted_idx = parts[3].strip()
+                    else:
+                        extracted_idx = cmd.split(":")[-1].strip()
+                elif ":" in cmd:
                     extracted_idx = cmd.split(":")[-1].strip()
                 else:
                     extracted_idx = cmd.strip()
                 
                 clean_idx = extracted_idx
                 if clean_idx.isdigit():
-                    clean_idx = str(int(clean_idx))
+                    try:
+                        clean_idx = str(int(clean_idx))
+                    except ValueError:
+                        pass # It's a Unicode symbol like ③, leave it alone!
                     
                 if not getattr(self, "_index_to_tag_cache", None):
                     try:
@@ -2350,12 +2381,15 @@ class VerifyStringGUI:
                     stderr=subprocess.STDOUT,
                     env=env,
                     bufsize=1,
+                    text=True,           # Tell Python this is a text stream
+                    encoding="utf-8",    # Handle the decoding automatically
+                    errors="replace",
                     creationflags=creationflags
                 )
                 
-                for line in iter(self.current_process.stdout.readline, b''):
-                    decoded = line.decode("utf-8", errors="replace")
-                    self.q.put(decoded)
+                # We can now read the strings directly without manual decoding!
+                for line in iter(self.current_process.stdout.readline, ''):
+                    self.q.put(line)
                     
             except Exception as e:
                 self.q.put(f"[GUI ERROR] Failed to run AI subprocess: {e}\n")
@@ -2462,6 +2496,13 @@ class VerifyStringGUI:
                 # --- NEW: Explicitly lock the vault door on the queue! ---
                 self._protect_resume_queue = True 
                 # ---------------------------------------------------------
+                
+                # --- FIX: Roll back the language index by 1 so we finish the CURRENT language! ---
+                if hasattr(self, "_current_lang_idx") and self._current_lang_idx > 0:
+                    self._current_lang_idx -= 1
+                else:
+                    self._current_lang_idx = 0
+                # ---------------------------------------------------------------------------------
                 
                 self._setup_logs_and_prefetch(is_resume_mode)
                 return
@@ -2936,11 +2977,12 @@ class VerifyStringGUI:
             self.active_sockets = []
 
         if getattr(self, "active_putty_apps", {}):
-            for ip, (app, term_win) in list(self.active_putty_apps.items()):
+            for ip, proc in list(self.active_putty_apps.items()):
                 try:
-                    term_win.type_keys("STR_TEST:CLOSE{ENTER}")
+                    proc.stdin.write(b"STR_TEST:CLOSE\r\n")
+                    proc.stdin.flush()
                     time.sleep(0.5)
-                    app.kill()
+                    proc.kill()
                 except Exception: pass
             self.active_putty_apps = {}
 
@@ -3339,7 +3381,6 @@ class VerifyStringGUI:
 
             df_merged = pd.concat(all_dfs, ignore_index=True).dropna(how='all')
             df_merged['Verdict'] = df_merged['Verdict'].astype(str).str.strip().str.upper()
-            df_merged = df_merged[df_merged['Verdict'] != 'SKIP']
             
             def get_type(error_msg):
                 msg = str(error_msg).lower()
@@ -3582,7 +3623,17 @@ class VerifyStringGUI:
                                         verdict_cell.font = Font(color="333333", bold=True)
                                         ws.row_dimensions[row_idx].height = 80
                                             
-                                        wb.save(xl_p)
+                                        temp_xl_p = str(xl_p) + ".tmp"
+                                        wb.save(temp_xl_p)
+                                        import shutil, os
+                                        
+                                        # Safely stream the saved data into the final file
+                                        shutil.copyfile(temp_xl_p, str(xl_p))
+                                        try:
+                                            os.remove(temp_xl_p)
+                                        except Exception:
+                                            pass
+                                        
                                     except Exception:
                                         pass
 
@@ -3613,7 +3664,6 @@ class VerifyStringGUI:
                             if self.save_log_var.get() and getattr(self, "_log_session_dir", None):
                                 import shutil
                                 import zipfile
-                                import time
                                 import os
                                 
                                 filename = self.excel_filename_var.get().strip() or "Batch_Summary_Report.xlsx"
@@ -3640,12 +3690,9 @@ class VerifyStringGUI:
                                         if current_sync_time - last_sync_time >= 180.0:
                                             target_file = target_dir / f"{base_name}_LIVE_UPDATE.xlsx"
                                             
-                                            # 1. Copy as a hidden .tmp file so Google Drive Desktop ignores it
-                                            temp_target = target_dir / f"{base_name}_UPLOADING.tmp"
-                                            shutil.copy2(raw_xl_p, temp_target)
-                                            
-                                            # 2. Instantly rename it to .xlsx. This forces Drive to upload the file WHOLE!
-                                            os.replace(temp_target, target_file)
+                                            # Overwrite the data directly. This prevents Google Drive from breaking the file ID!
+                                            import shutil
+                                            shutil.copyfile(str(raw_xl_p), str(target_file))
                                             
                                             self._last_drive_sync_time = current_sync_time
                                             self.q.put(f"[Live Sync] Safely uploaded to Drive (3-min throttle): {target_file.name}\n", ("pass",))

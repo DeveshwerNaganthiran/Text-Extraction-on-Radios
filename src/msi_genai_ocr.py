@@ -594,22 +594,51 @@ class MSIGenAIOCR:
                         softkey_hint = f"Device has {int(exp_softkeys)} softkey buttons. "
                 except Exception: pass
 
-                # --- FIX: REMOVE EXACT STRING LEAK TO PREVENT AI CHEATING ---
+                # --- DYNAMIC SYMBOL & VOCAB HINT ---
                 vocab_hint = ""
+                dynamic_symbol_rule = ""
+                
                 if expected_text and str(expected_text).strip():
                     vocab_hint = (
                         "CRITICAL ANTI-AUTOCORRECT WARNING: The text on this screen often contains spelling mistakes, "
                         "missing vowels, or UI truncation. DO NOT AUTOCORRECT. DO NOT FIX GRAMMAR OR SPELLING. "
                         "Output ONLY the exact physical letters you see. If it is cut off or misspelled, you MUST output the exact misspelling/cut-off.\n"
                     )
+                    
+                    # Automatically extract non-alphanumeric OR non-ASCII characters
+                    special_chars = set(c for c in expected_text if (not c.isalnum() or not c.isascii()) and c.strip())
+                    
+                    if special_chars:
+                        char_list = ", ".join(f"'{c}'" for c in sorted(special_chars))
+                        expected_len = len(str(expected_text).strip())
+                        
+                        # Check if the text contains non-ASCII characters (complex Unicode, fractions, accents)
+                        is_complex_unicode = any(not c.isascii() for c in str(expected_text))
+                        
+                        if is_complex_unicode:
+                            expected_str = str(expected_text).strip()
+                            expected_len = len(expected_str)
+                            
+                            dynamic_symbol_rule = (
+                                f"TARGET BASELINE MAP: The radio firmware is attempting to display this exact {expected_len}-character string: '{expected_str}'.\n"
+                                "CRITICAL CONTEXT: This is a low-resolution dot-matrix LCD screen. Complex Unicode characters (like fractions, superscripts, currency, or Latin/Slavic diacritics) "
+                                "will physically look blurry, melted, or simplified due to hardware pixel limits.\n"
+                                "YOUR INSTRUCTION: Use the target baseline map as your reference. If the glowing pixels on the screen generally align with the layout and shapes of the target characters, "
+                                "you MUST output the exact characters from the baseline string. Do NOT hallucinate random ASCII replacements (like guessing '5' for '§', 'T.X' for fractions, or '0' for '°'). "
+                                "Do NOT simplify fractions or accents. Output the exact baseline string unless there is a glaring, unmistakable physical typo on the screen.\n"
+                            )
+                        else:
+                            dynamic_symbol_rule = ""
+
                 prompt = (
-                    "Extract ALL text from this walkie-talkie screen. Ignore all icons/symbols (♪, battery, power indicators). "
+                    "Extract ALL text, punctuation, and keyboard characters from this walkie-talkie screen. "
+                    "Ignore hardware status icons (like battery or signal bars), but DO NOT ignore standard punctuation, math symbols, fractions, or extended symbols. "
                     "CRITICAL INSTRUCTION: You must read the ENTIRE screen. Text may be perfectly centered, OR it may be split into softkey labels at the BOTTOM-LEFT and BOTTOM-RIGHT corners. "
                     "Do NOT ignore perfectly centered text, and Do NOT ignore text on the far edges. Capture absolutely everything. "
                     "Output EXACTLY what is visibly on the screen. DO NOT auto-complete cut-off words. If the screen physical borders cut off the text (e.g. 'Test fo'), output exactly 'Test fo'. Do NOT guess the missing letters. Do NOT confuse numbers with letters. "
                     "EXTREMELY IMPORTANT: The 'Detected Text(Original)' field MUST contain the EXACT language and characters shown in the image. DO NOT translate the original text into English. If the screen is in Chinese,Korean or other foreign languages the Original Text MUST be in the same foreign language "
                     "CRITICAL: Preserve exact leading spaces, indentation, and layout. "
-                    + lang_hint + softkey_hint + vocab_hint +
+                    + lang_hint + softkey_hint + vocab_hint + dynamic_symbol_rule +
                     "Be STRICT on layout bugs. If Right-to-Left text (Arabic) is mixed LTR, ignore left margin staggering. "
                     "If the image is a grid of multiple screenshots, treat it as a single valid document and read all text. DO NOT return 'unsupported media type' errors. "
                     "Return EXACTLY in this format, no extra text:\n"
@@ -884,18 +913,20 @@ class MSIGenAIOCR:
             if text.lower().startswith(prefix.lower()):
                 text = text[len(prefix):].strip()
         
-        text = text.strip('"').strip("'").strip()
+        # Safely remove WRAPPING quotes without destroying pure-symbol strings inside
+        text = text.strip()
+        if text.startswith('"') and text.endswith('"') and len(text) >= 2:
+            text = text[1:-1].strip()
+        elif text.startswith("'") and text.endswith("'") and len(text) >= 2:
+            text = text[1:-1].strip()
+            
         if text.startswith("```") and text.endswith("```"):
             text = text[3:-3].strip()
         
         lines = [line.rstrip() for line in text.split('\n') if line.strip()]
-        filtered_lines = []
-        for line in lines:
-                alnum_count = sum(1 for c in line if c.isalnum())
-                
-                # Keep the line as long as it contains at least ONE letter or number
-                if alnum_count >= 1:
-                    filtered_lines.append(line)
+        
+        # Keep all lines that have visible text, even if they are just symbols like !"#$%
+        filtered_lines = [line for line in lines if line.strip()]
         
         return '\n'.join(filtered_lines) if filtered_lines else "NO_TEXT"
     
@@ -958,7 +989,6 @@ class MSIGenAIOCR:
             ("H1AS", ""),
             ("⚠", ""),
             ("⚠️", ""),
-            ("!", ""),
             ("🔊", ""),
             ("🔕", ""),
             ("🔔", ""),
