@@ -1035,6 +1035,29 @@ class VerifyStringGUI:
         self.q.put((_EVT_COMMG_DONE, None, None))
 
     def _integration_send_command_thread(self, payloads, batch_items):
+        import subprocess
+        
+        # 1. Clear notifications on all active devices before sending the payload
+        creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if os.name == 'nt' else 0
+        ips = [ip.strip() for ip in self.ip_listbox.get(0, tk.END) if ip.strip()]
+        
+        for i, ip in enumerate(ips):
+            if i < len(self.device_rows) and self.device_rows[i].get("current_active_lang") == "SKIP_DEVICE":
+                continue
+            try:
+                # Grab the USB Serial Number that was fetched during the Pre-Check phase
+                serial = getattr(self, "_serial_cache", {}).get(ip)
+                
+                if serial:
+                    self.q.put(f"[ADB] Clearing notifications on {ip} (Serial: {serial})...\n")
+                    # Send command directly over USB using the serial number. No IP connection needed!
+                    subprocess.run(["adb", "-s", serial, "shell", "cmd", "notification", "dismiss-all"], creationflags=creationflags, capture_output=True, timeout=2)
+                else:
+                    self.q.put(f"[ADB Warning] Cannot clear notifications for {ip}: USB Serial not found.\n")
+            except Exception as e:
+                self.q.put(f"[ADB Warning] Failed to clear notifications on {ip}: {e}\n")
+
+        # 2. Dispatch the actual radio render command (CommG / CMD / PuTTY)
         integration_type = self.integration_type_var.get()
         if integration_type == "CMD":
             self._cmd_telnet_thread(payloads, batch_items)
@@ -3027,40 +3050,13 @@ class VerifyStringGUI:
             import time
             import re
             
-            self._append(f"\n[GUI] Starting final Excel cleanup, duplicate removal, and splitting by Language...\n", ("warn",))
+            self._append(f"\n[GUI] Starting final Excel cleanup and splitting by Parts...\n", ("warn",))
             
             wb_in = load_workbook(raw_xl_p)
             ws_in = wb_in.active
             
-            image_dict = {}
-            for img in ws_in._images:
-                orig_row = None
-                try:
-                    if hasattr(img, 'anchor'):
-                        if hasattr(img.anchor, '_from'): orig_row = img.anchor._from.row + 1
-                        elif hasattr(img.anchor, 'row'): orig_row = img.anchor.row + 1
-                        elif isinstance(img.anchor, str):
-                            m = re.search(r'\d+', img.anchor)
-                            if m: orig_row = int(m.group())
-                except Exception: pass
-                
-                if orig_row is not None:
-                    img_bytes = None
-                    try:
-                        if hasattr(img, 'ref') and hasattr(img.ref, 'read'):
-                            img.ref.seek(0); img_bytes = img.ref.read()
-                        elif hasattr(img, '_data'):
-                            data = img._data() if callable(img._data) else img._data
-                            if hasattr(data, 'read'): data.seek(0); img_bytes = data.read()
-                            elif isinstance(data, bytes): img_bytes = data
-                    except Exception: pass
-                    if img_bytes:
-                        image_dict[orig_row] = {"bytes": img_bytes, "width": img.width, "height": img.height}
-                        
-            max_row = ws_in.max_row
-            last_row_val = str(ws_in.cell(row=max_row, column=1).value or "").strip()
-            total_data_rows = max_row - 1
-            if "SUMMARY" in last_row_val.upper():
+            total_data_rows = ws_in.max_row - 1
+            if "SUMMARY" in str(ws_in.cell(row=ws_in.max_row, column=1).value or "").upper():
                 total_data_rows -= 1
                 
             headers = [str(ws_in.cell(row=1, column=c).value).strip().lower() for c in range(1, ws_in.max_column + 1)]
@@ -3089,30 +3085,18 @@ class VerifyStringGUI:
                     rows_with_no_index.append(r)
                     
             rows_to_keep_globally = sorted(list(latest_row_map.values()) + rows_with_no_index)
-            removed_count = total_data_rows - len(rows_to_keep_globally)
-            self._append(f"[GUI] Removed {removed_count} crashed/duplicate rows.\n")
             
-            # --- EXACT TIME CALCULATION ---
             parsed_dates = []
             for ts in timestamps:
                 try: parsed_dates.append(datetime.strptime(ts, "%Y-%m-%d %H:%M:%S"))
                 except Exception: pass
-            
             parsed_dates.sort()
             true_avg_sec = 36.75 
             if len(parsed_dates) > 1:
                 diffs = [(parsed_dates[i] - parsed_dates[i-1]).total_seconds() for i in range(1, len(parsed_dates))]
-                normal_diffs = [d for d in diffs if d <= 90.0]
+                normal_diffs = [d for d in diffs if d <= 90.0] 
                 if normal_diffs: true_avg_sec = sum(normal_diffs) / len(normal_diffs)
-
-            # FIX: Define total_elapsed here so the Global Summary knows the total time!
             total_elapsed = true_avg_sec * len(rows_to_keep_globally)
-
-            # --- SMART BIN PACKING (Group by Language, Max 80MB) ---
-            lang_groups = {}
-            for r in rows_to_keep_globally:
-                lang_val = str(ws_in.cell(row=r, column=lang_col).value or "Unknown").strip()
-                lang_groups.setdefault(lang_val, []).append(r)
 
             file_size_mb = raw_xl_p.stat().st_size / (1024 * 1024)
             max_mb = 80.0
@@ -3126,36 +3110,41 @@ class VerifyStringGUI:
             current_part_rows = []
             current_part_mb = 0.0
             
-            # Pack languages into files without splitting them
-            for lang, rows in lang_groups.items():
-                lang_mb = len(rows) * est_mb_per_row
-                
-                # If adding this language exceeds 80MB AND the current part isn't empty, start a new part!
-                if current_part_mb + lang_mb > max_mb and len(current_part_rows) > 0:
+            for r in rows_to_keep_globally:
+                row_mb = est_mb_per_row
+                if current_part_mb + row_mb > max_mb and len(current_part_rows) > 0:
                     part_files_rows.append(current_part_rows)
-                    current_part_rows = list(rows)
-                    current_part_mb = lang_mb
+                    current_part_rows = [r]
+                    current_part_mb = row_mb
                 else:
-                    current_part_rows.extend(rows)
-                    current_part_mb += lang_mb
+                    current_part_rows.append(r)
+                    current_part_mb += row_mb
                     
             if current_part_rows:
                 part_files_rows.append(current_part_rows)
                 
             num_files_needed = len(part_files_rows)
-            part_files_generated = []
-            
             global_p = global_f = global_w = global_s = 0
+            part_files_generated = []
             
             for i, chunk_kept_orig_rows in enumerate(part_files_rows):
                 chunk_kept_set = set(chunk_kept_orig_rows)
                 
                 wb_part = load_workbook(raw_xl_p)
                 ws_part = wb_part.active
-                ws_part._images = []
                 
                 if "SUMMARY" in str(ws_part.cell(row=ws_part.max_row, column=1).value or "").upper():
                     ws_part.delete_rows(ws_part.max_row)
+                
+                saved_images = []
+                for idx, img in enumerate(ws_part._images):
+                    orig_row = idx + 2 
+                    if orig_row in chunk_kept_set:
+                        saved_images.append(img)
+                        
+                ws_part._images = []
+                if hasattr(ws_part, '_drawing'):
+                    ws_part._drawing = None
                     
                 rows_to_delete = sorted([r for r in range(2, total_data_rows + 2) if r not in chunk_kept_set])
                 if rows_to_delete:
@@ -3172,23 +3161,26 @@ class VerifyStringGUI:
                         ws_part.delete_rows(start_b, end_b - start_b + 1)
                         
                 current_row = 2
-                for orig_r in chunk_kept_orig_rows:
-                    if orig_r in image_dict:
-                        img_info = image_dict[orig_r]
-                        try:
-                            new_img = OpenpyxlImage(io.BytesIO(img_info["bytes"]))
-                            new_img.width = img_info["width"]
-                            new_img.height = img_info["height"]
-                            
-                            col_idx = 13
-                            r_idx = current_row - 1
-                            marker_from = AnchorMarker(col=col_idx, colOff=0, row=r_idx, rowOff=0)
-                            marker_to = AnchorMarker(col=col_idx + 1, colOff=0, row=r_idx + 1, rowOff=0)
-                            new_img.anchor = TwoCellAnchor(editAs='twoCell', _from=marker_from, to=marker_to)
-                            ws_part.add_image(new_img)
-                        except Exception: pass
-                    current_row += 1
+                for img in saved_images:
+                    col_idx = 13 
+                    r_idx = current_row - 1
                     
+                    # --- DYNAMIC IMAGE RESIZING ---
+                    # Automatically fix the row height so it fits the image perfectly!
+                    # This prevents the stretching and squishing you saw.
+                    if hasattr(img, 'height') and img.height:
+                        ws_part.row_dimensions[current_row].height = int(img.height * 0.75)
+                    else:
+                        ws_part.row_dimensions[current_row].height = 80
+                    # ------------------------------
+
+                    marker_from = AnchorMarker(col=col_idx, colOff=0, row=r_idx, rowOff=0)
+                    marker_to = AnchorMarker(col=col_idx + 1, colOff=0, row=r_idx + 1, rowOff=0)
+                    img.anchor = TwoCellAnchor(editAs='twoCell', _from=marker_from, to=marker_to)
+                    
+                    ws_part.add_image(img)
+                    current_row += 1
+                
                 p = f = w = s = 0
                 for r in range(2, ws_part.max_row + 1):
                     verdict = str(ws_part.cell(row=r, column=12).value or "").strip().upper()
@@ -3207,15 +3199,15 @@ class VerifyStringGUI:
                 
                 summary_fill = PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid")
                 summary_font = Font(bold=True)
-                
                 part_sum_title = f"SUMMARY (Part {i+1})" if num_files_needed > 1 else "SUMMARY"
+                
                 ws_part.append([part_sum_title, f"Time: {time_str}", f"PASS: {p}", f"FAIL: {f}", f"WARN: {w}", f"SKIP: {s}"])
                 r_idx = ws_part.max_row
                 ws_part.row_dimensions[r_idx].height = 25
                 for col_num in range(1, 15):
                     cell = ws_part.cell(row=r_idx, column=col_num)
                     cell.fill = summary_fill; cell.font = summary_font; cell.alignment = Alignment(horizontal="center", vertical="center")
-                
+                        
                 if i == num_files_needed - 1:
                     m_g, sec_g = divmod(total_elapsed, 60)
                     h_g, m_g = divmod(m_g, 60)
@@ -3228,13 +3220,235 @@ class VerifyStringGUI:
                     for col_num in range(1, 15):
                         cell = ws_part.cell(row=r_idx, column=col_num)
                         cell.fill = global_fill; cell.font = summary_font; cell.alignment = Alignment(horizontal="center", vertical="center")
-                        
+                
                 out_name = f"{base_name}_part_{i+1}.xlsx" if num_files_needed > 1 else f"{base_name}_cleaned.xlsx"
                 out_path = final_folder / out_name
                 wb_part.save(out_path)
                 wb_part.close()
                 part_files_generated.append(out_path)
                 self._append(f"[GUI] Saved cleanly split part: {out_name}\n", ("pass",))
+
+            # ==============================================================================
+            # EXECUTIVE ANALYTICS GENERATION
+            # ==============================================================================
+            self._append(f"[GUI] Generating Executive Analytics Dashboard...\n", ("warn",))
+            
+            def categorize_root_cause(error_msg):
+                msg = str(error_msg).lower()
+                if msg == 'nan' or msg.strip() == '': return 'Passed (No Error)'
+                if 'truncat' in msg: return 'Screen Truncation (Text too long)'
+                if 'roll' in msg: return 'Rolling Text Sync Issue'
+                if 'space' in msg: return 'Spacing or Punctuation Mismatch'
+                if 'extra' in msg: return 'Extra Words/Prefixes on Screen'
+                if 'typo' in msg or 'misread' in msg or 'incorrect character' in msg: return 'OCR Character Confusion / Font Issue'
+                if 'completely different' in msg: return 'Completely Wrong Text / Translation Bug'
+                if 'missing' in msg: return 'Missing Words/Letters'
+                return 'Other Mismatch'
+
+            def calculate_stats_analytics(df, group_col):
+                if df.empty: return pd.DataFrame(columns=[group_col, 'Total', 'Passes', 'Fails', 'Warnings', 'Pass_Pct', 'Fail_Pct', 'Warn_Pct'])
+                stats = df.groupby(group_col)['Verdict'].value_counts().unstack(fill_value=0)
+                for col in ['PASS', 'FAIL', 'WARN']:
+                    if col not in stats.columns: stats[col] = 0
+                stats['Total'] = stats['PASS'] + stats['FAIL'] + stats['WARN']
+                stats['Passes'] = stats['PASS']
+                stats['Fails'] = stats['FAIL']
+                stats['Warnings'] = stats['WARN']
+                stats['Pass_Pct'] = (stats['Passes'] / stats['Total']) * 100
+                stats['Fail_Pct'] = (stats['Fails'] / stats['Total']) * 100
+                stats['Warn_Pct'] = (stats['Warnings'] / stats['Total']) * 100
+                stats = stats.reset_index().sort_values(by='Total', ascending=False)
+                if not stats.empty:
+                    grand_total = pd.DataFrame({group_col: ['GRAND TOTAL'], 'Total': [stats['Total'].sum()], 'Passes': [stats['Passes'].sum()], 'Fails': [stats['Fails'].sum()], 'Warnings': [stats['Warnings'].sum()]})
+                    t_tot = grand_total['Total'].iloc[0]
+                    grand_total['Pass_Pct'] = (grand_total['Passes'] / t_tot * 100) if t_tot > 0 else 0
+                    grand_total['Fail_Pct'] = (grand_total['Fails'] / t_tot * 100) if t_tot > 0 else 0
+                    grand_total['Warn_Pct'] = (grand_total['Warnings'] / t_tot * 100) if t_tot > 0 else 0
+                    stats = pd.concat([stats, grand_total], ignore_index=True)
+                return stats[[group_col, 'Total', 'Passes', 'Fails', 'Warnings', 'Pass_Pct', 'Fail_Pct', 'Warn_Pct']]
+
+            def autofit_columns_analytics(writer, df, sheet_name):
+                worksheet = writer.sheets[sheet_name]
+                for idx, col in enumerate(df.columns):
+                    series = df[col]
+                    max_len = min(max((series.astype(str).map(len).max(), len(str(col)))) + 2, 50)
+                    worksheet.column_dimensions[get_column_letter(idx + 1)].width = max_len
+
+            def inject_dashboard_analytics(writer, df_raw, sheet_name, title):
+                if df_raw.empty: return
+                verdicts = df_raw['Verdict'].astype(str).str.strip().str.upper()
+                passes = (verdicts == 'PASS').sum()
+                fails = (verdicts == 'FAIL').sum()
+                warns = (verdicts == 'WARN').sum()
+                total_valid = passes + fails + warns
+                if total_valid == 0: return
+                ws = writer.sheets[sheet_name]
+                ws.cell(row=1, column=10, value="Verdict").font = Font(bold=True)
+                ws.cell(row=1, column=11, value="Count").font = Font(bold=True)
+                ws.cell(row=2, column=10, value="PASS")
+                ws.cell(row=2, column=11, value=passes)
+                ws.cell(row=3, column=10, value="FAIL")
+                ws.cell(row=3, column=11, value=fails)
+                ws.cell(row=4, column=10, value="WARN")
+                ws.cell(row=4, column=11, value=warns)
+                manual_review_count = fails + warns
+                manual_review_pct = (manual_review_count / total_valid) * 100 if total_valid > 0 else 0
+                ws.cell(row=6, column=10, value="QA MANUAL REVIEW REQUIRED:").font = Font(bold=True, color="9C0006")
+                ws.cell(row=6, column=11, value=f"{manual_review_count} items ({manual_review_pct:.1f}%)").font = Font(bold=True, color="9C0006")
+                pie = PieChart()
+                labels = Reference(ws, min_col=10, min_row=2, max_row=4)
+                data = Reference(ws, min_col=11, min_row=1, max_row=4)
+                pie.add_data(data, titles_from_data=True)
+                pie.set_categories(labels)
+                pie.title = f"{title} Verdict Breakdown"
+                ws.add_chart(pie, "M1")
+                max_row = ws.max_row
+                for col in range(1, 9):
+                    cell = ws.cell(row=max_row, column=col)
+                    cell.font = Font(bold=True); cell.fill = PatternFill(start_color="D9EAD3", end_color="D9EAD3", fill_type="solid")
+
+            def inject_bar_chart_analytics(writer, df_reasons, sheet_name):
+                if df_reasons.empty: return
+                ws = writer.sheets[sheet_name]
+                bar = BarChart()
+                bar.type = "col"
+                bar.style = 10
+                bar.title = "Root Cause Failure Analysis"
+                bar.y_axis.title = 'Number of Errors'
+                bar.x_axis.title = 'Error Category'
+                data = Reference(ws, min_col=2, min_row=1, max_row=len(df_reasons)+1)
+                cats = Reference(ws, min_col=1, min_row=2, max_row=len(df_reasons)+1)
+                bar.add_data(data, titles_from_data=True)
+                bar.set_categories(cats)
+                bar.width = 20; bar.height = 10
+                ws.add_chart(bar, "D2")
+
+            def generate_historical_snapshot_analytics(df_merged, normal_lang_stats):
+                verdicts = df_merged['Verdict'].astype(str).str.strip().str.upper()
+                passes = (verdicts == 'PASS').sum()
+                fails = (verdicts == 'FAIL').sum()
+                warns = (verdicts == 'WARN').sum()
+                total = passes + fails + warns
+                total_langs = df_merged['Language'].nunique() if 'Language' in df_merged.columns else 0
+                pass_pct = round((passes / total) * 100, 1) if total > 0 else 0
+                fail_pct = round((fails / total) * 100, 1) if total > 0 else 0
+                
+                actual_mins = 0.0
+                avg_sec_per_string = 0.0
+                if 'Timestamp' in df_merged.columns:
+                    dates = pd.to_datetime(df_merged['Timestamp'], errors='coerce').dropna().sort_values()
+                    if not dates.empty and len(dates) > 1:
+                        diffs = dates.diff().dt.total_seconds().dropna()
+                        diffs = diffs.clip(upper=90.0)
+                        total_active_seconds = diffs.sum() + 30.0 
+                        actual_mins = round(total_active_seconds / 60.0, 1)
+                        if total > 0: avg_sec_per_string = round(total_active_seconds / total, 1)
+                
+                worst_lang = "None"
+                if not normal_lang_stats.empty and 'Language' in normal_lang_stats.columns:
+                    lang_only = normal_lang_stats[normal_lang_stats['Language'] != 'GRAND TOTAL']
+                    if not lang_only.empty:
+                        worst_lang_row = lang_only.sort_values(by='Fail_Pct', ascending=False).iloc[0]
+                        worst_lang = f"{worst_lang_row['Language']} ({worst_lang_row['Fail_Pct']:.1f}% Fail)"
+                
+                snapshot = pd.DataFrame({
+                    "Run_Date": [time.strftime("%Y-%m-%d %H:%M")],
+                    "Total_Languages_Tested": [total_langs],
+                    "Total_Strings_Verified": [total],
+                    "Overall_Pass_%": [pass_pct],
+                    "Overall_Fail_%": [fail_pct],
+                    "Worst_Language": [worst_lang],
+                    "Avg_Time_Per_String_Sec": [avg_sec_per_string],
+                    "Actual_Total_Time_Mins": [actual_mins]
+                })
+                return snapshot
+
+            all_dfs = []
+            for fp in part_files_generated:
+                df_part = pd.read_excel(str(fp), engine='openpyxl')
+                if 'ROI Image' in df_part.columns: df_part = df_part.drop(columns=['ROI Image'])
+                df_part = df_part[~df_part.iloc[:, 0].astype(str).str.contains("SUMMARY", na=False, case=False)]
+                df_part = df_part[df_part.iloc[:, 0] != "Timestamp"]
+                all_dfs.append(df_part)
+
+            df_merged = pd.concat(all_dfs, ignore_index=True).dropna(how='all')
+            df_merged['Verdict'] = df_merged['Verdict'].astype(str).str.strip().str.upper()
+            
+            def get_type(error_msg):
+                msg = str(error_msg).lower()
+                if "rolling" in msg: return "Rolling"
+                elif "truncated" in msg: return "Truncation"
+                else: return "Normal"
+                    
+            df_merged['Type'] = df_merged['Error Message'].apply(get_type) if 'Error Message' in df_merged.columns else "Normal"
+            df_merged['Failure_Root_Cause'] = df_merged['Error Message'].apply(categorize_root_cause)
+            
+            df_errors_only = df_merged[df_merged['Verdict'].isin(['FAIL', 'WARN'])]
+            root_cause_stats = df_errors_only['Failure_Root_Cause'].value_counts().reset_index()
+            root_cause_stats.columns = ['Error Category', 'Number of Occurrences']
+            
+            df_normal = df_merged[df_merged['Type'] == 'Normal']
+            df_rolling = df_merged[df_merged['Type'] == 'Rolling']
+            df_trunc = df_merged[df_merged['Type'] == 'Truncation']
+            
+            all_lang_stats = calculate_stats_analytics(df_merged, 'Language')
+            normal_lang_stats = calculate_stats_analytics(df_normal, 'Language')
+            device_stats = calculate_stats_analytics(df_merged, 'Device')
+            error_stats = calculate_stats_analytics(df_merged, 'Type')
+            
+            snapshot_df = generate_historical_snapshot_analytics(df_merged, normal_lang_stats)
+            
+            analytics_filename = f"{base_name}_Executive_Analytics.xlsx"
+            analytics_out_path = final_folder / analytics_filename
+            
+            with pd.ExcelWriter(str(analytics_out_path), engine='openpyxl') as writer:
+                snapshot_df.to_excel(writer, sheet_name='Historical_Snapshot', index=False)
+                autofit_columns_analytics(writer, snapshot_df, 'Historical_Snapshot')
+                
+                all_lang_stats.to_excel(writer, sheet_name='Lang_Stats_All', index=False)
+                autofit_columns_analytics(writer, all_lang_stats, 'Lang_Stats_All')
+                inject_dashboard_analytics(writer, df_merged, 'Lang_Stats_All', "Overall Language")
+                
+                root_cause_stats.to_excel(writer, sheet_name='Error_Root_Cause_Analysis', index=False)
+                autofit_columns_analytics(writer, root_cause_stats, 'Error_Root_Cause_Analysis')
+                inject_bar_chart_analytics(writer, root_cause_stats, 'Error_Root_Cause_Analysis')
+                
+                device_stats.to_excel(writer, sheet_name='Device_Hardware_Stats', index=False)
+                autofit_columns_analytics(writer, device_stats, 'Device_Hardware_Stats')
+                inject_dashboard_analytics(writer, df_merged, 'Device_Hardware_Stats', "Device Hardware")
+                
+                error_stats.to_excel(writer, sheet_name='Error_Type_Breakdown', index=False)
+                autofit_columns_analytics(writer, error_stats, 'Error_Type_Breakdown')
+                
+                df_normal.to_excel(writer, sheet_name='Raw_Data_Normal', index=False)
+                autofit_columns_analytics(writer, df_normal, 'Raw_Data_Normal')
+                
+                if not df_rolling.empty:
+                    df_rolling.to_excel(writer, sheet_name='Raw_Data_Rolling', index=False)
+                    autofit_columns_analytics(writer, df_rolling, 'Raw_Data_Rolling')
+                    
+                if not df_trunc.empty:
+                    df_trunc.to_excel(writer, sheet_name='Raw_Data_Truncation', index=False)
+                    autofit_columns_analytics(writer, df_trunc, 'Raw_Data_Truncation')
+            
+            self._append(f"[GUI] Saved Executive Analytics Dashboard: {analytics_filename}\n", ("pass",))
+
+            # ==============================================================================
+            # GOOGLE DRIVE SYNC
+            # ==============================================================================
+            drive_folder_name = self.drive_folder_var.get().strip()
+            if drive_folder_name:
+                import shutil
+                target_dir = Path("G:/My Drive") / drive_folder_name / base_name
+                target_dir.mkdir(parents=True, exist_ok=True)
+                
+                for f in final_folder.glob("*.xlsx"):
+                    try: shutil.copy2(f, target_dir / f.name)
+                    except Exception: pass
+                self._append(f"[GUI] Synced final folder to Google Drive: {drive_folder_name}/{base_name}\n", ("pass",))
+                
+        except Exception as e:
+            self._append(f"\n[GUI ERROR] Failed to process final Excel: {e}\n", ("error",))
 
             # ==============================================================================
             # EXECUTIVE ANALYTICS GENERATION

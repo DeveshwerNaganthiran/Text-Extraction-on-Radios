@@ -2,13 +2,13 @@
   "devices": [
     {
       "id": 1,
-      "name": "ION1",
-      "language": "Japanese"
+      "name": "ION30",
+      "language": "German"
     },
     {
       "id": 2,
-      "name": "ION30",
-      "language": "Korean"
+      "name": "ION1",
+      "language": "SKIP_DEVICE"
     }
   ]
 }

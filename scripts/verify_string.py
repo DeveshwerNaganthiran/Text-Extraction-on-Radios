@@ -1118,12 +1118,13 @@ def main():
     # ===================================================================
     # FIX 1: CAMERA GLITCH BLIND-MAPPING PREVENTION
     # ===================================================================
-    active_expected_devices = [exp for exp in expected_list if exp.get("tag") != "SKIP_VERIFY" and exp.get("index") != "SKIP_VERIFY" and exp.get("language") != "SKIP_DEVICE"]
-    expected_count = len(active_expected_devices)
+    # The camera still physically sees skipped devices!
+    # So we compare YOLO's detected boxes against the TOTAL devices configured in the GUI.
+    expected_total_count = len(expected_list)
 
-    if len(rois) != expected_count:
+    if len(rois) != expected_total_count:
         print(f"\n[FATAL ERROR] Camera Glitch/Mapping Error!")
-        print(f"Expected to see {expected_count} active devices, but YOLO only detected {len(rois)} bounding boxes.")
+        print(f"Expected to see {expected_total_count} physical devices, but YOLO detected {len(rois)} bounding boxes.")
         print("Aborting to prevent cross-mapping languages. Logging as SKIP for all active devices.\n")
         
         for idx, exp_dict in enumerate(expected_list):
@@ -1144,7 +1145,7 @@ def main():
                 "actual": "-",
                 "confidence": "-",
                 "verdict": "SKIP",
-                "error": f"Camera Glitch: AI saw {len(rois)} radios instead of {expected_count}"
+                "error": f"Camera Glitch: AI saw {len(rois)} radios instead of {expected_total_count}"
             }
             print(f"[GUI_RESULT]{json.dumps(payload)}")
             
@@ -1166,15 +1167,34 @@ def main():
         
         exp_dict = expected_list[mapped_idx] if mapped_idx < len(expected_list) else expected_list[-1]
         
+        # Check if the device is supposed to be skipped BEFORE printing the banner
+        is_skipped = (exp_dict.get("tag") == "SKIP_VERIFY" or 
+                      exp_dict.get("index") == "SKIP_VERIFY" or 
+                      exp_dict.get("language") == "SKIP_DEVICE")
+
         print("\n" + "=" * 70)
-        print(f"Device: {dev_name} (Extracting text...)")
+        if is_skipped:
+            print(f"Device: {dev_name} (SKIPPED)")
+        else:
+            print(f"Device: {dev_name} (Extracting text...)")
         print("=" * 70)
         
-        if exp_dict.get("tag") == "SKIP_VERIFY" or exp_dict.get("index") == "SKIP_VERIFY" or exp_dict.get("language") == "SKIP_DEVICE":
+        if is_skipped:
             summary_counts["SKIP"] += 1
             print("Skipping verification for this device as requested via Automation Command.")
-            payload = {"device": dev_name, "command": exp_dict.get('command', ''), "display_style": exp_dict.get('display_style', ''), "index": "SKIP", "tag": "SKIP", "expected": "-", "actual": "-", "confidence": "-", "verdict": "SKIP", "error": ""}
-            print(f"[GUI_RESULT] {json.dumps(payload)}")
+            payload = {
+                "device": dev_name, 
+                "command": exp_dict.get('command', ''), 
+                "display_style": exp_dict.get('display_style', ''), 
+                "index": "SKIP", 
+                "tag": "SKIP", 
+                "expected": "-", 
+                "actual": "-", 
+                "confidence": "-", 
+                "verdict": "SKIP", 
+                "error": ""
+            }
+            print(f"[GUI_RESULT]{json.dumps(payload)}")
             continue
 
         if exp_dict.get('command'): print(f"Command: {exp_dict.get('command')}")
@@ -1873,7 +1893,7 @@ def main():
                     confidence_pct,
                     verdict,
                     error_msg_display,
-                    "" 
+                    roi_saved_path  # <--- CHANGE THIS FROM ""
                 ])
                 
                 row_idx = ws.max_row
